@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"net/http"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -95,12 +94,11 @@ type Runtime struct {
 	node                  Node
 	watcher               Watcher
 	cancel                context.CancelFunc
+	runContext            context.Context
 	watchDone             sync.WaitGroup
-	serveDone             sync.WaitGroup
 	emit                  func(Event)
 	authenticationPending bool
-	httpServer            *http.Server
-	listener              net.Listener
+	proxy                 *proxyServer
 }
 
 func NewRuntime(stateRoot string, factory NodeFactory) *Runtime {
@@ -133,6 +131,7 @@ func (r *Runtime) Start(ctx context.Context, config Config, emit func(Event)) er
 	r.node = node
 	r.watcher = watcher
 	r.cancel = cancel
+	r.runContext = watchContext
 	r.emit = emit
 	if err := r.emitStatusLocked(ctx); err != nil {
 		r.closeLocked()
@@ -161,36 +160,33 @@ func (r *Runtime) Close() error {
 	err := r.closeLocked()
 	r.mu.Unlock()
 	r.watchDone.Wait()
-	r.serveDone.Wait()
 	return err
 }
 
 func (r *Runtime) closeLocked() error {
+	var proxyErr error
 	if r.cancel != nil {
 		r.cancel()
 	}
 	if r.watcher != nil {
 		_ = r.watcher.Close()
 	}
-	if r.httpServer != nil {
-		_ = r.httpServer.Close()
+	if r.proxy != nil {
+		proxyErr = r.proxy.close()
 	}
-	if r.listener != nil {
-		_ = r.listener.Close()
-	}
-	var err error
+	var nodeErr error
 	if r.node != nil {
-		err = r.node.Close()
+		nodeErr = r.node.Close()
 	}
 	r.config = nil
 	r.node = nil
 	r.watcher = nil
 	r.cancel = nil
+	r.runContext = nil
 	r.emit = nil
 	r.authenticationPending = false
-	r.httpServer = nil
-	r.listener = nil
-	return err
+	r.proxy = nil
+	return errors.Join(proxyErr, nodeErr)
 }
 
 func (r *Runtime) watch(ctx context.Context, watcher Watcher) {
@@ -231,7 +227,7 @@ func (r *Runtime) emitStatusLocked(ctx context.Context) error {
 }
 
 func (r *Runtime) ensureProxyLocked() error {
-	if r.httpServer != nil {
+	if r.proxy != nil {
 		return nil
 	}
 	handler, err := newLoopbackProxy(int(r.config.Port))
@@ -242,14 +238,7 @@ func (r *Runtime) ensureProxyLocked() error {
 	if err != nil {
 		return errors.New("listen for portal HTTPS")
 	}
-	server := &http.Server{Handler: handler}
-	r.listener = listener
-	r.httpServer = server
-	r.serveDone.Add(1)
-	go func() {
-		defer r.serveDone.Done()
-		_ = server.Serve(listener)
-	}()
+	r.proxy = startProxyServer(r.runContext, listener, handler)
 	return nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/chrisbanes/portico/helper/internal/portal"
@@ -109,6 +110,28 @@ func TestServeRejectsInvalidPortalPayloadWithoutLeakingIt(t *testing.T) {
 	}
 }
 
+func TestServeRejectsDestinationFields(t *testing.T) {
+	for _, field := range []string{"host", "scheme", "path", "url"} {
+		t.Run(field, func(t *testing.T) {
+			const secret = "untrusted-destination-do-not-copy"
+			input := bytes.NewBufferString(
+				`{"version":1,"requestId":"start-1","command":"startPortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","portalName":"hermes","localAppPort":8787,"` + field + `":"` + secret + `"}}` + "\n",
+			)
+			var output bytes.Buffer
+			var diagnostics bytes.Buffer
+
+			exitCode := ServeWithRuntime(input, &output, &diagnostics, &fakeRuntime{})
+
+			if exitCode != 0 || !strings.Contains(output.String(), `"code":"invalidPayload"`) {
+				t.Fatalf("ServeWithRuntime = (exit %d, output %q), want invalid-payload response", exitCode, output.String())
+			}
+			if strings.Contains(output.String(), secret) || strings.Contains(diagnostics.String(), secret) {
+				t.Fatal("untrusted destination leaked to protocol or diagnostic output")
+			}
+		})
+	}
+}
+
 func TestServeClosesRuntimeOnShutdown(t *testing.T) {
 	runtime := &fakeRuntime{}
 	input := bytes.NewBufferString(`{"version":1,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n")
@@ -119,11 +142,34 @@ func TestServeClosesRuntimeOnShutdown(t *testing.T) {
 	}
 }
 
+func TestServeAcknowledgesShutdownAfterRuntimeCloseCompletes(t *testing.T) {
+	runtime := &fakeRuntime{closeEntered: make(chan struct{}), releaseClose: make(chan struct{})}
+	input := bytes.NewBufferString(`{"version":1,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n")
+	var output bytes.Buffer
+	done := make(chan int, 1)
+	go func() { done <- ServeWithRuntime(input, &output, &bytes.Buffer{}, runtime) }()
+
+	<-runtime.closeEntered
+	if output.Len() != 0 {
+		t.Fatalf("output = %q, want no shutdown acknowledgement before close completes", output.String())
+	}
+	close(runtime.releaseClose)
+	if exitCode := <-done; exitCode != 0 {
+		t.Fatalf("ServeWithRuntime exit code = %d, want success", exitCode)
+	}
+	if !strings.Contains(output.String(), `"requestId":"shutdown-1","result":{"accepted":true}`) {
+		t.Fatalf("output = %q, want shutdown acknowledgement after close", output.String())
+	}
+}
+
 type fakeRuntime struct {
 	started       portal.Config
 	authenticated string
 	closed        bool
 	emit          func(portal.Event)
+	closeEntered  chan struct{}
+	releaseClose  chan struct{}
+	closeOnce     sync.Once
 }
 
 func (r *fakeRuntime) Start(_ context.Context, config portal.Config, emit func(portal.Event)) error {
@@ -142,6 +188,12 @@ func (r *fakeRuntime) Authenticate(_ context.Context, portalID string) error {
 }
 
 func (r *fakeRuntime) Close() error {
+	r.closeOnce.Do(func() {
+		if r.closeEntered != nil {
+			close(r.closeEntered)
+			<-r.releaseClose
+		}
+	})
 	r.closed = true
 	return nil
 }

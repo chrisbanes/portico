@@ -3,10 +3,17 @@ package portal
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 )
 
 const testPortalID = "9f55ca93-d7b3-4eab-a871-310ea576005a"
@@ -176,6 +183,181 @@ func TestOnlineRuntimeListensTLSAndClosesListenerBeforeNode(t *testing.T) {
 	}
 }
 
+func TestRuntimeCloseReturnsListenerFailure(t *testing.T) {
+	factory := newFakeFactory()
+	factory.status = Status{
+		BackendState: "Running",
+		DNSName:      "hermes.example.ts.net.",
+		CertDomains:  []string{"hermes.example.ts.net"},
+	}
+	runtime := NewRuntime(t.TempDir(), factory.New)
+	if err := runtime.Start(context.Background(), Config{ID: testPortalID, Name: "hermes", Port: 8787}, func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	factory.node.listener.closeErr = errors.New("close failed")
+
+	if err := runtime.Close(); err == nil {
+		t.Fatal("Runtime.Close error = nil, want listener shutdown failure")
+	}
+	if !factory.node.listenerClosedBeforeNode {
+		t.Fatal("tsnet node did not close after the listener failure")
+	}
+}
+
+func TestRuntimeCloseCancelsActiveRequest(t *testing.T) {
+	requestEntered := make(chan struct{})
+	handlerExited := make(chan struct{})
+	runtime, proxyURL, factory := newOnlineRuntimeWithLocalApp(t, http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(requestEntered)
+		<-request.Context().Done()
+		close(handlerExited)
+	}))
+	factory.node.observeClose = func() {
+		select {
+		case <-handlerExited:
+			factory.node.handlersExitedBeforeNode = true
+		default:
+		}
+	}
+
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.Get(proxyURL)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	waitForSignal(t, requestEntered, "active Local App request")
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close() }()
+	waitForSignal(t, handlerExited, "active Local App handler exit")
+	if err := waitForRuntimeClose(t, closeDone); err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForError(t, requestDone, "client request")
+	if !factory.node.handlersExitedBeforeNode {
+		t.Fatal("tsnet node closed before the active proxy handler exited")
+	}
+}
+
+func TestRuntimeCloseClosesIdleConnection(t *testing.T) {
+	runtime, proxyURL, factory := newOnlineRuntimeWithLocalApp(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "ok")
+	}))
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
+	response, err := client.Get(proxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close() }()
+	if err := waitForRuntimeClose(t, closeDone); err != nil {
+		t.Fatal(err)
+	}
+	if response, err = client.Get(proxyURL); err == nil {
+		_ = response.Body.Close()
+		t.Fatal("idle client connection remained reusable after Runtime.Close")
+	}
+	if !factory.node.listenerClosedBeforeNode {
+		t.Fatal("TLS listener was not closed before the tsnet node")
+	}
+}
+
+func TestRuntimeCloseClosesWebSocket(t *testing.T) {
+	handlerEntered := make(chan struct{})
+	handlerExited := make(chan struct{})
+	runtime, proxyURL, _ := newOnlineRuntimeWithLocalApp(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := websocket.Accept(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer connection.CloseNow()
+		close(handlerEntered)
+		_, _, _ = connection.Read(request.Context())
+		close(handlerExited)
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	connection, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(proxyURL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	waitForSignal(t, handlerEntered, "Local App WebSocket handler")
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close() }()
+	waitForSignal(t, handlerExited, "Local App WebSocket handler exit")
+	if _, _, err := connection.Read(ctx); err == nil {
+		t.Fatal("client WebSocket remained open after Runtime.Close")
+	}
+	if err := waitForRuntimeClose(t, closeDone); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newOnlineRuntimeWithLocalApp(t *testing.T, handler http.Handler) (*Runtime, string, *fakeFactory) {
+	t.Helper()
+	localApp := httptest.NewServer(handler)
+	t.Cleanup(localApp.Close)
+	port, _ := localAppPort(t, localApp.URL)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := newFakeFactory()
+	factory.status = Status{
+		BackendState: "Running",
+		DNSName:      "hermes.example.ts.net.",
+		CertDomains:  []string{"hermes.example.ts.net"},
+	}
+	factory.node.realListener = listener
+	runtime := NewRuntime(t.TempDir(), factory.New)
+	if err := runtime.Start(context.Background(), Config{ID: testPortalID, Name: "hermes", Port: uint16(port)}, func(Event) {}); err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	return runtime, "http://" + listener.Addr().String(), factory
+}
+
+func waitForSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func waitForError(t *testing.T, result <-chan error, description string) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+		return nil
+	}
+}
+
+func waitForRuntimeClose(t *testing.T, result <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(900 * time.Millisecond):
+		t.Fatal("Runtime.Close exceeded the native supervisor's one-second grace period")
+		return nil
+	}
+}
+
 type fakeFactory struct {
 	mu      sync.Mutex
 	created []createdNode
@@ -225,7 +407,10 @@ type fakeNode struct {
 	listenNetwork             string
 	listenAddress             string
 	listener                  *fakeListener
+	realListener              net.Listener
 	listenerClosedBeforeNode  bool
+	observeClose              func()
+	handlersExitedBeforeNode  bool
 }
 
 func (n *fakeNode) clone() *fakeNode {
@@ -255,23 +440,36 @@ func (n *fakeNode) StartLoginInteractive(context.Context) error {
 func (n *fakeNode) ListenTLS(network, address string) (net.Listener, error) {
 	n.listenNetwork = network
 	n.listenAddress = address
+	if n.realListener != nil {
+		return n.realListener, nil
+	}
 	n.listener = newFakeListener()
 	return n.listener, nil
 }
 func (n *fakeNode) Close() error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.observeClose != nil {
+		n.observeClose()
+	}
 	n.closedBeforeStartReturned = !n.startReturned
 	if n.listener != nil {
 		n.listenerClosedBeforeNode = n.listener.closed
+	} else if n.realListener != nil {
+		connection, err := net.DialTimeout(n.realListener.Addr().Network(), n.realListener.Addr().String(), 50*time.Millisecond)
+		if err == nil {
+			_ = connection.Close()
+		}
+		n.listenerClosedBeforeNode = err != nil
 	}
 	return nil
 }
 
 type fakeListener struct {
-	mu     sync.Mutex
-	closed bool
-	done   chan struct{}
+	mu       sync.Mutex
+	closed   bool
+	done     chan struct{}
+	closeErr error
 }
 
 func newFakeListener() *fakeListener { return &fakeListener{done: make(chan struct{})} }
@@ -286,7 +484,7 @@ func (l *fakeListener) Close() error {
 		l.closed = true
 		close(l.done)
 	}
-	return nil
+	return l.closeErr
 }
 func (l *fakeListener) Addr() net.Addr { return fakeAddr("tailnet") }
 
