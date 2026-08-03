@@ -172,6 +172,8 @@ func (*shutdownOrderingRuntime) Start(context.Context, portal.Config, func(porta
 
 func (*shutdownOrderingRuntime) Authenticate(context.Context, string) error { return nil }
 
+func (*shutdownOrderingRuntime) CleanupRejectedPortal(string) error { return nil }
+
 func (r *shutdownOrderingRuntime) Close() error {
 	select {
 	case <-r.discoveryCanceled:
@@ -234,6 +236,10 @@ func TestServeStartsPortalAndSerializesStructuredStatusEvent(t *testing.T) {
 	if event["event"] != "portalStatus" || event["portalId"] != "9f55ca93-d7b3-4eab-a871-310ea576005a" {
 		t.Fatalf("event = %+v, want structured portal status", event)
 	}
+	payload := event["payload"].(map[string]any)
+	if payload["tailnetName"] != "opaque-identity-do-not-display" || payload["magicDNSSuffix"] != "example.ts.net" {
+		t.Fatalf("payload = %+v, want exact identity and separate display suffix", payload)
+	}
 	const wantResponse = `{"version":1,"requestId":"start-1","result":{"accepted":true}}`
 	if lines[1] != wantResponse {
 		t.Fatalf("response = %q, want %q", lines[1], wantResponse)
@@ -259,6 +265,25 @@ func TestServeAuthenticatesCorrelatedPortalAndEmitsTransientURL(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), `"requestId":"auth-1","result":{"accepted":true}`) {
 		t.Fatalf("output = %q, want correlated accepted response", output.String())
+	}
+}
+
+func TestServeCleansUpOnlyCorrelatedRejectedPortal(t *testing.T) {
+	runtime := &fakeRuntime{}
+	input := bytes.NewBufferString(
+		`{"version":1,"requestId":"cleanup-1","command":"cleanupRejectedPortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}` + "\n",
+	)
+	var output bytes.Buffer
+	var diagnostics bytes.Buffer
+
+	exitCode := ServeWithRuntime(input, &output, &diagnostics, runtime)
+
+	if exitCode != 0 || diagnostics.Len() != 0 || runtime.cleaned != "9f55ca93-d7b3-4eab-a871-310ea576005a" {
+		t.Fatalf("ServeWithRuntime = (exit %d, cleaned %q, diagnostics %q), want correlated cleanup", exitCode, runtime.cleaned, diagnostics.String())
+	}
+	const want = `{"version":1,"requestId":"cleanup-1","result":{"accepted":true}}` + "\n"
+	if output.String() != want {
+		t.Fatalf("output = %q, want %q", output.String(), want)
 	}
 }
 
@@ -335,6 +360,7 @@ func TestServeAcknowledgesShutdownAfterRuntimeCloseCompletes(t *testing.T) {
 type fakeRuntime struct {
 	started       portal.Config
 	authenticated string
+	cleaned       string
 	closed        bool
 	emit          func(portal.Event)
 	closeEntered  chan struct{}
@@ -345,7 +371,10 @@ type fakeRuntime struct {
 func (r *fakeRuntime) Start(_ context.Context, config portal.Config, emit func(portal.Event)) error {
 	r.started = config
 	r.emit = emit
-	emit(portal.Event{PortalID: config.ID, Status: &portal.StatusEvent{State: portal.StateConnecting, Addresses: []string{}}})
+	emit(portal.Event{PortalID: config.ID, Status: &portal.StatusEvent{
+		State: portal.StateConnecting, Addresses: []string{},
+		TailnetName: "opaque-identity-do-not-display", MagicDNSSuffix: "example.ts.net",
+	}})
 	return nil
 }
 
@@ -354,6 +383,11 @@ func (r *fakeRuntime) Authenticate(_ context.Context, portalID string) error {
 	if r.emit != nil {
 		r.emit(portal.Event{PortalID: r.authenticated, AuthenticationURL: "https://login.tailscale.com/a/transient"})
 	}
+	return nil
+}
+
+func (r *fakeRuntime) CleanupRejectedPortal(portalID string) error {
+	r.cleaned = strings.ToLower(portalID)
 	return nil
 }
 

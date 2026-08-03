@@ -129,6 +129,31 @@ final class HelperSupervisorTests: XCTestCase {
         )
     }
 
+    func testRequestsAndCorrelatesRejectedPortalCleanup() throws {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "cleanup-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 1
+        )
+        supervisor.start()
+        launcher.receive(line: #"{"version":1,"requestId":"handshake-1","result":{"protocolVersion":1}}"#)
+        let portalID = UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!
+        var result: Result<Void, Error>?
+
+        supervisor.cleanupRejectedPortal(id: portalID) { result = $0 }
+
+        let requestData = try XCTUnwrap(launcher.process.sent.last)
+        let request = try JSONDecoder().decode(HelperRequest<CleanupRejectedPortalPayload>.self, from: requestData)
+        XCTAssertEqual(request.command, .cleanupRejectedPortal)
+        XCTAssertEqual(request.payload.portalId, portalID)
+        XCTAssertNil(result)
+        launcher.receive(line: #"{"version":1,"requestId":"cleanup-1","result":{"accepted":true}}"#)
+        XCTAssertNoThrow(try result?.get())
+    }
+
     func testReturnsFixedHelperDiscoveryFailure() throws {
         let launcher = FakeHelperLauncher()
         var requestIDs = ["handshake-1", "discover-1"]

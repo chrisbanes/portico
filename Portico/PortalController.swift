@@ -2,21 +2,36 @@ import Foundation
 
 @MainActor
 final class PortalController: ObservableObject {
+    static let manualRemovalURL = URL(
+        string: "https://tailscale.com/docs/features/access-control/device-management/how-to/remove"
+    )!
+
     @Published var portalName = ""
     @Published var localAppPort = ""
-    @Published private(set) var portal: PortalConfiguration?
-    @Published private(set) var status: PortalStatusPayload?
+    @Published private(set) var portals: [PortalConfiguration] = []
+    @Published private(set) var statuses: [UUID: PortalStatusPayload] = [:]
+    @Published private(set) var alerts: [InstallationAlert] = []
+    @Published private(set) var tailnetDisplaySuffix: String?
     @Published private(set) var message: String?
     @Published private(set) var localApps: [LocalAppCandidatePayload] = []
     @Published private(set) var isRefreshingLocalApps = false
     @Published private(set) var localAppsMessage: String?
+
+    var portal: PortalConfiguration? { portals.first }
+    var status: PortalStatusPayload? { portal.flatMap { statuses[$0.id] } }
+    var canResetTailnet: Bool { portals.isEmpty && installation.tailnetBinding != nil }
+    var pendingPortals: [PortalConfiguration] {
+        portals.filter { $0.lifecycle == .pendingTailnetRejection }
+    }
 
     private let store: PortalStore
     private let helper: PortalHelperClient
     private let uuidProvider: () -> UUID
     private let dateProvider: () -> Date
     private let openURL: (URL) -> Void
-    private var authenticationPending = false
+    private var installation = InstallationRecord()
+    private var authenticationPending: Set<UUID> = []
+    private var cleanupInFlight: Set<UUID> = []
     private var discoveryGeneration = 0
 
     init(
@@ -32,7 +47,8 @@ final class PortalController: ObservableObject {
         self.dateProvider = dateProvider
         self.openURL = openURL
         do {
-            portal = try store.load()
+            installation = try store.loadInstallation()
+            publishInstallation()
         } catch {
             message = "Saved Portal configuration could not be loaded."
         }
@@ -44,13 +60,12 @@ final class PortalController: ObservableObject {
     }
 
     func refreshLocalApps() {
-        guard portal == nil else { return }
         discoveryGeneration += 1
         let generation = discoveryGeneration
         isRefreshingLocalApps = true
         localAppsMessage = nil
         helper.discoverLocalApps { [weak self] result in
-            guard let self, self.portal == nil, self.discoveryGeneration == generation else { return }
+            guard let self, self.discoveryGeneration == generation else { return }
             self.isRefreshingLocalApps = false
             switch result {
             case let .success(candidates):
@@ -62,7 +77,7 @@ final class PortalController: ObservableObject {
     }
 
     func selectLocalApp(_ candidate: LocalAppCandidatePayload) {
-        guard portal == nil, localApps.contains(candidate) else { return }
+        guard localApps.contains(candidate) else { return }
         localAppPort = String(candidate.localAppPort)
         if portalName.isEmpty, let suggestion = candidate.suggestedPortalName {
             portalName = suggestion
@@ -70,7 +85,6 @@ final class PortalController: ObservableObject {
     }
 
     func addPortal() {
-        guard portal == nil else { return }
         let port: UInt16
         do {
             port = try PortalInputValidator.validate(name: portalName, port: localAppPort)
@@ -84,33 +98,99 @@ final class PortalController: ObservableObject {
             localAppPort: port,
             createdAt: dateProvider()
         )
+        var updated = installation
+        updated.portals.append(configuration)
         do {
-            try store.save(configuration)
-            portal = configuration
+            try store.save(updated)
+            installation = updated
+            publishInstallation()
             message = nil
+            portalName = ""
+            localAppPort = ""
             discoveryGeneration += 1
             localApps = []
             isRefreshingLocalApps = false
             localAppsMessage = nil
-            startSavedPortal()
+            start(configuration)
         } catch {
             message = "The Portal could not be saved."
         }
     }
 
     func authenticate() {
-        guard let portal, !authenticationPending else { return }
-        authenticationPending = true
-        helper.authenticatePortal(id: portal.id) { [weak self] result in
+        guard let portal else { return }
+        authenticate(id: portal.id)
+    }
+
+    func authenticate(id: UUID) {
+        guard portals.contains(where: { $0.id == id && $0.lifecycle == .active }),
+              authenticationPending.insert(id).inserted
+        else { return }
+        helper.authenticatePortal(id: id) { [weak self] result in
             if case .failure = result {
-                self?.authenticationPending = false
+                self?.authenticationPending.remove(id)
                 self?.message = "Authentication could not be started."
             }
         }
     }
 
-    private func startSavedPortal() {
-        guard let portal, helper.availability == .connected else { return }
+    func dismissAlert(id: UUID) {
+        guard installation.alerts.contains(where: { $0.id == id }) else { return }
+        var updated = installation
+        updated.alerts.removeAll { $0.id == id }
+        do {
+            try store.save(updated)
+            installation = updated
+            publishInstallation()
+        } catch {
+            message = "The warning could not be dismissed."
+        }
+    }
+
+    func resetTailnet(confirmed: Bool) {
+        guard confirmed else { return }
+        guard portals.isEmpty else {
+            message = "Reset Tailnet is available only when no Portals remain."
+            return
+        }
+        guard installation.tailnetBinding != nil else { return }
+        var updated = installation
+        updated.tailnetBinding = nil
+        do {
+            try store.save(updated)
+            installation = updated
+            publishInstallation()
+            message = nil
+        } catch {
+            message = "The tailnet binding could not be reset."
+        }
+    }
+
+    func pendingWarningText(for portal: PortalConfiguration) -> String {
+        "Removing \(portal.name) from a different tailnet. Local cleanup is in progress; its remote node may still require manual removal."
+    }
+
+    func completedWarningText(for alert: InstallationAlert) -> String {
+        let node = alert.assignedName.map { " \($0)" } ?? ""
+        let expected = alert.expectedMagicDNSSuffix.map { " Expected tailnet: \($0)." } ?? ""
+        let rejected = alert.rejectedMagicDNSSuffix.map { " Rejected tailnet: \($0)." } ?? ""
+        return "Portico removed \(alert.portalName)'s local configuration and identity state after it joined a different tailnet. The remote node\(node) may remain and may require manual removal.\(expected)\(rejected)"
+    }
+
+    private func helperConnected() {
+        refreshLocalApps()
+        for portal in installation.portals {
+            switch portal.lifecycle {
+            case .active:
+                start(portal)
+            case .pendingTailnetRejection:
+                cleanupRejectedPortal(portal, evidence: nil)
+            }
+        }
+    }
+
+    private func start(_ portal: PortalConfiguration) {
+        guard helper.availability == .connected, portal.lifecycle == .active else { return }
         helper.startPortal(portal) { [weak self] result in
             if case .failure = result {
                 self?.message = "The Portal could not be started."
@@ -118,24 +198,143 @@ final class PortalController: ObservableObject {
         }
     }
 
-    private func helperConnected() {
-        if portal == nil {
-            refreshLocalApps()
-        } else {
-            startSavedPortal()
+    private func receive(_ event: PortalHelperEvent) {
+        switch event {
+        case let .status(id, status):
+            guard let portal = installation.portals.first(where: { $0.id == id }) else { return }
+            statuses[id] = status.redactingTailnetName()
+            if portal.lifecycle == .active, status.state == .online,
+               let tailnetName = status.tailnetName, !tailnetName.isEmpty {
+                receiveOnlineStatus(for: portal, status: status, tailnetName: tailnetName)
+            }
+        case let .authenticationURL(id, url):
+            guard authenticationPending.remove(id) != nil,
+                  installation.portals.contains(where: { $0.id == id && $0.lifecycle == .active })
+            else { return }
+            openURL(url)
         }
     }
 
-    private func receive(_ event: PortalHelperEvent) {
-        guard let portal else { return }
-        switch event {
-        case let .status(id, status) where id == portal.id:
-            self.status = status
-        case let .authenticationURL(id, url) where id == portal.id && authenticationPending:
-            authenticationPending = false
-            openURL(url)
-        default:
-            break
+    private func receiveOnlineStatus(
+        for portal: PortalConfiguration,
+        status: PortalStatusPayload,
+        tailnetName: String
+    ) {
+        guard let binding = installation.tailnetBinding else {
+            var updated = installation
+            updated.tailnetBinding = TailnetBinding(
+                name: tailnetName,
+                magicDNSSuffix: status.magicDNSSuffix ?? ""
+            )
+            do {
+                try store.save(updated)
+                installation = updated
+                publishInstallation()
+                message = nil
+            } catch {
+                message = "The installation tailnet could not be saved."
+            }
+            return
         }
+        guard binding.name == tailnetName else {
+            reject(portal, status: status)
+            return
+        }
+        let suffix = status.magicDNSSuffix ?? ""
+        guard suffix != binding.magicDNSSuffix else { return }
+        var updated = installation
+        updated.tailnetBinding?.magicDNSSuffix = suffix
+        do {
+            try store.save(updated)
+            installation = updated
+            publishInstallation()
+        } catch {
+            message = "The tailnet display name could not be refreshed."
+        }
+    }
+
+    private func reject(_ portal: PortalConfiguration, status: PortalStatusPayload) {
+        guard let index = installation.portals.firstIndex(where: { $0.id == portal.id && $0.lifecycle == .active }) else {
+            return
+        }
+        var updated = installation
+        updated.portals[index].lifecycle = .pendingTailnetRejection
+        do {
+            try store.save(updated)
+            installation = updated
+            publishInstallation()
+            cleanupRejectedPortal(
+                updated.portals[index],
+                evidence: RejectionEvidence(
+                    assignedName: status.assignedName,
+                    rejectedMagicDNSSuffix: status.magicDNSSuffix
+                )
+            )
+        } catch {
+            message = "The rejected Portal could not be saved for cleanup."
+        }
+    }
+
+    private func cleanupRejectedPortal(_ portal: PortalConfiguration, evidence: RejectionEvidence?) {
+        guard helper.availability == .connected, cleanupInFlight.insert(portal.id).inserted else { return }
+        helper.cleanupRejectedPortal(id: portal.id) { [weak self] result in
+            guard let self else { return }
+            self.cleanupInFlight.remove(portal.id)
+            guard case .success = result else {
+                self.message = "Local cleanup will be retried the next time Portico starts."
+                return
+            }
+            guard self.installation.portals.contains(where: {
+                $0.id == portal.id && $0.lifecycle == .pendingTailnetRejection
+            }) else { return }
+            var updated = self.installation
+            updated.portals.removeAll { $0.id == portal.id }
+            updated.alerts.append(InstallationAlert(
+                id: self.uuidProvider(),
+                kind: .crossTailnetRejection,
+                portalName: portal.name,
+                assignedName: evidence?.assignedName,
+                expectedMagicDNSSuffix: self.installation.tailnetBinding?.magicDNSSuffix.nonEmpty,
+                rejectedMagicDNSSuffix: evidence?.rejectedMagicDNSSuffix?.nonEmpty,
+                createdAt: self.dateProvider()
+            ))
+            do {
+                try self.store.save(updated)
+                self.installation = updated
+                self.statuses.removeValue(forKey: portal.id)
+                self.publishInstallation()
+                self.message = nil
+            } catch {
+                self.message = "Local cleanup completed, but its warning could not be saved; Portico will retry."
+            }
+        }
+    }
+
+    private func publishInstallation() {
+        portals = installation.portals
+        alerts = installation.alerts
+        tailnetDisplaySuffix = installation.tailnetBinding?.magicDNSSuffix.nonEmpty
+    }
+}
+
+private struct RejectionEvidence {
+    let assignedName: String?
+    let rejectedMagicDNSSuffix: String?
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
+}
+
+private extension PortalStatusPayload {
+    func redactingTailnetName() -> PortalStatusPayload {
+        PortalStatusPayload(
+            state: state,
+            stableNodeId: stableNodeId,
+            assignedName: assignedName,
+            portalURL: portalURL,
+            addresses: addresses,
+            magicDNSSuffix: magicDNSSuffix
+        )
     }
 }

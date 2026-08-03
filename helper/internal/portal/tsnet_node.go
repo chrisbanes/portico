@@ -58,6 +58,10 @@ func (n *tsnetNode) Status(ctx context.Context) (Status, error) {
 		CertDomains:  append([]string(nil), status.CertDomains...),
 		Addresses:    make([]string, 0, len(status.TailscaleIPs)),
 	}
+	if status.CurrentTailnet != nil {
+		mapped.TailnetName = status.CurrentTailnet.Name
+		mapped.MagicDNSSuffix = status.CurrentTailnet.MagicDNSSuffix
+	}
 	for _, address := range status.TailscaleIPs {
 		mapped.Addresses = append(mapped.Addresses, address.String())
 	}

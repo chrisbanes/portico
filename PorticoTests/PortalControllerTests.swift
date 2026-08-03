@@ -151,7 +151,7 @@ final class PortalControllerTests: XCTestCase {
 
         client.connect()
         XCTAssertEqual(client.started, [saved])
-        XCTAssertTrue(client.discoveryCompletions.isEmpty)
+        XCTAssertEqual(client.discoveryCompletions.count, 1)
     }
 
     func testPresentsOnlyMatchingStructuredStatus() throws {
@@ -197,6 +197,252 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(opened, [transient])
     }
 
+    func testAddsAndStartsSecondPortalWhileFirstRemainsEnabled() throws {
+        let firstID = portalID
+        let secondID = UUID(uuidString: "5ea74329-3144-4ba2-925f-138d14d61fcc")!
+        let first = PortalConfiguration(id: firstID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(portals: [first]))
+        let client = FakePortalHelperClient()
+        let controller = PortalController(
+            store: store,
+            helper: client,
+            uuidProvider: { secondID },
+            dateProvider: { Date(timeIntervalSince1970: 1_786_000_100) },
+            openURL: { _ in }
+        )
+
+        controller.portalName = "atlas"
+        controller.localAppPort = "8788"
+        controller.addPortal()
+
+        XCTAssertEqual(controller.portals.map(\.id), [firstID, secondID])
+        XCTAssertEqual(client.started.map(\.id), [firstID, secondID])
+        XCTAssertEqual(try store.loadInstallation().portals.map(\.id), [firstID, secondID])
+    }
+
+    func testFirstSuccessfulOnlineSaveWinsAndExactMatchRefreshesSuffix() throws {
+        let secondID = UUID(uuidString: "5ea74329-3144-4ba2-925f-138d14d61fcc")!
+        let root = temporaryRoot()
+        let seed = PortalStore(rootURL: root)
+        try seed.save(InstallationRecord(portals: [
+            PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date()),
+            PortalConfiguration(id: secondID, name: "atlas", localAppPort: 8788, createdAt: Date()),
+        ]))
+        var failNextWrite = true
+        let store = PortalStore(rootURL: root, writeData: { data, url in
+            if failNextWrite {
+                failNextWrite = false
+                throw NSError(domain: "expected", code: 1)
+            }
+            try data.write(to: url, options: .atomic)
+        })
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        client.send(.status(portalID, onlineStatus(tailnetName: "opaque-first", suffix: "first.ts.net")))
+        XCTAssertNil(try store.loadInstallation().tailnetBinding)
+        client.send(.status(secondID, onlineStatus(tailnetName: "opaque-winner", suffix: "winner.ts.net")))
+        XCTAssertEqual(
+            try store.loadInstallation().tailnetBinding,
+            TailnetBinding(name: "opaque-winner", magicDNSSuffix: "winner.ts.net")
+        )
+        XCTAssertNil(controller.statuses[secondID]?.tailnetName)
+        client.send(.status(portalID, onlineStatus(tailnetName: "opaque-winner", suffix: "refreshed.ts.net")))
+        XCTAssertEqual(controller.tailnetDisplaySuffix, "refreshed.ts.net")
+        XCTAssertEqual(try store.loadInstallation().tailnetBinding?.magicDNSSuffix, "refreshed.ts.net")
+        XCTAssertFalse(controller.message?.contains("opaque") ?? false)
+    }
+
+    func testEmptyTailnetNameDoesNotBindInstallation() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(portals: [
+            PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        ]))
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        client.send(.status(portalID, onlineStatus(tailnetName: "", suffix: "example.ts.net")))
+
+        XCTAssertNil(try store.loadInstallation().tailnetBinding)
+        XCTAssertNil(controller.statuses[portalID]?.tailnetName)
+    }
+
+    func testDifferentTailnetNameWithSameSuffixRejectsOnlyAddressedPortal() throws {
+        let secondID = UUID(uuidString: "5ea74329-3144-4ba2-925f-138d14d61fcc")!
+        let first = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        let second = PortalConfiguration(id: secondID, name: "atlas", localAppPort: 8788, createdAt: Date())
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(
+            tailnetBinding: TailnetBinding(name: "opaque-expected", magicDNSSuffix: "shared.ts.net"),
+            portals: [first, second]
+        ))
+        let client = FakePortalHelperClient()
+        client.completeCleanupImmediately = false
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        client.send(.status(portalID, onlineStatus(
+            tailnetName: "opaque-different",
+            suffix: "shared.ts.net"
+        )))
+        client.send(.status(secondID, onlineStatus(
+            tailnetName: "opaque-expected",
+            suffix: "shared.ts.net",
+            assignedName: "atlas-1"
+        )))
+        client.completeCleanup(.failure(NSError(domain: "expected", code: 1)))
+
+        XCTAssertEqual(client.cleaned, [portalID])
+        XCTAssertEqual(controller.pendingPortals.map(\.id), [portalID])
+        XCTAssertEqual(controller.portals.first(where: { $0.id == secondID })?.lifecycle, .active)
+        XCTAssertEqual(controller.statuses[secondID]?.state, .online)
+        XCTAssertEqual(client.started.map(\.id), [portalID, secondID])
+    }
+
+    func testCompletedCleanupPersistenceFailureKeepsPendingAndUnrelatedPortalEnabled() throws {
+        struct ExpectedFailure: Error {}
+        let secondID = UUID(uuidString: "5ea74329-3144-4ba2-925f-138d14d61fcc")!
+        let root = temporaryRoot()
+        let seed = PortalStore(rootURL: root)
+        try seed.save(InstallationRecord(
+            tailnetBinding: TailnetBinding(name: "opaque-expected", magicDNSSuffix: "expected.ts.net"),
+            portals: [
+                PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date()),
+                PortalConfiguration(id: secondID, name: "atlas", localAppPort: 8788, createdAt: Date()),
+            ]
+        ))
+        var writeCount = 0
+        let store = PortalStore(rootURL: root, writeData: { data, url in
+            writeCount += 1
+            if writeCount == 2 { throw ExpectedFailure() }
+            try data.write(to: url, options: .atomic)
+        })
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        client.send(.status(portalID, onlineStatus(
+            tailnetName: "opaque-different",
+            suffix: "rejected.ts.net"
+        )))
+
+        let persisted = try store.loadInstallation()
+        XCTAssertEqual(persisted.portals.first(where: { $0.id == portalID })?.lifecycle, .pendingTailnetRejection)
+        XCTAssertEqual(persisted.portals.first(where: { $0.id == secondID })?.lifecycle, .active)
+        XCTAssertEqual(controller.pendingPortals.map(\.id), [portalID])
+        XCTAssertEqual(controller.portals.first(where: { $0.id == secondID })?.lifecycle, .active)
+        XCTAssertEqual(client.started.map(\.id), [portalID, secondID])
+    }
+
+    func testMismatchPersistsTombstoneBeforeCleanupAndRelaunchNeverRestartsIt() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(InstallationRecord(
+            tailnetBinding: TailnetBinding(name: "opaque-expected", magicDNSSuffix: "expected.ts.net"),
+            portals: [saved]
+        ))
+        let client = FakePortalHelperClient()
+        client.completeCleanupImmediately = false
+        client.onCleanup = { id in
+            XCTAssertEqual(id, self.portalID)
+            XCTAssertEqual(try? store.loadInstallation().portals.first?.lifecycle, .pendingTailnetRejection)
+        }
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        client.send(.status(portalID, onlineStatus(
+            tailnetName: "opaque-rejected",
+            suffix: "rejected.ts.net",
+            assignedName: "hermes-rejected"
+        )))
+
+        XCTAssertEqual(controller.pendingPortals.map(\.id), [portalID])
+        XCTAssertEqual(client.cleaned, [portalID])
+        XCTAssertFalse(controller.pendingWarningText(for: controller.pendingPortals[0]).contains("opaque"))
+
+        let relaunchedClient = FakePortalHelperClient()
+        relaunchedClient.completeCleanupImmediately = false
+        _ = PortalController(store: store, helper: relaunchedClient, openURL: { _ in })
+        XCTAssertTrue(relaunchedClient.started.isEmpty)
+        XCTAssertEqual(relaunchedClient.cleaned, [portalID])
+    }
+
+    func testCompletedCleanupRemovesPortalPersistsSafeAlertAndCanBeDismissed() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(InstallationRecord(
+            tailnetBinding: TailnetBinding(name: "opaque-expected", magicDNSSuffix: "expected.ts.net"),
+            portals: [saved]
+        ))
+        let alertID = UUID(uuidString: "1f93e456-69ec-445a-8374-d7fc5558d0c7")!
+        let client = FakePortalHelperClient()
+        client.completeCleanupImmediately = false
+        let controller = PortalController(
+            store: store,
+            helper: client,
+            uuidProvider: { alertID },
+            dateProvider: { Date(timeIntervalSince1970: 1_786_000_100) },
+            openURL: { _ in }
+        )
+        client.send(.status(portalID, onlineStatus(
+            tailnetName: "opaque-rejected",
+            suffix: "rejected.ts.net",
+            assignedName: "hermes-rejected"
+        )))
+
+        client.completeCleanup(.success(()))
+
+        XCTAssertTrue(controller.portals.isEmpty)
+        let alert = try XCTUnwrap(controller.alerts.first)
+        XCTAssertEqual(alert.id, alertID)
+        XCTAssertEqual(alert.assignedName, "hermes-rejected")
+        XCTAssertEqual(alert.expectedMagicDNSSuffix, "expected.ts.net")
+        XCTAssertEqual(alert.rejectedMagicDNSSuffix, "rejected.ts.net")
+        XCTAssertFalse(controller.completedWarningText(for: alert).contains("opaque"))
+        XCTAssertEqual(PortalController.manualRemovalURL.host, "tailscale.com")
+
+        controller.dismissAlert(id: alertID)
+        XCTAssertTrue(controller.alerts.isEmpty)
+        XCTAssertEqual(try store.loadInstallation().tailnetBinding?.name, "opaque-expected")
+    }
+
+    func testResetRequiresEmptyInstallationAndExplicitConfirmation() throws {
+        let root = temporaryRoot()
+        let store = PortalStore(rootURL: root)
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(InstallationRecord(
+            tailnetBinding: TailnetBinding(name: "opaque-expected", magicDNSSuffix: "expected.ts.net"),
+            portals: [saved]
+        ))
+        var controller = PortalController(store: store, helper: FakePortalHelperClient(), openURL: { _ in })
+        controller.resetTailnet(confirmed: true)
+        XCTAssertEqual(try store.loadInstallation().tailnetBinding?.name, "opaque-expected")
+
+        try store.save(InstallationRecord(
+            tailnetBinding: TailnetBinding(name: "opaque-expected", magicDNSSuffix: "expected.ts.net")
+        ))
+        controller = PortalController(store: store, helper: FakePortalHelperClient(), openURL: { _ in })
+        XCTAssertTrue(controller.canResetTailnet)
+        controller.resetTailnet(confirmed: false)
+        XCTAssertNotNil(try store.loadInstallation().tailnetBinding)
+        controller.resetTailnet(confirmed: true)
+        XCTAssertNil(try store.loadInstallation().tailnetBinding)
+    }
+
+    private func onlineStatus(
+        tailnetName: String,
+        suffix: String,
+        assignedName: String = "hermes-1"
+    ) -> PortalStatusPayload {
+        PortalStatusPayload(
+            state: .online,
+            stableNodeId: "node-1",
+            assignedName: assignedName,
+            portalURL: URL(string: "https://\(assignedName).\(suffix)/"),
+            addresses: ["100.64.0.1"],
+            tailnetName: tailnetName,
+            magicDNSSuffix: suffix
+        )
+    }
+
     private func temporaryRoot() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("PorticoControllerTests-\(UUID().uuidString)", isDirectory: true)
     }
@@ -209,7 +455,11 @@ final class FakePortalHelperClient: PortalHelperClient {
     var onEvent: ((PortalHelperEvent) -> Void)?
     private(set) var started: [PortalConfiguration] = []
     private(set) var authenticated: [UUID] = []
+    private(set) var cleaned: [UUID] = []
     private(set) var discoveryCompletions: [(Result<[LocalAppCandidatePayload], Error>) -> Void] = []
+    private(set) var cleanupCompletions: [(Result<Void, Error>) -> Void] = []
+    var completeCleanupImmediately = true
+    var onCleanup: ((UUID) -> Void)?
 
     init(availability: HelperAvailability = .connected) {
         self.availability = availability
@@ -225,6 +475,16 @@ final class FakePortalHelperClient: PortalHelperClient {
         completion(.success(()))
     }
 
+    func cleanupRejectedPortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void) {
+        cleaned.append(id)
+        onCleanup?(id)
+        if completeCleanupImmediately {
+            completion(.success(()))
+        } else {
+            cleanupCompletions.append(completion)
+        }
+    }
+
     func discoverLocalApps(completion: @escaping (Result<[LocalAppCandidatePayload], Error>) -> Void) {
         discoveryCompletions.append(completion)
     }
@@ -238,5 +498,9 @@ final class FakePortalHelperClient: PortalHelperClient {
 
     func completeDiscovery(_ result: Result<[LocalAppCandidatePayload], Error>, at index: Int = 0) {
         discoveryCompletions[index](result)
+    }
+
+    func completeCleanup(_ result: Result<Void, Error>, at index: Int = 0) {
+        cleanupCompletions[index](result)
     }
 }

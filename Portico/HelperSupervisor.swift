@@ -25,6 +25,7 @@ protocol PortalHelperClient: AnyObject {
 
     func startPortal(_ portal: PortalConfiguration, completion: @escaping (Result<Void, Error>) -> Void)
     func authenticatePortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void)
+    func cleanupRejectedPortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void)
     func discoverLocalApps(completion: @escaping (Result<[LocalAppCandidatePayload], Error>) -> Void)
 }
 
@@ -135,6 +136,20 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         }
         do {
             try sendRequest(command: .authenticatePortal, payload: AuthenticatePortalPayload(portalId: id)) { (result: Result<AuthenticatePortalResult, Error>) in
+                completion(result.map { _ in () })
+            }
+        } catch {
+            completion(.failure(error))
+        }
+    }
+
+    func cleanupRejectedPortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void) {
+        guard availability == .connected else {
+            completion(.failure(HelperClientError.unavailable))
+            return
+        }
+        do {
+            try sendRequest(command: .cleanupRejectedPortal, payload: CleanupRejectedPortalPayload(portalId: id)) { (result: Result<CleanupRejectedPortalResult, Error>) in
                 completion(result.map { _ in () })
             }
         } catch {

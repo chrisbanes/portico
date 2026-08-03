@@ -23,6 +23,7 @@ const invalidRequestDiagnostic = "portico-helper: invalid request\n"
 type PortalRuntime interface {
 	Start(context.Context, portal.Config, func(portal.Event)) error
 	Authenticate(context.Context, string) error
+	CleanupRejectedPortal(string) error
 	Close() error
 }
 
@@ -73,6 +74,10 @@ type startPortalPayload struct {
 }
 
 type authenticatePortalPayload struct {
+	PortalID string `json:"portalId"`
+}
+
+type cleanupRejectedPortalPayload struct {
 	PortalID string `json:"portalId"`
 }
 
@@ -260,14 +265,38 @@ func ServeWithServices(input io.Reader, output, diagnostics io.Writer, services 
 				}
 				continue
 			}
-			portalID := strings.ToLower(payload.PortalID)
-			if err := (portal.Config{ID: portalID, Name: "a", Port: 1}).Validate(); err != nil {
+			portalID, valid := validatedPortalID(payload.PortalID)
+			if !valid {
 				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
 					return 1
 				}
 				continue
 			}
 			if err := runtime.Authenticate(ctx, portalID); err != nil {
+				if writer.write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed")) != nil {
+					return 1
+				}
+				continue
+			}
+			if writer.write(response{Version: Version, RequestID: request.RequestID, Result: acceptedResult{Accepted: true}}) != nil {
+				return 1
+			}
+		case "cleanupRejectedPortal":
+			var payload cleanupRejectedPortalPayload
+			if runtime == nil || decodePayload(request.Payload, &payload) != nil {
+				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
+					return 1
+				}
+				continue
+			}
+			portalID, valid := validatedPortalID(payload.PortalID)
+			if !valid {
+				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
+					return 1
+				}
+				continue
+			}
+			if err := runtime.CleanupRejectedPortal(portalID); err != nil {
 				if writer.write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed")) != nil {
 					return 1
 				}
@@ -297,6 +326,12 @@ func ServeWithServices(input io.Reader, output, diagnostics io.Writer, services 
 	}
 	cancelBeforeExit = false
 	return 0
+}
+
+func validatedPortalID(raw string) (string, bool) {
+	portalID := strings.ToLower(raw)
+	err := (portal.Config{ID: portalID, Name: "a", Port: 1}).Validate()
+	return portalID, err == nil
 }
 
 func canonicalCandidates(candidates []discovery.Candidate) []discovery.Candidate {
