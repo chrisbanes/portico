@@ -1,0 +1,84 @@
+name: Portico
+
+options:
+  defaultConfig: Release
+
+settings:
+  base:
+    CLANG_ENABLE_MODULES: "YES"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SDKROOT: macosx
+    SWIFT_VERSION: "5.0"
+  configs:
+    Release:
+      SWIFT_COMPILATION_MODE: wholemodule
+
+targets:
+  Portico:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Portico
+    settings:
+      base:
+        ARCHS: arm64
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+        GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_LSUIElement: "YES"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        ONLY_ACTIVE_ARCH: "YES"
+        PRODUCT_BUNDLE_IDENTIFIER: dev.chrisbanes.Portico
+        PRODUCT_NAME: "$(TARGET_NAME)"
+        SWIFT_VERSION: "5.0"
+      configs:
+        Debug:
+          ENABLE_TESTABILITY: "YES"
+          SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+    postBuildScripts:
+      - name: Build and Embed Helper
+        basedOnDependencyAnalysis: false
+        shell: /bin/bash
+        outputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/portico-helper"
+        script: |
+          set -euo pipefail
+          helper_output="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/portico-helper"
+          mkdir -p "$(dirname "${helper_output}")"
+          cd "${SRCROOT}/helper"
+          GOCACHE="${DERIVED_FILE_DIR}/go-build-cache" GOMODCACHE="${SRCROOT}/helper/.build/go-mod-cache" go build -trimpath -o "${helper_output}" ./cmd/portico-helper
+          chmod 755 "${helper_output}"
+
+  PorticoTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: PorticoTests
+    dependencies:
+      - target: Portico
+    settings:
+      base:
+        ARCHS: arm64
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        CODE_SIGNING_ALLOWED: "NO"
+        GENERATE_INFOPLIST_FILE: "YES"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        ONLY_ACTIVE_ARCH: "YES"
+        PRODUCT_BUNDLE_IDENTIFIER: dev.chrisbanes.PorticoTests
+        PRODUCT_NAME: "$(TARGET_NAME)"
+        SWIFT_VERSION: "5.0"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Portico.app/Contents/MacOS/Portico"
+
+schemes:
+  Portico:
+    build:
+      targets:
+        Portico: all
+        PorticoTests: [test]
+    test:
+      config: Debug
+      targets:
+        - PorticoTests

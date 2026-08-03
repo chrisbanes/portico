@@ -22,6 +22,7 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$repo_root"
+./Scripts/generate-xcode-project.sh
 xcodebuild \
   -project Portico.xcodeproj \
   -scheme Portico \

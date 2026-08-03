@@ -33,3 +33,4 @@ go.work.sum
 
 # Local Xcode and helper build output
 .build/
+/Portico.xcodeproj/
