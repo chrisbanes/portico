@@ -19,7 +19,7 @@ if [[ -n "$(git ls-files -- Portico.xcodeproj)" ]]; then
   exit 1
 fi
 
-if ! git check-ignore --quiet --no-index Portico.xcodeproj; then
+if ! git check-ignore --quiet --no-index Portico.xcodeproj/; then
   echo "Portico.xcodeproj must be ignored" >&2
   exit 1
 fi
