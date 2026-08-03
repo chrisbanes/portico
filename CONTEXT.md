@@ -36,3 +36,8 @@ _Avoid_: Active Portal, automatic Portal
 **Stopped Portal**:
 A Portal that remains disconnected until the user explicitly starts it.
 _Avoid_: Disabled Portal, paused Portal
+
+**Removing Portal**:
+A Portal whose user-confirmed local removal has not yet finished. It cannot
+run and remains recorded only so Portico can complete crash-safe cleanup.
+_Avoid_: Deleted Portal, pending deletion
