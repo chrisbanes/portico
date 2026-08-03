@@ -2,9 +2,12 @@ package protocol
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/chrisbanes/portico/helper/internal/portal"
 )
 
 func TestServeCorrelatesHandshakeResponse(t *testing.T) {
@@ -31,6 +34,116 @@ func TestServeCorrelatesHandshakeResponse(t *testing.T) {
 	if diagnostics.Len() != 0 {
 		t.Fatalf("diagnostics = %q, want empty", diagnostics.String())
 	}
+}
+
+func TestServeStartsPortalAndSerializesStructuredStatusEvent(t *testing.T) {
+	runtime := &fakeRuntime{}
+	input := bytes.NewBufferString(
+		`{"version":1,"requestId":"start-1","command":"startPortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","localAppPort":8787}}` + "\n",
+	)
+	var output bytes.Buffer
+	var diagnostics bytes.Buffer
+
+	exitCode := ServeWithRuntime(input, &output, &diagnostics, runtime)
+
+	if exitCode != 0 || diagnostics.Len() != 0 {
+		t.Fatalf("ServeWithRuntime = (exit %d, diagnostics %q), want success", exitCode, diagnostics.String())
+	}
+	if runtime.started.ID != "9f55ca93-d7b3-4eab-a871-310ea576005a" || runtime.started.Name != "hermes" || runtime.started.Port != 8787 {
+		t.Fatalf("started = %+v, want normalized typed configuration", runtime.started)
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("output = %q, want event and response", output.String())
+	}
+	var event map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event["event"] != "portalStatus" || event["portalId"] != "9f55ca93-d7b3-4eab-a871-310ea576005a" {
+		t.Fatalf("event = %+v, want structured portal status", event)
+	}
+	const wantResponse = `{"version":1,"requestId":"start-1","result":{"accepted":true}}`
+	if lines[1] != wantResponse {
+		t.Fatalf("response = %q, want %q", lines[1], wantResponse)
+	}
+}
+
+func TestServeAuthenticatesCorrelatedPortalAndEmitsTransientURL(t *testing.T) {
+	runtime := &fakeRuntime{}
+	input := bytes.NewBufferString(
+		`{"version":1,"requestId":"start-1","command":"startPortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","localAppPort":8787}}` + "\n" +
+			`{"version":1,"requestId":"auth-1","command":"authenticatePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}` + "\n",
+	)
+	var output bytes.Buffer
+	var diagnostics bytes.Buffer
+
+	exitCode := ServeWithRuntime(input, &output, &diagnostics, runtime)
+
+	if exitCode != 0 || diagnostics.Len() != 0 || runtime.authenticated != "9f55ca93-d7b3-4eab-a871-310ea576005a" {
+		t.Fatalf("ServeWithRuntime = (exit %d, auth %q, diagnostics %q), want correlated authentication", exitCode, runtime.authenticated, diagnostics.String())
+	}
+	if !strings.Contains(output.String(), `"event":"authenticationURL"`) || !strings.Contains(output.String(), `"url":"https://login.tailscale.com/a/transient"`) {
+		t.Fatalf("output = %q, want transient authentication event", output.String())
+	}
+	if !strings.Contains(output.String(), `"requestId":"auth-1","result":{"accepted":true}`) {
+		t.Fatalf("output = %q, want correlated accepted response", output.String())
+	}
+}
+
+func TestServeRejectsInvalidPortalPayloadWithoutLeakingIt(t *testing.T) {
+	const secret = "https://login.tailscale.com/a/do-not-copy"
+	input := bytes.NewBufferString(
+		`{"version":1,"requestId":"start-1","command":"startPortal","payload":{"portalId":"../` + secret + `","portalName":"hermes","localAppPort":8787}}` + "\n",
+	)
+	var output bytes.Buffer
+	var diagnostics bytes.Buffer
+
+	exitCode := ServeWithRuntime(input, &output, &diagnostics, &fakeRuntime{})
+
+	if exitCode != 0 || !strings.Contains(output.String(), `"code":"invalidPayload"`) {
+		t.Fatalf("ServeWithRuntime = (exit %d, output %q), want correlated invalid-payload error", exitCode, output.String())
+	}
+	if strings.Contains(output.String(), secret) || strings.Contains(diagnostics.String(), secret) {
+		t.Fatal("invalid submitted value leaked to protocol or diagnostic output")
+	}
+}
+
+func TestServeClosesRuntimeOnShutdown(t *testing.T) {
+	runtime := &fakeRuntime{}
+	input := bytes.NewBufferString(`{"version":1,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n")
+	var output bytes.Buffer
+
+	if exitCode := ServeWithRuntime(input, &output, &bytes.Buffer{}, runtime); exitCode != 0 || !runtime.closed {
+		t.Fatalf("ServeWithRuntime = (exit %d, closed %v), want orderly close", exitCode, runtime.closed)
+	}
+}
+
+type fakeRuntime struct {
+	started       portal.Config
+	authenticated string
+	closed        bool
+	emit          func(portal.Event)
+}
+
+func (r *fakeRuntime) Start(_ context.Context, config portal.Config, emit func(portal.Event)) error {
+	r.started = config
+	r.emit = emit
+	emit(portal.Event{PortalID: config.ID, Status: &portal.StatusEvent{State: portal.StateConnecting, Addresses: []string{}}})
+	return nil
+}
+
+func (r *fakeRuntime) Authenticate(_ context.Context, portalID string) error {
+	r.authenticated = strings.ToLower(portalID)
+	if r.emit != nil {
+		r.emit(portal.Event{PortalID: r.authenticated, AuthenticationURL: "https://login.tailscale.com/a/transient"})
+	}
+	return nil
+}
+
+func (r *fakeRuntime) Close() error {
+	r.closed = true
+	return nil
 }
 
 func TestServeAcknowledgesShutdownAndStops(t *testing.T) {

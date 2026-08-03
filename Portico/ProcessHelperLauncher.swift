@@ -3,6 +3,7 @@ import Foundation
 final class ProcessHelperLauncher: HelperLaunching {
     func launch(
         at executableURL: URL,
+        arguments: [String],
         onLine: @escaping (Data) -> Void,
         onEOF: @escaping () -> Void,
         onExit: @escaping (Int32) -> Void
@@ -14,6 +15,7 @@ final class ProcessHelperLauncher: HelperLaunching {
         let lineBuffer = JSONLineBuffer()
 
         process.executableURL = executableURL
+        process.arguments = arguments
         process.standardInput = input
         process.standardOutput = output
         process.standardError = diagnostics

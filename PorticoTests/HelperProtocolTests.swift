@@ -23,4 +23,33 @@ final class HelperProtocolTests: XCTestCase {
         XCTAssertNil(response.result)
         XCTAssertEqual(response.error, HelperProtocolError(code: "unknownCommand", message: "unsupported command"))
     }
+
+    func testVersionOnePortalFixturesRoundTrip() throws {
+        let portalID = UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!
+        try assertRoundTrip(
+            #"{"version":1,"requestId":"start-1","command":"startPortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","localAppPort":8787}}"#,
+            as: HelperRequest<StartPortalPayload>.self
+        )
+        try assertRoundTrip(
+            #"{"version":1,"requestId":"auth-1","command":"authenticatePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}"#,
+            as: HelperRequest<AuthenticatePortalPayload>.self
+        )
+        let statusFixture = #"{"version":1,"event":"portalStatus","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"state":"online","stableNodeId":"node-1","assignedName":"hermes-1","portalURL":"https:\/\/hermes-1.example.ts.net\/","addresses":["100.64.0.1","fd7a:115c:a1e0::1"]}}"#
+        let status = try JSONDecoder().decode(HelperEvent<PortalStatusPayload>.self, from: Data(statusFixture.utf8))
+        XCTAssertEqual(status.portalId, portalID)
+        XCTAssertEqual(status.payload.state, .online)
+        XCTAssertEqual(status.payload.portalURL, URL(string: "https://hermes-1.example.ts.net/"))
+        try assertRoundTrip(statusFixture, as: HelperEvent<PortalStatusPayload>.self)
+
+        let authenticationFixture = #"{"version":1,"event":"authenticationURL","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"url":"https:\/\/login.tailscale.com\/a\/secret"}}"#
+        try assertRoundTrip(authenticationFixture, as: HelperEvent<AuthenticationURLPayload>.self)
+    }
+
+    private func assertRoundTrip<Value: Codable>(_ fixture: String, as type: Value.Type) throws {
+        let decoder = JSONDecoder()
+        let value = try decoder.decode(type, from: Data(fixture.utf8))
+        let original = try JSONSerialization.jsonObject(with: Data(fixture.utf8)) as! NSDictionary
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) as! NSDictionary
+        XCTAssertEqual(encoded, original)
+    }
 }
