@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/chrisbanes/portico/helper/internal/discovery"
 	"github.com/chrisbanes/portico/helper/internal/portal"
 	"github.com/chrisbanes/portico/helper/internal/protocol"
 )
@@ -19,5 +20,8 @@ func main() {
 		os.Exit(2)
 	}
 	runtime := portal.NewRuntime(stateRoot, portal.NewTSNetNode)
-	os.Exit(protocol.ServeWithRuntime(os.Stdin, os.Stdout, os.Stderr, runtime))
+	os.Exit(protocol.ServeWithServices(os.Stdin, os.Stdout, os.Stderr, protocol.Services{
+		PortalRuntime:      runtime,
+		LocalAppDiscoverer: discovery.New(),
+	}))
 }

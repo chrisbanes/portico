@@ -7,6 +7,7 @@ enum HelperCommand: String, Codable {
     case shutdown
     case startPortal
     case authenticatePortal
+    case discoverLocalApps
 }
 
 struct EmptyPayload: Codable, Equatable {}
@@ -49,6 +50,16 @@ struct AuthenticatePortalPayload: Codable, Equatable {
 
 struct AuthenticatePortalResult: Codable, Equatable {
     let accepted: Bool
+}
+
+struct LocalAppCandidatePayload: Codable, Equatable {
+    let localAppPort: UInt16
+    let processLabel: String
+    let suggestedPortalName: String?
+}
+
+struct DiscoverLocalAppsResult: Codable, Equatable {
+    let candidates: [LocalAppCandidatePayload]
 }
 
 enum HelperEventType: String, Codable {

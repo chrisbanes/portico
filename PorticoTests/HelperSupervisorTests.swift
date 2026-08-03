@@ -102,6 +102,54 @@ final class HelperSupervisorTests: XCTestCase {
         launcher.receive(line: #"{"version":1,"requestId":"start-1","result":{"accepted":true}}"#)
         XCTAssertNoThrow(try result?.get())
     }
+
+    func testRequestsAndCorrelatesLocalAppDiscovery() throws {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "discover-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 1
+        )
+        supervisor.start()
+        launcher.receive(line: #"{"version":1,"requestId":"handshake-1","result":{"protocolVersion":1}}"#)
+        var result: Result<[LocalAppCandidatePayload], Error>?
+
+        supervisor.discoverLocalApps { result = $0 }
+
+        let requestData = try XCTUnwrap(launcher.process.sent.last)
+        let request = try JSONDecoder().decode(HelperRequest<EmptyPayload>.self, from: requestData)
+        XCTAssertEqual(request.command, .discoverLocalApps)
+        XCTAssertEqual(request.requestId, "discover-1")
+        launcher.receive(line: #"{"version":1,"requestId":"discover-1","result":{"candidates":[{"localAppPort":3000,"processLabel":"node","suggestedPortalName":"hermes"}]}}"#)
+        XCTAssertEqual(
+            try result?.get(),
+            [LocalAppCandidatePayload(localAppPort: 3000, processLabel: "node", suggestedPortalName: "hermes")]
+        )
+    }
+
+    func testReturnsFixedHelperDiscoveryFailure() throws {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "discover-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 1
+        )
+        supervisor.start()
+        launcher.receive(line: #"{"version":1,"requestId":"handshake-1","result":{"protocolVersion":1}}"#)
+        var result: Result<[LocalAppCandidatePayload], Error>?
+
+        supervisor.discoverLocalApps { result = $0 }
+        launcher.receive(line: #"{"version":1,"requestId":"discover-1","error":{"code":"discoveryFailure","message":"local app discovery failed"}}"#)
+
+        guard case let .failure(HelperClientError.helper(error)) = result else {
+            return XCTFail("expected fixed helper discovery failure")
+        }
+        XCTAssertEqual(error, HelperProtocolError(code: "discoveryFailure", message: "local app discovery failed"))
+    }
 }
 
 final class FakeHelperLauncher: HelperLaunching {
