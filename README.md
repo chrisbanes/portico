@@ -52,6 +52,20 @@ xcodebuild \
   test
 ```
 
+Before opening a pull request, run the same checks as the separate Swift and
+Go CI results:
+
+```shell
+./Scripts/generate-xcode-project.sh
+xcodebuild \
+  -project Portico.xcodeproj \
+  -scheme Portico \
+  -destination 'platform=macOS' \
+  -derivedDataPath .build/xcode \
+  test
+(cd helper && go build ./cmd/portico-helper && go test ./...)
+```
+
 Verify that a fresh generated project is ignored, deterministic, and visible to
 Xcode before running the generated-project tests:
 
