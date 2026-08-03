@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  swift:
+    name: Swift
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Setup Go 1.26.5 for embedded helper
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.5'
+          cache: false
+
+      - name: Install XcodeGen 2.46.0
+        run: |
+          curl --fail --location --retry 3 --output xcodegen.zip \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          echo '4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  xcodegen.zip' | shasum -a 256 -c -
+          unzip -q xcodegen.zip
+          xcodegen/bin/xcodegen --version
+          echo "$PWD/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Generate Xcode project
+        run: ./Scripts/generate-xcode-project.sh
+
+      - name: Test Swift application
+        run: >
+          xcodebuild -project Portico.xcodeproj -scheme Portico
+          -destination 'platform=macOS' -derivedDataPath .build/xcode test
+
+  go:
+    name: Go
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: helper
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: helper/go.sum
+
+      - name: Build Go helper
+        run: go build ./cmd/portico-helper
+
+      - name: Test Go helper
+        run: go test ./...
