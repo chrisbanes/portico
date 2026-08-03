@@ -57,7 +57,7 @@
 - Method: `squash`
 - Issue closure: `closing-keyword`
 - Required reviews: `none`
-- Required checks: `none`
+- Required checks: `Swift`, `Go`
 - Done automation: `set-status`
 - Automation description: Enabled `Item closed` and `Pull request merged`
   workflows set Status to `Done`; items remain visible. `Auto-close issue` and
