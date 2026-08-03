@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,6 +18,155 @@ import (
 )
 
 const testPortalID = "9f55ca93-d7b3-4eab-a871-310ea576005a"
+const secondPortalID = "5ea74329-3144-4ba2-925f-138d14d61fcc"
+
+func TestRuntimeKeepsTwoIndependentPortalsOnline(t *testing.T) {
+	root := t.TempDir()
+	events := make(map[string]StatusEvent)
+	factory := func(dir, hostname string) Node {
+		id := filepath.Base(dir)
+		suffix := "1"
+		address := "100.64.0.1"
+		if id == secondPortalID {
+			suffix = "2"
+			address = "100.64.0.2"
+		}
+		dnsName := hostname + "-" + suffix + ".example.ts.net."
+		return &fakeNode{
+			watcher: newFakeWatcher(),
+			status: Status{
+				BackendState: "Running",
+				StableNodeID: "node-" + suffix,
+				DNSName:      dnsName,
+				CertDomains:  []string{strings.TrimSuffix(dnsName, ".")},
+				Addresses:    []string{address},
+			},
+		}
+	}
+	runtime := NewRuntime(root, factory)
+	emit := func(event Event) {
+		if event.Status != nil {
+			events[event.PortalID] = *event.Status
+		}
+	}
+
+	if err := runtime.Start(context.Background(), Config{ID: testPortalID, Name: "hermes", Port: 8787}, emit); err != nil {
+		t.Fatalf("Start first Portal: %v", err)
+	}
+	if err := runtime.Start(context.Background(), Config{ID: secondPortalID, Name: "atlas", Port: 8788}, emit); err != nil {
+		t.Fatalf("Start second Portal: %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	first, firstOK := events[testPortalID]
+	second, secondOK := events[secondPortalID]
+	if !firstOK || !secondOK || first.State != StateOnline || second.State != StateOnline {
+		t.Fatalf("events = %+v, want both Portals online", events)
+	}
+	if first.StableNodeID == second.StableNodeID || first.AssignedName == second.AssignedName || first.PortalURL == second.PortalURL || first.Addresses[0] == second.Addresses[0] {
+		t.Fatalf("statuses = (%+v, %+v), want independent identities and addresses", first, second)
+	}
+}
+
+func TestCleanupRejectedPortalClosesAndDeletesOnlyAddressedPortal(t *testing.T) {
+	root := t.TempDir()
+	nodes := make(map[string]*fakeNode)
+	runtime := NewRuntime(root, func(dir, _ string) Node {
+		node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+		nodes[filepath.Base(dir)] = node
+		return node
+	})
+	for _, config := range []Config{
+		{ID: testPortalID, Name: "hermes", Port: 8787},
+		{ID: secondPortalID, Name: "atlas", Port: 8788},
+	} {
+		if err := runtime.Start(context.Background(), config, func(Event) {}); err != nil {
+			t.Fatalf("Start(%s): %v", config.ID, err)
+		}
+		if err := os.MkdirAll(filepath.Join(root, config.ID), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	if err := runtime.CleanupRejectedPortal(testPortalID); err != nil {
+		t.Fatalf("CleanupRejectedPortal: %v", err)
+	}
+	if !nodes[testPortalID].closed {
+		t.Fatal("rejected Portal node was not closed")
+	}
+	if _, err := os.Stat(filepath.Join(root, testPortalID)); !os.IsNotExist(err) {
+		t.Fatalf("rejected Portal state still exists: %v", err)
+	}
+	if nodes[secondPortalID].closed {
+		t.Fatal("unrelated Portal node was closed")
+	}
+	if _, err := os.Stat(filepath.Join(root, secondPortalID)); err != nil {
+		t.Fatalf("unrelated Portal state was affected: %v", err)
+	}
+	if err := runtime.Authenticate(context.Background(), secondPortalID); err != nil {
+		t.Fatalf("unrelated Portal is no longer online: %v", err)
+	}
+	if err := runtime.CleanupRejectedPortal(testPortalID); err != nil {
+		t.Fatalf("repeated cleanup should be idempotent: %v", err)
+	}
+}
+
+func TestCleanupRejectedPortalRejectsUntrustedDeletionTargets(t *testing.T) {
+	root := t.TempDir()
+	protected := filepath.Join(root, secondPortalID)
+	if err := os.MkdirAll(protected, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewRuntime(root, func(_, _ string) Node { return &fakeNode{watcher: newFakeWatcher()} })
+
+	for _, portalID := range []string{"../" + secondPortalID, "not-a-uuid", testPortalID + "/child"} {
+		if err := runtime.CleanupRejectedPortal(portalID); err == nil {
+			t.Fatalf("CleanupRejectedPortal(%q) = nil, want error", portalID)
+		}
+	}
+	if _, err := os.Stat(protected); err != nil {
+		t.Fatalf("protected state directory was affected: %v", err)
+	}
+}
+
+func TestCleanupWaitsForStartBeforeDeletingAnyPortalState(t *testing.T) {
+	root := t.TempDir()
+	blocked := &fakeNode{
+		watcher:      newFakeWatcher(),
+		startEntered: make(chan struct{}),
+		releaseStart: make(chan struct{}),
+	}
+	runtime := NewRuntime(root, func(_, _ string) Node { return blocked })
+	protected := filepath.Join(root, secondPortalID)
+	if err := os.MkdirAll(protected, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- runtime.Start(context.Background(), Config{ID: testPortalID, Name: "hermes", Port: 8787}, func(Event) {})
+	}()
+	<-blocked.startEntered
+	cleanupDone := make(chan error, 1)
+	go func() { cleanupDone <- runtime.CleanupRejectedPortal(secondPortalID) }()
+
+	select {
+	case <-cleanupDone:
+		t.Fatal("cleanup completed while another Portal start was in progress")
+	default:
+	}
+	if _, err := os.Stat(protected); err != nil {
+		t.Fatalf("state was deleted during another Portal start: %v", err)
+	}
+	close(blocked.releaseStart)
+	if err := <-startDone; err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := <-cleanupDone; err != nil {
+		t.Fatalf("CleanupRejectedPortal: %v", err)
+	}
+	_ = runtime.Close()
+}
 
 func TestRuntimeUsesUUIDStateDirectoryAndStableIdentity(t *testing.T) {
 	factory := newFakeFactory()
@@ -101,6 +251,18 @@ func TestMapStatusUsesAnEmptyAddressArray(t *testing.T) {
 	mapped := mapStatus(Status{BackendState: "NeedsLogin"})
 	if mapped.Addresses == nil {
 		t.Fatal("Addresses = nil, want an empty JSON array")
+	}
+}
+
+func TestMapStatusKeepsOpaqueTailnetNameSeparateFromDisplaySuffix(t *testing.T) {
+	mapped := mapStatus(Status{
+		BackendState:   "Running",
+		TailnetName:    "opaque-identity-do-not-display",
+		MagicDNSSuffix: "safe.example.ts.net",
+	})
+
+	if mapped.TailnetName != "opaque-identity-do-not-display" || mapped.MagicDNSSuffix != "safe.example.ts.net" {
+		t.Fatalf("mapped status = %+v, want exact identity and separate suffix", mapped)
 	}
 }
 
@@ -404,6 +566,7 @@ type fakeNode struct {
 	releaseStart              chan struct{}
 	startReturned             bool
 	closedBeforeStartReturned bool
+	closed                    bool
 	listenNetwork             string
 	listenAddress             string
 	listener                  *fakeListener
@@ -453,6 +616,7 @@ func (n *fakeNode) Close() error {
 		n.observeClose()
 	}
 	n.closedBeforeStartReturned = !n.startReturned
+	n.closed = true
 	if n.listener != nil {
 		n.listenerClosedBeforeNode = n.listener.closed
 	} else if n.realListener != nil {

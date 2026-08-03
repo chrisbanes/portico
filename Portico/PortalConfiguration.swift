@@ -5,19 +5,53 @@ struct PortalConfiguration: Codable, Equatable {
     let name: String
     let localAppPort: UInt16
     let createdAt: Date
+    var lifecycle: PortalLifecycle = .active
 }
 
-struct PortalConfigurationEnvelope: Codable, Equatable {
-    static let currentVersion = 1
+enum PortalLifecycle: String, Codable, Equatable {
+    case active
+    case pendingTailnetRejection
+}
+
+struct TailnetBinding: Codable, Equatable {
+    let name: String
+    var magicDNSSuffix: String
+}
+
+enum InstallationAlertKind: String, Codable, Equatable {
+    case crossTailnetRejection
+}
+
+struct InstallationAlert: Codable, Equatable, Identifiable {
+    let id: UUID
+    let kind: InstallationAlertKind
+    let portalName: String
+    let assignedName: String?
+    let expectedMagicDNSSuffix: String?
+    let rejectedMagicDNSSuffix: String?
+    let createdAt: Date
+}
+
+struct InstallationRecord: Codable, Equatable {
+    static let currentVersion = 2
 
     let version: Int
-    let portal: PortalConfiguration
+    var tailnetBinding: TailnetBinding?
+    var portals: [PortalConfiguration]
+    var alerts: [InstallationAlert]
 
-    init(portal: PortalConfiguration) {
+    init(
+        tailnetBinding: TailnetBinding? = nil,
+        portals: [PortalConfiguration] = [],
+        alerts: [InstallationAlert] = []
+    ) {
         version = Self.currentVersion
-        self.portal = portal
+        self.tailnetBinding = tailnetBinding
+        self.portals = portals
+        self.alerts = alerts
     }
 }
+
 
 enum PortalValidationError: Error, Equatable {
     case invalidName

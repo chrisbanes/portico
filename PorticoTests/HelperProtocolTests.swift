@@ -34,11 +34,17 @@ final class HelperProtocolTests: XCTestCase {
             #"{"version":1,"requestId":"auth-1","command":"authenticatePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}"#,
             as: HelperRequest<AuthenticatePortalPayload>.self
         )
-        let statusFixture = #"{"version":1,"event":"portalStatus","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"state":"online","stableNodeId":"node-1","assignedName":"hermes-1","portalURL":"https:\/\/hermes-1.example.ts.net\/","addresses":["100.64.0.1","fd7a:115c:a1e0::1"]}}"#
+        try assertRoundTrip(
+            #"{"version":1,"requestId":"cleanup-1","command":"cleanupRejectedPortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}"#,
+            as: HelperRequest<CleanupRejectedPortalPayload>.self
+        )
+        let statusFixture = #"{"version":1,"event":"portalStatus","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"state":"online","stableNodeId":"node-1","assignedName":"hermes-1","portalURL":"https:\/\/hermes-1.example.ts.net\/","addresses":["100.64.0.1","fd7a:115c:a1e0::1"],"tailnetName":"opaque-identity-do-not-display","magicDNSSuffix":"example.ts.net"}}"#
         let status = try JSONDecoder().decode(HelperEvent<PortalStatusPayload>.self, from: Data(statusFixture.utf8))
         XCTAssertEqual(status.portalId, portalID)
         XCTAssertEqual(status.payload.state, .online)
         XCTAssertEqual(status.payload.portalURL, URL(string: "https://hermes-1.example.ts.net/"))
+        XCTAssertEqual(status.payload.tailnetName, "opaque-identity-do-not-display")
+        XCTAssertEqual(status.payload.magicDNSSuffix, "example.ts.net")
         try assertRoundTrip(statusFixture, as: HelperEvent<PortalStatusPayload>.self)
 
         let authenticationFixture = #"{"version":1,"event":"authenticationURL","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"url":"https:\/\/login.tailscale.com\/a\/secret"}}"#

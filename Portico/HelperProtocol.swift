@@ -7,6 +7,7 @@ enum HelperCommand: String, Codable {
     case shutdown
     case startPortal
     case authenticatePortal
+    case cleanupRejectedPortal
     case discoverLocalApps
 }
 
@@ -52,6 +53,14 @@ struct AuthenticatePortalResult: Codable, Equatable {
     let accepted: Bool
 }
 
+struct CleanupRejectedPortalPayload: Codable, Equatable {
+    let portalId: UUID
+}
+
+struct CleanupRejectedPortalResult: Codable, Equatable {
+    let accepted: Bool
+}
+
 struct LocalAppCandidatePayload: Codable, Equatable {
     let localAppPort: UInt16
     let processLabel: String
@@ -89,6 +98,26 @@ struct PortalStatusPayload: Codable, Equatable {
     let assignedName: String?
     let portalURL: URL?
     let addresses: [String]
+    let tailnetName: String?
+    let magicDNSSuffix: String?
+
+    init(
+        state: PortalTailscaleState,
+        stableNodeId: String?,
+        assignedName: String?,
+        portalURL: URL?,
+        addresses: [String],
+        tailnetName: String? = nil,
+        magicDNSSuffix: String? = nil
+    ) {
+        self.state = state
+        self.stableNodeId = stableNodeId
+        self.assignedName = assignedName
+        self.portalURL = portalURL
+        self.addresses = addresses
+        self.tailnetName = tailnetName
+        self.magicDNSSuffix = magicDNSSuffix
+    }
 }
 
 struct AuthenticationURLPayload: Codable, Equatable {

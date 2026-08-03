@@ -16,15 +16,31 @@ struct PorticoApp: App {
 private struct PortalView: View {
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
+    @State private var showingResetConfirmation = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(supervisor.availability.title, systemImage: supervisor.availability.symbolName)
+            if let suffix = controller.tailnetDisplaySuffix {
+                LabeledContent("Tailnet", value: suffix)
+            }
             Divider()
-            if let portal = controller.portal {
+            ForEach(controller.pendingPortals, id: \.id) { portal in
+                pendingWarning(portal)
+            }
+            ForEach(controller.alerts) { alert in
+                completedWarning(alert)
+            }
+            ForEach(controller.portals, id: \.id) { portal in
                 portalStatus(portal)
-            } else {
-                addPortalForm
+                Divider()
+            }
+            addPortalForm
+            if controller.canResetTailnet {
+                Divider()
+                Button("Reset Tailnet", role: .destructive) {
+                    showingResetConfirmation = true
+                }
             }
             if let message = controller.message {
                 Text(message)
@@ -33,7 +49,17 @@ private struct PortalView: View {
             }
         }
         .padding()
-        .frame(width: 320)
+        .frame(width: 380)
+        .confirmationDialog(
+            "Reset this installation's tailnet binding? This does not remove any remote Tailscale node.",
+            isPresented: $showingResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Tailnet", role: .destructive) {
+                controller.resetTailnet(confirmed: true)
+            }
+            Button("Cancel", role: .cancel) {}
+        }
         Divider()
         Button("Quit Portico") {
             NSApp.terminate(nil)
@@ -83,7 +109,10 @@ private struct PortalView: View {
     private func portalStatus(_ portal: PortalConfiguration) -> some View {
         Text(portal.name).font(.headline)
         LabeledContent("Local App Port", value: String(portal.localAppPort))
-        if let status = controller.status {
+        if portal.lifecycle == .pendingTailnetRejection {
+            Text("Cleanup pending")
+                .foregroundStyle(.secondary)
+        } else if let status = controller.statuses[portal.id] {
             LabeledContent("Tailscale", value: status.state.title)
             if let assignedName = status.assignedName {
                 LabeledContent("Assigned Name", value: assignedName)
@@ -95,12 +124,36 @@ private struct PortalView: View {
                 LabeledContent("Addresses", value: status.addresses.joined(separator: ", "))
             }
             if status.state == .authenticating {
-                Button("Authenticate") { controller.authenticate() }
+                Button("Authenticate") { controller.authenticate(id: portal.id) }
                     .buttonStyle(.borderedProminent)
             }
         } else {
             Text("Waiting for Portal status…")
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private func pendingWarning(_ portal: PortalConfiguration) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Cleanup in progress", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+            Text(controller.pendingWarningText(for: portal))
+                .font(.caption)
+            Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
+                .font(.caption)
+        }
+    }
+
+    private func completedWarning(_ alert: InstallationAlert) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Portal removed from this Mac", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+            Text(controller.completedWarningText(for: alert))
+                .font(.caption)
+            Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
+                .font(.caption)
+            Button("Dismiss") { controller.dismissAlert(id: alert.id) }
+                .controlSize(.small)
         }
     }
 }

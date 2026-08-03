@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -45,11 +46,13 @@ func (c Config) normalized() Config {
 }
 
 type Status struct {
-	BackendState string
-	StableNodeID string
-	DNSName      string
-	CertDomains  []string
-	Addresses    []string
+	BackendState   string
+	StableNodeID   string
+	DNSName        string
+	CertDomains    []string
+	Addresses      []string
+	TailnetName    string
+	MagicDNSSuffix string
 }
 
 type Notification struct {
@@ -73,11 +76,13 @@ type Node interface {
 type NodeFactory func(dir, hostname string) Node
 
 type StatusEvent struct {
-	State        State    `json:"state"`
-	StableNodeID string   `json:"stableNodeId,omitempty"`
-	AssignedName string   `json:"assignedName,omitempty"`
-	PortalURL    string   `json:"portalURL,omitempty"`
-	Addresses    []string `json:"addresses"`
+	State          State    `json:"state"`
+	StableNodeID   string   `json:"stableNodeId,omitempty"`
+	AssignedName   string   `json:"assignedName,omitempty"`
+	PortalURL      string   `json:"portalURL,omitempty"`
+	Addresses      []string `json:"addresses"`
+	TailnetName    string   `json:"tailnetName,omitempty"`
+	MagicDNSSuffix string   `json:"magicDNSSuffix,omitempty"`
 }
 
 type Event struct {
@@ -87,9 +92,14 @@ type Event struct {
 }
 
 type Runtime struct {
+	mu        sync.Mutex
+	stateRoot string
+	factory   NodeFactory
+	portals   map[string]*portalRuntime
+}
+
+type portalRuntime struct {
 	mu                    sync.Mutex
-	stateRoot             string
-	factory               NodeFactory
 	config                *Config
 	node                  Node
 	watcher               Watcher
@@ -102,7 +112,7 @@ type Runtime struct {
 }
 
 func NewRuntime(stateRoot string, factory NodeFactory) *Runtime {
-	return &Runtime{stateRoot: stateRoot, factory: factory}
+	return &Runtime{stateRoot: stateRoot, factory: factory, portals: make(map[string]*portalRuntime)}
 }
 
 func (r *Runtime) Start(ctx context.Context, config Config, emit func(Event)) error {
@@ -112,10 +122,93 @@ func (r *Runtime) Start(ctx context.Context, config Config, emit func(Event)) er
 		return err
 	}
 	config = config.normalized()
-	if r.node != nil {
-		return errors.New("a portal is already running")
+	if _, exists := r.portals[config.ID]; exists {
+		return errors.New("portal is already running")
 	}
 	node := r.factory(filepath.Join(r.stateRoot, config.ID), config.Name)
+	portal := &portalRuntime{}
+	if err := portal.start(ctx, config, node, emit); err != nil {
+		return err
+	}
+	r.portals[config.ID] = portal
+	return nil
+}
+
+func (r *Runtime) Authenticate(ctx context.Context, portalID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	portalID, err := normalizePortalID(portalID)
+	if err != nil {
+		return errors.New("portal is not running")
+	}
+	portal := r.portals[portalID]
+	if portal == nil {
+		return errors.New("portal is not running")
+	}
+	return portal.authenticate(ctx)
+}
+
+func (r *Runtime) CleanupRejectedPortal(portalID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	portalID, err := normalizePortalID(portalID)
+	if err != nil {
+		return errors.New("invalid portal ID")
+	}
+	stateDirectory, err := validatedStateDirectory(r.stateRoot, portalID)
+	if err != nil {
+		return err
+	}
+	if portal := r.portals[portalID]; portal != nil {
+		if err := portal.close(); err != nil {
+			return err
+		}
+	}
+	if err := os.RemoveAll(stateDirectory); err != nil {
+		return errors.New("remove portal state")
+	}
+	delete(r.portals, portalID)
+	return nil
+}
+
+func (r *Runtime) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var errs []error
+	for portalID, portal := range r.portals {
+		errs = append(errs, portal.close())
+		delete(r.portals, portalID)
+	}
+	return errors.Join(errs...)
+}
+
+func normalizePortalID(portalID string) (string, error) {
+	portalID = strings.ToLower(portalID)
+	if !uuidPattern.MatchString(portalID) {
+		return "", errors.New("invalid portal ID")
+	}
+	return portalID, nil
+}
+
+func validatedStateDirectory(stateRoot, portalID string) (string, error) {
+	portalID, err := normalizePortalID(portalID)
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(filepath.Clean(stateRoot))
+	if err != nil {
+		return "", errors.New("resolve state root")
+	}
+	target := filepath.Join(root, portalID)
+	if filepath.Dir(target) != root || filepath.Base(target) != portalID {
+		return "", errors.New("invalid portal state directory")
+	}
+	return target, nil
+}
+
+func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emit func(Event)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if err := node.Start(); err != nil {
 		_ = node.Close()
 		return errors.New("start portal")
@@ -142,10 +235,10 @@ func (r *Runtime) Start(ctx context.Context, config Config, emit func(Event)) er
 	return nil
 }
 
-func (r *Runtime) Authenticate(ctx context.Context, portalID string) error {
+func (r *portalRuntime) authenticate(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.node == nil || r.config == nil || !strings.EqualFold(r.config.ID, portalID) {
+	if r.node == nil || r.config == nil {
 		return errors.New("portal is not running")
 	}
 	if err := r.node.StartLoginInteractive(ctx); err != nil {
@@ -155,7 +248,7 @@ func (r *Runtime) Authenticate(ctx context.Context, portalID string) error {
 	return nil
 }
 
-func (r *Runtime) Close() error {
+func (r *portalRuntime) close() error {
 	r.mu.Lock()
 	err := r.closeLocked()
 	r.mu.Unlock()
@@ -163,7 +256,7 @@ func (r *Runtime) Close() error {
 	return err
 }
 
-func (r *Runtime) closeLocked() error {
+func (r *portalRuntime) closeLocked() error {
 	var proxyErr error
 	if r.cancel != nil {
 		r.cancel()
@@ -189,7 +282,7 @@ func (r *Runtime) closeLocked() error {
 	return errors.Join(proxyErr, nodeErr)
 }
 
-func (r *Runtime) watch(ctx context.Context, watcher Watcher) {
+func (r *portalRuntime) watch(ctx context.Context, watcher Watcher) {
 	defer r.watchDone.Done()
 	for {
 		notification, err := watcher.Next()
@@ -206,7 +299,7 @@ func (r *Runtime) watch(ctx context.Context, watcher Watcher) {
 	}
 }
 
-func (r *Runtime) emitStatusLocked(ctx context.Context) error {
+func (r *portalRuntime) emitStatusLocked(ctx context.Context) error {
 	if r.node == nil || r.config == nil || r.emit == nil {
 		return nil
 	}
@@ -226,7 +319,7 @@ func (r *Runtime) emitStatusLocked(ctx context.Context) error {
 	return nil
 }
 
-func (r *Runtime) ensureProxyLocked() error {
+func (r *portalRuntime) ensureProxyLocked() error {
 	if r.proxy != nil {
 		return nil
 	}
@@ -244,9 +337,11 @@ func (r *Runtime) ensureProxyLocked() error {
 
 func mapStatus(status Status) StatusEvent {
 	mapped := StatusEvent{
-		State:        mapBackendState(status.BackendState),
-		StableNodeID: status.StableNodeID,
-		Addresses:    append([]string{}, status.Addresses...),
+		State:          mapBackendState(status.BackendState),
+		StableNodeID:   status.StableNodeID,
+		Addresses:      append([]string{}, status.Addresses...),
+		TailnetName:    status.TailnetName,
+		MagicDNSSuffix: status.MagicDNSSuffix,
 	}
 	dnsName := strings.TrimSuffix(status.DNSName, ".")
 	if dnsName != "" {
