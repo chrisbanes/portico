@@ -15,6 +15,12 @@
 		A00000000000000000000007 /* HelperShutdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000017 /* HelperShutdownTests.swift */; };
 		A00000000000000000000009 /* ProcessHelperLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000019 /* ProcessHelperLauncher.swift */; };
 		A0000000000000000000000A /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001A /* AppDelegate.swift */; };
+		A0000000000000000000000B /* PortalConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001B /* PortalConfigurationTests.swift */; };
+		A0000000000000000000000C /* PortalStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001C /* PortalStoreTests.swift */; };
+		A0000000000000000000000D /* PortalConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001D /* PortalConfiguration.swift */; };
+		A0000000000000000000000E /* PortalStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001E /* PortalStore.swift */; };
+		A0000000000000000000000F /* PortalControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001F /* PortalControllerTests.swift */; };
+		A00000000000000000000090 /* PortalController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000091 /* PortalController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -38,6 +44,12 @@
 		A00000000000000000000017 /* HelperShutdownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelperShutdownTests.swift; sourceTree = "<group>"; };
 		A00000000000000000000019 /* ProcessHelperLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessHelperLauncher.swift; sourceTree = "<group>"; };
 		A0000000000000000000001A /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		A0000000000000000000001B /* PortalConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortalConfigurationTests.swift; sourceTree = "<group>"; };
+		A0000000000000000000001C /* PortalStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortalStoreTests.swift; sourceTree = "<group>"; };
+		A0000000000000000000001D /* PortalConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortalConfiguration.swift; sourceTree = "<group>"; };
+		A0000000000000000000001E /* PortalStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortalStore.swift; sourceTree = "<group>"; };
+		A0000000000000000000001F /* PortalControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortalControllerTests.swift; sourceTree = "<group>"; };
+		A00000000000000000000091 /* PortalController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortalController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -55,8 +67,8 @@
 			);
 			sourceTree = "<group>";
 		};
-		A00000000000000000000021 /* Portico */ = {isa = PBXGroup; children = (A00000000000000000000010 /* PorticoApp.swift */, A0000000000000000000001A /* AppDelegate.swift */, A00000000000000000000014 /* HelperProtocol.swift */, A00000000000000000000016 /* HelperSupervisor.swift */, A00000000000000000000019 /* ProcessHelperLauncher.swift */,); path = Portico; sourceTree = "<group>"; };
-		A00000000000000000000022 /* PorticoTests */ = {isa = PBXGroup; children = (A00000000000000000000011 /* HelperProtocolTests.swift */, A00000000000000000000015 /* HelperSupervisorTests.swift */, A00000000000000000000017 /* HelperShutdownTests.swift */,); path = PorticoTests; sourceTree = "<group>"; };
+		A00000000000000000000021 /* Portico */ = {isa = PBXGroup; children = (A00000000000000000000010 /* PorticoApp.swift */, A0000000000000000000001A /* AppDelegate.swift */, A00000000000000000000014 /* HelperProtocol.swift */, A00000000000000000000016 /* HelperSupervisor.swift */, A00000000000000000000019 /* ProcessHelperLauncher.swift */, A0000000000000000000001D /* PortalConfiguration.swift */, A0000000000000000000001E /* PortalStore.swift */, A00000000000000000000091 /* PortalController.swift */,); path = Portico; sourceTree = "<group>"; };
+		A00000000000000000000022 /* PorticoTests */ = {isa = PBXGroup; children = (A00000000000000000000011 /* HelperProtocolTests.swift */, A00000000000000000000015 /* HelperSupervisorTests.swift */, A00000000000000000000017 /* HelperShutdownTests.swift */, A0000000000000000000001B /* PortalConfigurationTests.swift */, A0000000000000000000001C /* PortalStoreTests.swift */, A0000000000000000000001F /* PortalControllerTests.swift */,); path = PorticoTests; sourceTree = "<group>"; };
 		A00000000000000000000023 /* Products */ = {isa = PBXGroup; children = (A00000000000000000000012 /* Portico.app */, A00000000000000000000013 /* PorticoTests.xctest */,); name = Products; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
@@ -114,8 +126,12 @@
 			files = ();
 			inputPaths = (
 				"$(SRCROOT)/helper/go.mod",
+				"$(SRCROOT)/helper/go.sum",
 				"$(SRCROOT)/helper/cmd/portico-helper/main.go",
 				"$(SRCROOT)/helper/internal/protocol/server.go",
+				"$(SRCROOT)/helper/internal/portal/runtime.go",
+				"$(SRCROOT)/helper/internal/portal/proxy.go",
+				"$(SRCROOT)/helper/internal/portal/tsnet_node.go",
 			);
 			name = "Build and Embed Helper";
 			outputPaths = (
@@ -123,13 +139,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
-			shellScript = "set -euo pipefail\nhelper_output=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/portico-helper\"\nmkdir -p \"$(dirname \"${helper_output}\")\"\ncd \"${SRCROOT}/helper\"\nGOCACHE=\"${DERIVED_FILE_DIR}/go-build-cache\" go build -trimpath -o \"${helper_output}\" ./cmd/portico-helper\nchmod 755 \"${helper_output}\"\n";
+			shellScript = "set -euo pipefail\nhelper_output=\"${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/portico-helper\"\nmkdir -p \"$(dirname \"${helper_output}\")\"\ncd \"${SRCROOT}/helper\"\nGOCACHE=\"${DERIVED_FILE_DIR}/go-build-cache\" GOMODCACHE=\"${SRCROOT}/helper/.build/go-mod-cache\" go build -trimpath -o \"${helper_output}\" ./cmd/portico-helper\nchmod 755 \"${helper_output}\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A00000000000000000000050 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001 /* PorticoApp.swift in Sources */, A0000000000000000000000A /* AppDelegate.swift in Sources */, A00000000000000000000004 /* HelperProtocol.swift in Sources */, A00000000000000000000006 /* HelperSupervisor.swift in Sources */, A00000000000000000000009 /* ProcessHelperLauncher.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
-		A00000000000000000000053 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000002 /* HelperProtocolTests.swift in Sources */, A00000000000000000000005 /* HelperSupervisorTests.swift in Sources */, A00000000000000000000007 /* HelperShutdownTests.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000050 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001 /* PorticoApp.swift in Sources */, A0000000000000000000000A /* AppDelegate.swift in Sources */, A00000000000000000000004 /* HelperProtocol.swift in Sources */, A00000000000000000000006 /* HelperSupervisor.swift in Sources */, A00000000000000000000009 /* ProcessHelperLauncher.swift in Sources */, A0000000000000000000000D /* PortalConfiguration.swift in Sources */, A0000000000000000000000E /* PortalStore.swift in Sources */, A00000000000000000000090 /* PortalController.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A00000000000000000000053 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000002 /* HelperProtocolTests.swift in Sources */, A00000000000000000000005 /* HelperSupervisorTests.swift in Sources */, A00000000000000000000007 /* HelperShutdownTests.swift in Sources */, A0000000000000000000000B /* PortalConfigurationTests.swift in Sources */, A0000000000000000000000C /* PortalStoreTests.swift in Sources */, A0000000000000000000000F /* PortalControllerTests.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */

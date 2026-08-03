@@ -6,6 +6,27 @@ enum HelperAvailability: Equatable {
     case failed
 }
 
+enum PortalHelperEvent: Equatable {
+    case status(UUID, PortalStatusPayload)
+    case authenticationURL(UUID, URL)
+}
+
+enum HelperClientError: Error {
+    case unavailable
+    case protocolFailure
+    case helper(HelperProtocolError)
+}
+
+@MainActor
+protocol PortalHelperClient: AnyObject {
+    var availability: HelperAvailability { get }
+    var onConnected: (() -> Void)? { get set }
+    var onEvent: ((PortalHelperEvent) -> Void)? { get set }
+
+    func startPortal(_ portal: PortalConfiguration, completion: @escaping (Result<Void, Error>) -> Void)
+    func authenticatePortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void)
+}
+
 protocol HelperProcess: AnyObject {
     var isRunning: Bool { get }
 
@@ -17,22 +38,27 @@ protocol HelperProcess: AnyObject {
 protocol HelperLaunching {
     func launch(
         at executableURL: URL,
+        arguments: [String],
         onLine: @escaping (Data) -> Void,
         onEOF: @escaping () -> Void,
         onExit: @escaping (Int32) -> Void
     ) throws -> HelperProcess
 }
 
-final class HelperSupervisor: ObservableObject {
+@MainActor
+final class HelperSupervisor: ObservableObject, PortalHelperClient {
     @Published private(set) var availability: HelperAvailability = .connecting
+    var onConnected: (() -> Void)?
+    var onEvent: ((PortalHelperEvent) -> Void)?
 
     private let helperURL: URL
+    private let stateRootURL: URL
     private let launcher: HelperLaunching
     private let requestIDProvider: () -> String
     private let handshakeTimeout: TimeInterval
     private let shutdownGraceInterval: TimeInterval
     private var process: HelperProcess?
-    private var handshakeRequestID: String?
+    private var pendingResponses: [String: (Data?) -> Void] = [:]
     private var handshakeTimeoutWorkItem: DispatchWorkItem?
     private var shutdownTimeoutWorkItem: DispatchWorkItem?
     private var isShuttingDown = false
@@ -41,12 +67,14 @@ final class HelperSupervisor: ObservableObject {
 
     init(
         helperURL: URL,
+        stateRootURL: URL = HelperSupervisor.defaultStateRootURL(),
         launcher: HelperLaunching,
         requestIDProvider: @escaping () -> String = { UUID().uuidString },
         handshakeTimeout: TimeInterval = 3,
         shutdownGraceInterval: TimeInterval = 1
     ) {
         self.helperURL = helperURL
+        self.stateRootURL = stateRootURL
         self.launcher = launcher
         self.requestIDProvider = requestIDProvider
         self.handshakeTimeout = handshakeTimeout
@@ -55,17 +83,27 @@ final class HelperSupervisor: ObservableObject {
 
     func start() {
         availability = .connecting
-        let requestID = requestIDProvider()
-        handshakeRequestID = requestID
-
         do {
             process = try launcher.launch(
                 at: helperURL,
+                arguments: ["--state-root", stateRootURL.path],
                 onLine: { [weak self] data in self?.receive(line: data) },
                 onEOF: { [weak self] in self?.processExited() },
                 onExit: { [weak self] _ in self?.processExited() }
             )
-            try send(command: .handshake, requestID: requestID)
+            try sendRequest(command: .handshake, payload: EmptyPayload()) { [weak self] (result: Result<HandshakeResult, Error>) in
+                guard let self else { return }
+                guard case let .success(handshake) = result,
+                      handshake.protocolVersion == helperProtocolVersion
+                else {
+                    self.fail()
+                    return
+                }
+                self.handshakeTimeoutWorkItem?.cancel()
+                self.handshakeTimeoutWorkItem = nil
+                self.availability = .connected
+                self.onConnected?()
+            }
             let workItem = DispatchWorkItem { [weak self] in self?.fail() }
             handshakeTimeoutWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + handshakeTimeout, execute: workItem)
@@ -74,12 +112,40 @@ final class HelperSupervisor: ObservableObject {
         }
     }
 
+    func startPortal(_ portal: PortalConfiguration, completion: @escaping (Result<Void, Error>) -> Void) {
+        guard availability == .connected else {
+            completion(.failure(HelperClientError.unavailable))
+            return
+        }
+        let payload = StartPortalPayload(portalId: portal.id, portalName: portal.name, localAppPort: portal.localAppPort)
+        do {
+            try sendRequest(command: .startPortal, payload: payload) { (result: Result<StartPortalResult, Error>) in
+                completion(result.map { _ in () })
+            }
+        } catch {
+            completion(.failure(error))
+        }
+    }
+
+    func authenticatePortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void) {
+        guard availability == .connected else {
+            completion(.failure(HelperClientError.unavailable))
+            return
+        }
+        do {
+            try sendRequest(command: .authenticatePortal, payload: AuthenticatePortalPayload(portalId: id)) { (result: Result<AuthenticatePortalResult, Error>) in
+                completion(result.map { _ in () })
+            }
+        } catch {
+            completion(.failure(error))
+        }
+    }
+
     func shutdown(completion: @escaping () -> Void) {
         if isShutdownComplete {
             completion()
             return
         }
-
         shutdownCompletions.append(completion)
         guard !isShuttingDown else { return }
         isShuttingDown = true
@@ -90,9 +156,8 @@ final class HelperSupervisor: ObservableObject {
             finishShutdown()
             return
         }
-
         do {
-            try send(command: .shutdown, requestID: requestIDProvider())
+            try sendWithoutResponse(command: .shutdown, requestID: requestIDProvider(), payload: EmptyPayload())
             process?.closeInput()
             let workItem = DispatchWorkItem { [weak self] in self?.forceShutdown() }
             shutdownTimeoutWorkItem = workItem
@@ -106,44 +171,88 @@ final class HelperSupervisor: ObservableObject {
 
     private func receive(line: Data) {
         guard !isShuttingDown else { return }
-        guard availability == .connecting else { return }
-        guard let response = try? JSONDecoder().decode(HelperResponse<HandshakeResult>.self, from: line) else {
-            fail()
-            return
-        }
-        guard response.requestId == handshakeRequestID else { return }
-        guard response.version == helperProtocolVersion,
-              response.error == nil,
-              response.result?.protocolVersion == helperProtocolVersion
+        guard let envelope = try? JSONDecoder().decode(IncomingHelperEnvelope.self, from: line),
+              envelope.version == helperProtocolVersion
         else {
             fail()
             return
         }
-
-        handshakeTimeoutWorkItem?.cancel()
-        handshakeTimeoutWorkItem = nil
-        availability = .connected
+        if let requestID = envelope.requestId {
+            pendingResponses.removeValue(forKey: requestID)?(line)
+            return
+        }
+        guard let event = envelope.event else {
+            fail()
+            return
+        }
+        switch event {
+        case .portalStatus:
+            guard let message = try? JSONDecoder().decode(HelperEvent<PortalStatusPayload>.self, from: line),
+                  message.event == .portalStatus
+            else {
+                fail()
+                return
+            }
+            onEvent?(.status(message.portalId, message.payload))
+        case .authenticationURL:
+            guard let message = try? JSONDecoder().decode(HelperEvent<AuthenticationURLPayload>.self, from: line),
+                  message.event == .authenticationURL
+            else {
+                fail()
+                return
+            }
+            onEvent?(.authenticationURL(message.portalId, message.payload.url))
+        }
     }
 
-    private func send(command: HelperCommand, requestID: String) throws {
+    private func sendRequest<Payload: Codable, Response: Codable>(
+        command: HelperCommand,
+        payload: Payload,
+        completion: @escaping (Result<Response, Error>) -> Void
+    ) throws {
+        let requestID = requestIDProvider()
+        pendingResponses[requestID] = { data in
+            guard let data,
+                  let response = try? JSONDecoder().decode(HelperResponse<Response>.self, from: data),
+                  response.version == helperProtocolVersion,
+                  response.requestId == requestID
+            else {
+                completion(.failure(HelperClientError.protocolFailure))
+                return
+            }
+            if let error = response.error {
+                completion(.failure(HelperClientError.helper(error)))
+            } else if let result = response.result {
+                completion(.success(result))
+            } else {
+                completion(.failure(HelperClientError.protocolFailure))
+            }
+        }
+        do {
+            try sendWithoutResponse(command: command, requestID: requestID, payload: payload)
+        } catch {
+            pendingResponses.removeValue(forKey: requestID)
+            throw error
+        }
+    }
+
+    private func sendWithoutResponse<Payload: Codable>(command: HelperCommand, requestID: String, payload: Payload) throws {
         var data = try JSONEncoder().encode(
-            HelperRequest(
-                version: helperProtocolVersion,
-                requestId: requestID,
-                command: command,
-                payload: EmptyPayload()
-            )
+            HelperRequest(version: helperProtocolVersion, requestId: requestID, command: command, payload: payload)
         )
         data.append(0x0A)
-        try process?.send(data)
+        guard let process else { throw HelperClientError.unavailable }
+        try process.send(data)
     }
 
     private func fail() {
         guard availability != .failed else { return }
-
         handshakeTimeoutWorkItem?.cancel()
         handshakeTimeoutWorkItem = nil
         availability = .failed
+        let pending = pendingResponses.values
+        pendingResponses.removeAll()
+        pending.forEach { $0(nil) }
         process?.closeInput()
         if process?.isRunning == true {
             process?.terminate()
@@ -151,11 +260,7 @@ final class HelperSupervisor: ObservableObject {
     }
 
     private func processExited() {
-        if isShuttingDown {
-            finishShutdown()
-        } else {
-            fail()
-        }
+        if isShuttingDown { finishShutdown() } else { fail() }
     }
 
     private func finishShutdown() {
@@ -170,9 +275,19 @@ final class HelperSupervisor: ObservableObject {
 
     private func forceShutdown() {
         guard isShuttingDown, !isShutdownComplete else { return }
-        if process?.isRunning == true {
-            process?.terminate()
-        }
+        if process?.isRunning == true { process?.terminate() }
         finishShutdown()
     }
+
+    nonisolated private static func defaultStateRootURL() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Portico", isDirectory: true)
+            .appendingPathComponent("tsnet", isDirectory: true)
+    }
+}
+
+private struct IncomingHelperEnvelope: Decodable {
+    let version: Int
+    let requestId: String?
+    let event: HelperEventType?
 }
