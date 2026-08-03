@@ -27,7 +27,7 @@
 - Ready to implement name: `Ready to implement`
 - Ready to implement option ID: `c62baa49`
 - In progress name: `In progress`
-- In progress option ID: `47fc9ee4`
+- In progress option ID: `731b3b6d`
 - Done name: `Done`
 - Done option ID: `98236657`
 
@@ -60,4 +60,6 @@
 - Required checks: `none`
 - Done automation: `set-status`
 - Automation description: Enabled `Item closed` and `Pull request merged`
-  workflows set Status to `Done`; items remain visible.
+  workflows set Status to `Done`; items remain visible. `Auto-close issue` and
+  `Pull request linked to issue` are disabled so issue closure and lifecycle
+  transitions remain controller-owned.
