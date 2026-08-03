@@ -45,6 +45,21 @@ final class HelperProtocolTests: XCTestCase {
         try assertRoundTrip(authenticationFixture, as: HelperEvent<AuthenticationURLPayload>.self)
     }
 
+    func testDecodesVersionOneDiscoverLocalAppsResult() throws {
+        let fixture = Data(#"{"version":1,"requestId":"discover-1","result":{"candidates":[{"localAppPort":3000,"processLabel":"node","suggestedPortalName":"hermes"},{"localAppPort":8787,"processLabel":"python3"}]}}"#.utf8)
+
+        let response = try JSONDecoder().decode(HelperResponse<DiscoverLocalAppsResult>.self, from: fixture)
+
+        XCTAssertEqual(
+            response.result?.candidates,
+            [
+                LocalAppCandidatePayload(localAppPort: 3000, processLabel: "node", suggestedPortalName: "hermes"),
+                LocalAppCandidatePayload(localAppPort: 8787, processLabel: "python3", suggestedPortalName: nil),
+            ]
+        )
+        XCTAssertNil(response.error)
+    }
+
     private func assertRoundTrip<Value: Codable>(_ fixture: String, as type: Value.Type) throws {
         let decoder = JSONDecoder()
         let value = try decoder.decode(type, from: Data(fixture.utf8))

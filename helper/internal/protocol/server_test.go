@@ -4,12 +4,182 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/chrisbanes/portico/helper/internal/discovery"
 	"github.com/chrisbanes/portico/helper/internal/portal"
 )
+
+func TestDiscoverLocalAppsReturnsOnlyStableSanitizedCandidates(t *testing.T) {
+	discoverer := fakeDiscoverer{candidates: []discovery.Candidate{
+		{LocalAppPort: 9000, ProcessLabel: "hermes", SuggestedPortalName: "hermes"},
+		{LocalAppPort: 8000, ProcessLabel: "atlas", SuggestedPortalName: "atlas"},
+		{LocalAppPort: 9000, ProcessLabel: "hermes", SuggestedPortalName: "hermes"},
+		{LocalAppPort: 7000, ProcessLabel: "first", SuggestedPortalName: "first"},
+	}}
+	input := bytes.NewBufferString(`{"version":1,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}` + "\n")
+	var output bytes.Buffer
+	var diagnostics bytes.Buffer
+
+	exitCode := ServeWithServices(input, &output, &diagnostics, Services{LocalAppDiscoverer: discoverer})
+
+	if exitCode != 0 || diagnostics.Len() != 0 {
+		t.Fatalf("ServeWithServices = (exit %d, diagnostics %q), want success", exitCode, diagnostics.String())
+	}
+	const want = `{"version":1,"requestId":"discover-1","result":{"candidates":[{"localAppPort":7000,"processLabel":"first","suggestedPortalName":"first"},{"localAppPort":8000,"processLabel":"atlas","suggestedPortalName":"atlas"},{"localAppPort":9000,"processLabel":"hermes","suggestedPortalName":"hermes"}]}}` + "\n"
+	if output.String() != want {
+		t.Fatalf("output = %q, want %q", output.String(), want)
+	}
+}
+
+func TestDiscoverLocalAppsCollapsesDisagreeingDuplicateOwners(t *testing.T) {
+	discoverer := fakeDiscoverer{candidates: []discovery.Candidate{
+		{LocalAppPort: 8787, ProcessLabel: "python3", SuggestedPortalName: "hermes"},
+		{LocalAppPort: 8787, ProcessLabel: "node", SuggestedPortalName: "atlas"},
+	}}
+	input := bytes.NewBufferString(`{"version":1,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}` + "\n")
+	var output bytes.Buffer
+
+	if exitCode := ServeWithServices(input, &output, &bytes.Buffer{}, Services{LocalAppDiscoverer: discoverer}); exitCode != 0 {
+		t.Fatalf("ServeWithServices exit code = %d, want success", exitCode)
+	}
+	const want = `{"version":1,"requestId":"discover-1","result":{"candidates":[{"localAppPort":8787,"processLabel":"Port 8787"}]}}` + "\n"
+	if output.String() != want {
+		t.Fatalf("output = %q, want %q", output.String(), want)
+	}
+}
+
+func TestDiscoverLocalAppsRequiresEmptyPayload(t *testing.T) {
+	const secret = "do-not-copy"
+	input := bytes.NewBufferString(`{"version":1,"requestId":"discover-1","command":"discoverLocalApps","payload":{"unexpected":"` + secret + `"}}` + "\n")
+	var output bytes.Buffer
+	var diagnostics bytes.Buffer
+
+	exitCode := ServeWithServices(input, &output, &diagnostics, Services{LocalAppDiscoverer: fakeDiscoverer{}})
+
+	if exitCode == 0 || output.Len() != 0 || diagnostics.String() != invalidRequestDiagnostic {
+		t.Fatalf("ServeWithServices = (exit %d, output %q, diagnostics %q), want fixed invalid request", exitCode, output.String(), diagnostics.String())
+	}
+	if strings.Contains(output.String(), secret) || strings.Contains(diagnostics.String(), secret) {
+		t.Fatal("invalid discovery payload leaked")
+	}
+}
+
+func TestDiscoverLocalAppsReturnsFixedSecretFreeFailure(t *testing.T) {
+	const secret = "token=do-not-copy"
+	input := bytes.NewBufferString(`{"version":1,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}` + "\n")
+	var output bytes.Buffer
+	var diagnostics bytes.Buffer
+
+	exitCode := ServeWithServices(input, &output, &diagnostics, Services{LocalAppDiscoverer: fakeDiscoverer{err: errors.New(secret)}})
+
+	if exitCode != 0 || diagnostics.Len() != 0 {
+		t.Fatalf("ServeWithServices = (exit %d, diagnostics %q), want correlated failure", exitCode, diagnostics.String())
+	}
+	const want = `{"version":1,"requestId":"discover-1","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
+	if output.String() != want {
+		t.Fatalf("output = %q, want %q", output.String(), want)
+	}
+	if strings.Contains(output.String(), secret) || strings.Contains(diagnostics.String(), secret) {
+		t.Fatal("discovery failure leaked its underlying error")
+	}
+}
+
+func TestDiscoverLocalAppsCancelsBeforeRuntimeCloseAndShutdownAcknowledgement(t *testing.T) {
+	reader, input := io.Pipe()
+	discoverer := &blockingDiscoverer{started: make(chan struct{}), canceled: make(chan struct{})}
+	runtime := &shutdownOrderingRuntime{discoveryCanceled: discoverer.canceled}
+	var output bytes.Buffer
+	var diagnostics bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- ServeWithServices(reader, &output, &diagnostics, Services{
+			PortalRuntime: runtime, LocalAppDiscoverer: discoverer,
+		})
+	}()
+
+	_, _ = io.WriteString(input, `{"version":1,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`+"\n")
+	<-discoverer.started
+	go func() {
+		_, _ = io.WriteString(input, `{"version":1,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
+		_ = input.Close()
+	}()
+
+	if exitCode := <-done; exitCode != 0 {
+		t.Fatalf("ServeWithServices exit code = %d, want success", exitCode)
+	}
+	if !runtime.closedAfterDiscoveryCancellation {
+		t.Fatal("runtime closed before in-flight discovery observed cancellation")
+	}
+	const want = `{"version":1,"requestId":"shutdown-1","result":{"accepted":true}}` + "\n"
+	if output.String() != want || diagnostics.Len() != 0 {
+		t.Fatalf("ServeWithServices = (output %q, diagnostics %q), want only post-close shutdown acknowledgement", output.String(), diagnostics.String())
+	}
+}
+
+func TestDiscoverLocalAppsFailsServeWhenResponseCannotBeWritten(t *testing.T) {
+	input := bytes.NewBufferString(`{"version":1,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}` + "\n")
+
+	exitCode := ServeWithServices(input, errorWriter{}, &bytes.Buffer{}, Services{LocalAppDiscoverer: fakeDiscoverer{}})
+
+	if exitCode == 0 {
+		t.Fatal("ServeWithServices exit code = 0, want response write failure")
+	}
+}
+
+type fakeDiscoverer struct {
+	candidates []discovery.Candidate
+	err        error
+}
+
+func (d fakeDiscoverer) Discover(context.Context) ([]discovery.Candidate, error) {
+	return d.candidates, d.err
+}
+
+type blockingDiscoverer struct {
+	started  chan struct{}
+	canceled chan struct{}
+}
+
+func (d *blockingDiscoverer) Discover(ctx context.Context) ([]discovery.Candidate, error) {
+	close(d.started)
+	select {
+	case <-ctx.Done():
+		close(d.canceled)
+		return nil, ctx.Err()
+	case <-time.After(250 * time.Millisecond):
+		return nil, errors.New("discovery did not observe cancellation")
+	}
+}
+
+type shutdownOrderingRuntime struct {
+	discoveryCanceled                <-chan struct{}
+	closedAfterDiscoveryCancellation bool
+}
+
+type errorWriter struct{}
+
+func (errorWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+func (*shutdownOrderingRuntime) Start(context.Context, portal.Config, func(portal.Event)) error {
+	return nil
+}
+
+func (*shutdownOrderingRuntime) Authenticate(context.Context, string) error { return nil }
+
+func (r *shutdownOrderingRuntime) Close() error {
+	select {
+	case <-r.discoveryCanceled:
+		r.closedAfterDiscoveryCancellation = true
+	default:
+	}
+	return nil
+}
 
 func TestServeCorrelatesHandshakeResponse(t *testing.T) {
 	input := bytes.NewBufferString(`{"version":1,"requestId":"request-1","command":"handshake","payload":{}}` + "\n")

@@ -25,6 +25,7 @@ protocol PortalHelperClient: AnyObject {
 
     func startPortal(_ portal: PortalConfiguration, completion: @escaping (Result<Void, Error>) -> Void)
     func authenticatePortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void)
+    func discoverLocalApps(completion: @escaping (Result<[LocalAppCandidatePayload], Error>) -> Void)
 }
 
 protocol HelperProcess: AnyObject {
@@ -135,6 +136,20 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         do {
             try sendRequest(command: .authenticatePortal, payload: AuthenticatePortalPayload(portalId: id)) { (result: Result<AuthenticatePortalResult, Error>) in
                 completion(result.map { _ in () })
+            }
+        } catch {
+            completion(.failure(error))
+        }
+    }
+
+    func discoverLocalApps(completion: @escaping (Result<[LocalAppCandidatePayload], Error>) -> Void) {
+        guard availability == .connected else {
+            completion(.failure(HelperClientError.unavailable))
+            return
+        }
+        do {
+            try sendRequest(command: .discoverLocalApps, payload: EmptyPayload()) { (result: Result<DiscoverLocalAppsResult, Error>) in
+                completion(result.map(\.candidates))
             }
         } catch {
             completion(.failure(error))

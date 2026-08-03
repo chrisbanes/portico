@@ -5,10 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
+	"github.com/chrisbanes/portico/helper/internal/discovery"
 	"github.com/chrisbanes/portico/helper/internal/portal"
 )
 
@@ -20,6 +24,15 @@ type PortalRuntime interface {
 	Start(context.Context, portal.Config, func(portal.Event)) error
 	Authenticate(context.Context, string) error
 	Close() error
+}
+
+type LocalAppDiscoverer interface {
+	Discover(context.Context) ([]discovery.Candidate, error)
+}
+
+type Services struct {
+	PortalRuntime      PortalRuntime
+	LocalAppDiscoverer LocalAppDiscoverer
 }
 
 type request struct {
@@ -47,6 +60,10 @@ type handshakeResult struct {
 
 type acceptedResult struct {
 	Accepted bool `json:"accepted"`
+}
+
+type discoverLocalAppsResult struct {
+	Candidates []discovery.Candidate `json:"candidates"`
 }
 
 type startPortalPayload struct {
@@ -86,11 +103,38 @@ func Serve(input io.Reader, output, diagnostics io.Writer) int {
 }
 
 func ServeWithRuntime(input io.Reader, output, diagnostics io.Writer, runtime PortalRuntime) int {
+	return ServeWithServices(input, output, diagnostics, Services{PortalRuntime: runtime})
+}
+
+func ServeWithServices(input io.Reader, output, diagnostics io.Writer, services Services) int {
+	runtime := services.PortalRuntime
 	if runtime != nil {
 		defer runtime.Close()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	discoveryContext, cancelDiscovery := context.WithCancel(ctx)
+	var outputFailed atomic.Bool
+	failOutput := func() {
+		if outputFailed.CompareAndSwap(false, true) {
+			cancelDiscovery()
+			cancel()
+			if closer, ok := input.(io.Closer); ok {
+				_ = closer.Close()
+			}
+		}
+	}
+	var discoveryGroup sync.WaitGroup
+	discoveryGate := make(chan struct{}, 1)
+	cancelBeforeExit := true
+	defer func() {
+		if cancelBeforeExit {
+			cancelDiscovery()
+			cancel()
+		}
+		discoveryGroup.Wait()
+		cancelDiscovery()
+		cancel()
+	}()
 	writer := &messageWriter{encoder: json.NewEncoder(output)}
 	emit := func(event portal.Event) {
 		if event.Status != nil {
@@ -134,6 +178,8 @@ func ServeWithRuntime(input io.Reader, output, diagnostics io.Writer, runtime Po
 				_, _ = io.WriteString(diagnostics, invalidRequestDiagnostic)
 				return 1
 			}
+			cancelDiscovery()
+			discoveryGroup.Wait()
 			if runtime != nil {
 				if err := runtime.Close(); err != nil {
 					_ = writer.write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed"))
@@ -144,6 +190,44 @@ func ServeWithRuntime(input io.Reader, output, diagnostics io.Writer, runtime Po
 				return 1
 			}
 			return 0
+		case "discoverLocalApps":
+			if !isEmptyPayload(request.Payload) {
+				_, _ = io.WriteString(diagnostics, invalidRequestDiagnostic)
+				return 1
+			}
+			if services.LocalAppDiscoverer == nil {
+				if writer.write(errorResponse(request.RequestID, "discoveryFailure", "local app discovery failed")) != nil {
+					return 1
+				}
+				continue
+			}
+			requestID := request.RequestID
+			discoveryGroup.Add(1)
+			go func() {
+				defer discoveryGroup.Done()
+				select {
+				case discoveryGate <- struct{}{}:
+					defer func() { <-discoveryGate }()
+				case <-discoveryContext.Done():
+					return
+				}
+				candidates, err := services.LocalAppDiscoverer.Discover(discoveryContext)
+				if discoveryContext.Err() != nil {
+					return
+				}
+				if err != nil {
+					if writer.write(errorResponse(requestID, "discoveryFailure", "local app discovery failed")) != nil {
+						failOutput()
+					}
+					return
+				}
+				if writer.write(response{
+					Version: Version, RequestID: requestID,
+					Result: discoverLocalAppsResult{Candidates: canonicalCandidates(candidates)},
+				}) != nil {
+					failOutput()
+				}
+			}()
 		case "startPortal":
 			var payload startPortalPayload
 			if runtime == nil || decodePayload(request.Payload, &payload) != nil {
@@ -198,11 +282,50 @@ func ServeWithRuntime(input io.Reader, output, diagnostics io.Writer, runtime Po
 			}
 		}
 	}
-	if scanner.Err() != nil {
-		_, _ = io.WriteString(diagnostics, invalidRequestDiagnostic)
+	if scannerError := scanner.Err(); scannerError != nil {
+		cancelDiscovery()
+		cancel()
+		discoveryGroup.Wait()
+		if !outputFailed.Load() {
+			_, _ = io.WriteString(diagnostics, invalidRequestDiagnostic)
+		}
 		return 1
 	}
+	discoveryGroup.Wait()
+	if outputFailed.Load() {
+		return 1
+	}
+	cancelBeforeExit = false
 	return 0
+}
+
+func canonicalCandidates(candidates []discovery.Candidate) []discovery.Candidate {
+	byPort := make(map[uint16]discovery.Candidate, len(candidates))
+	disagreed := make(map[uint16]bool)
+	for _, candidate := range candidates {
+		if candidate.LocalAppPort == 0 || candidate.ProcessLabel == "" {
+			continue
+		}
+		if previous, exists := byPort[candidate.LocalAppPort]; !exists {
+			byPort[candidate.LocalAppPort] = candidate
+		} else if previous != candidate {
+			disagreed[candidate.LocalAppPort] = true
+		}
+	}
+	ports := make([]uint16, 0, len(byPort))
+	for port := range byPort {
+		ports = append(ports, port)
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	result := make([]discovery.Candidate, 0, len(ports))
+	for _, port := range ports {
+		if disagreed[port] {
+			result = append(result, discovery.Candidate{LocalAppPort: port, ProcessLabel: fmt.Sprintf("Port %d", port)})
+		} else {
+			result = append(result, byPort[port])
+		}
+	}
+	return result
 }
 
 func (request request) isStructurallyValid() bool {

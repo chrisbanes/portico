@@ -44,6 +44,34 @@ private struct PortalView: View {
     private var addPortalForm: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Add Portal").font(.headline)
+            HStack {
+                Text("Detected Local Apps").font(.subheadline)
+                Spacer()
+                Button("Refresh") { controller.refreshLocalApps() }
+                    .disabled(controller.isRefreshingLocalApps)
+            }
+            if controller.isRefreshingLocalApps {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            ForEach(controller.localApps, id: \.localAppPort) { candidate in
+                Button {
+                    controller.selectLocalApp(candidate)
+                } label: {
+                    HStack {
+                        Text(candidate.processLabel)
+                        Spacer()
+                        Text(String(candidate.localAppPort))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            if let message = controller.localAppsMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             TextField("Portal Name", text: $controller.portalName)
             TextField("Local App Port", text: $controller.localAppPort)
             Button("Add Portal") { controller.addPortal() }

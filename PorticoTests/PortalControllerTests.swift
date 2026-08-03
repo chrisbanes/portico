@@ -39,6 +39,106 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(client.started.count, 1)
     }
 
+    func testInitialDiscoveryAfterConnectionDoesNotChangeManualFields() {
+        let client = FakePortalHelperClient(availability: .connecting)
+        let controller = PortalController(store: PortalStore(rootURL: temporaryRoot()), helper: client, openURL: { _ in })
+        controller.portalName = "manual-name"
+        controller.localAppPort = "4321"
+
+        XCTAssertTrue(client.discoveryCompletions.isEmpty)
+        client.connect()
+        XCTAssertEqual(client.discoveryCompletions.count, 1)
+        XCTAssertTrue(controller.isRefreshingLocalApps)
+        let candidates = [
+            LocalAppCandidatePayload(localAppPort: 3000, processLabel: "node", suggestedPortalName: "detected")
+        ]
+        client.completeDiscovery(.success(candidates))
+
+        XCTAssertEqual(controller.localApps, candidates)
+        XCTAssertFalse(controller.isRefreshingLocalApps)
+        XCTAssertEqual(controller.portalName, "manual-name")
+        XCTAssertEqual(controller.localAppPort, "4321")
+    }
+
+    func testSelectingLocalAppUpdatesPortAndOnlyFillsBlankName() {
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: PortalStore(rootURL: temporaryRoot()), helper: client, openURL: { _ in })
+        let hinted = LocalAppCandidatePayload(localAppPort: 3000, processLabel: "node", suggestedPortalName: "hermes")
+        let generic = LocalAppCandidatePayload(localAppPort: 8787, processLabel: "Port 8787", suggestedPortalName: nil)
+        client.completeDiscovery(.success([hinted, generic]))
+
+        controller.selectLocalApp(hinted)
+        XCTAssertEqual(controller.localAppPort, "3000")
+        XCTAssertEqual(controller.portalName, "hermes")
+
+        controller.portalName = "manual-name"
+        controller.selectLocalApp(generic)
+        XCTAssertEqual(controller.localAppPort, "8787")
+        XCTAssertEqual(controller.portalName, "manual-name")
+
+        controller.selectLocalApp(hinted)
+        XCTAssertEqual(controller.portalName, "manual-name")
+    }
+
+    func testExplicitRefreshReplacesCandidatesAndPresentsOnlyFixedFailure() {
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: PortalStore(rootURL: temporaryRoot()), helper: client, openURL: { _ in })
+        let first = LocalAppCandidatePayload(localAppPort: 3000, processLabel: "node", suggestedPortalName: "first")
+        let replacement = LocalAppCandidatePayload(localAppPort: 8787, processLabel: "python3", suggestedPortalName: "replacement")
+        client.completeDiscovery(.success([first]))
+        controller.portalName = "manual-name"
+        controller.localAppPort = "4321"
+
+        controller.refreshLocalApps()
+        XCTAssertTrue(controller.isRefreshingLocalApps)
+        XCTAssertEqual(controller.localApps, [first])
+        client.completeDiscovery(.success([replacement]), at: 1)
+        XCTAssertEqual(controller.localApps, [replacement])
+        XCTAssertNil(controller.localAppsMessage)
+
+        controller.refreshLocalApps()
+        client.completeDiscovery(.failure(NSError(domain: "secret=do-not-copy", code: 1)), at: 2)
+        XCTAssertEqual(controller.localApps, [replacement])
+        XCTAssertEqual(controller.localAppsMessage, "Local Apps could not be refreshed.")
+        XCTAssertFalse(controller.localAppsMessage?.contains("do-not-copy") ?? true)
+        XCTAssertEqual(controller.portalName, "manual-name")
+        XCTAssertEqual(controller.localAppPort, "4321")
+    }
+
+    func testAddPersistsFinalEditableFieldsAndIgnoresStaleDiscovery() throws {
+        let client = FakePortalHelperClient()
+        let store = PortalStore(rootURL: temporaryRoot())
+        let controller = PortalController(
+            store: store,
+            helper: client,
+            uuidProvider: { self.portalID },
+            dateProvider: { Date(timeIntervalSince1970: 1_786_000_000) },
+            openURL: { _ in }
+        )
+        let candidate = LocalAppCandidatePayload(localAppPort: 3000, processLabel: "node", suggestedPortalName: "hint")
+        client.completeDiscovery(.success([candidate]))
+        controller.selectLocalApp(candidate)
+        controller.portalName = "final-name"
+        controller.localAppPort = "4321"
+        controller.refreshLocalApps()
+
+        controller.addPortal()
+
+        let portal = try XCTUnwrap(controller.portal)
+        XCTAssertEqual(portal.name, "final-name")
+        XCTAssertEqual(portal.localAppPort, 4321)
+        XCTAssertEqual(try store.load(), portal)
+        XCTAssertTrue(controller.localApps.isEmpty)
+        XCTAssertFalse(controller.isRefreshingLocalApps)
+        XCTAssertNil(controller.localAppsMessage)
+
+        client.completeDiscovery(.success([
+            LocalAppCandidatePayload(localAppPort: 9999, processLabel: "stale", suggestedPortalName: "stale")
+        ]), at: 1)
+        XCTAssertTrue(controller.localApps.isEmpty)
+        XCTAssertNil(controller.localAppsMessage)
+    }
+
     func testStartsSavedPortalAfterHandshakeWithSameDefinition() throws {
         let store = PortalStore(rootURL: temporaryRoot())
         let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date(timeIntervalSince1970: 1_786_000_000))
@@ -51,6 +151,7 @@ final class PortalControllerTests: XCTestCase {
 
         client.connect()
         XCTAssertEqual(client.started, [saved])
+        XCTAssertTrue(client.discoveryCompletions.isEmpty)
     }
 
     func testPresentsOnlyMatchingStructuredStatus() throws {
@@ -108,6 +209,7 @@ final class FakePortalHelperClient: PortalHelperClient {
     var onEvent: ((PortalHelperEvent) -> Void)?
     private(set) var started: [PortalConfiguration] = []
     private(set) var authenticated: [UUID] = []
+    private(set) var discoveryCompletions: [(Result<[LocalAppCandidatePayload], Error>) -> Void] = []
 
     init(availability: HelperAvailability = .connected) {
         self.availability = availability
@@ -123,10 +225,18 @@ final class FakePortalHelperClient: PortalHelperClient {
         completion(.success(()))
     }
 
+    func discoverLocalApps(completion: @escaping (Result<[LocalAppCandidatePayload], Error>) -> Void) {
+        discoveryCompletions.append(completion)
+    }
+
     func connect() {
         availability = .connected
         onConnected?()
     }
 
     func send(_ event: PortalHelperEvent) { onEvent?(event) }
+
+    func completeDiscovery(_ result: Result<[LocalAppCandidatePayload], Error>, at index: Int = 0) {
+        discoveryCompletions[index](result)
+    }
 }
