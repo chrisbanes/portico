@@ -15,6 +15,13 @@ Prerequisites:
 - An Apple silicon Mac running macOS 14 or later
 - Xcode 26.3 selected with `xcode-select`
 - Go 1.26.5
+- [XcodeGen 2.46.0](https://github.com/yonaskolb/XcodeGen/releases/tag/2.46.0)
+
+Generate the local Xcode project from the checked-in specification:
+
+```shell
+./Scripts/generate-xcode-project.sh
+```
 
 Build the app and its bundled helper:
 
@@ -43,6 +50,13 @@ xcodebuild \
   -destination 'platform=macOS' \
   -derivedDataPath .build/xcode \
   test
+```
+
+Verify that a fresh generated project is ignored, deterministic, and visible to
+Xcode before running the generated-project tests:
+
+```shell
+./Scripts/verify-xcode-project-generation.sh
 ```
 
 Run the local app smoke test, which builds and launches the app, verifies its
