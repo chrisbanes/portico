@@ -3,11 +3,126 @@ import XCTest
 @testable import Portico
 
 final class PortalStoreTests: XCTestCase {
+    func testNewInstallationUsesVersionThreeDefaults() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+
+        XCTAssertEqual(
+            try store.loadInstallation(),
+            InstallationRecord(
+                operationalLogging: .undecided,
+                launchAtLoginOffer: .notOffered
+            )
+        )
+        XCTAssertEqual(store.installationURL.lastPathComponent, "installation-v3.json")
+    }
+
+    func testVersionOneMigrationEnablesLoggingAndStartsLoginOfferUnspent() throws {
+        let root = temporaryRoot()
+        let store = PortalStore(rootURL: root)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try historicalVersionOneData().write(to: store.legacyConfigurationURL)
+
+        let installation = try store.loadInstallation()
+
+        XCTAssertEqual(installation.operationalLogging, .enabled)
+        XCTAssertEqual(installation.launchAtLoginOffer, .notOffered)
+        XCTAssertEqual(installation.portals.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.legacyConfigurationURL.path))
+    }
+
+    func testPristineVersionTwoMigrationRequiresLoggingChoice() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
+        try Data(#"{"version":2,"portals":[],"alerts":[]}"#.utf8).write(to: store.versionTwoInstallationURL)
+
+        let installation = try store.loadInstallation()
+
+        XCTAssertEqual(installation.operationalLogging, .undecided)
+        XCTAssertEqual(installation.launchAtLoginOffer, .notOffered)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.versionTwoInstallationURL.path))
+    }
+
+    func testNonPristineVersionTwoMigrationsPreserveExistingLoggingBehavior() throws {
+        let records = [
+            #"{"version":2,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"lifecycle":"active"}],"alerts":[]}"#,
+            #"{"version":2,"tailnetBinding":{"name":"opaque-tailnet-id","magicDNSSuffix":"one.ts.net"},"portals":[],"alerts":[]}"#,
+            #"{"version":2,"portals":[],"alerts":[{"id":"1F93E456-69EC-445A-8374-D7FC5558D0C7","kind":"crossTailnetRejection","portalName":"hermes","createdAt":807692800}]}"#,
+        ]
+
+        for record in records {
+            let store = PortalStore(rootURL: temporaryRoot())
+            try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
+            try Data(record.utf8).write(to: store.versionTwoInstallationURL)
+
+            let installation = try store.loadInstallation()
+
+            XCTAssertEqual(installation.operationalLogging, .enabled, record)
+            XCTAssertEqual(installation.launchAtLoginOffer, .notOffered, record)
+        }
+    }
+
+    func testValidVersionThreeWinsAfterInterruptedOlderCleanup() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let authoritative = InstallationRecord(
+            tailnetBinding: TailnetBinding(name: "opaque-tailnet-id", magicDNSSuffix: "example.ts.net"),
+            operationalLogging: .disabled,
+            launchAtLoginOffer: .accepted
+        )
+        try store.save(authoritative)
+        try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
+        try Data(#"{"version":2,"portals":[],"alerts":[]}"#.utf8).write(to: store.versionTwoInstallationURL)
+        try historicalVersionOneData(name: "stale").write(to: store.legacyConfigurationURL)
+
+        XCTAssertEqual(try store.loadInstallation(), authoritative)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.versionTwoInstallationURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.legacyConfigurationURL.path))
+    }
+
+    func testCorruptVersionThreeFailsClosedWithoutFallingBack() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
+        let corrupt = Data("not-json".utf8)
+        try corrupt.write(to: store.installationURL)
+        try Data(#"{"version":2,"portals":[],"alerts":[]}"#.utf8).write(to: store.versionTwoInstallationURL)
+
+        XCTAssertThrowsError(try store.loadInstallation())
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), corrupt)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.versionTwoInstallationURL.path))
+    }
+
+    func testUnsupportedVersionThreeFailsClosedWithoutFallingBack() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
+        let unsupported = Data(
+            #"{"version":4,"operationalLogging":"disabled","launchAtLoginOffer":"accepted","portals":[],"alerts":[]}"#.utf8
+        )
+        try unsupported.write(to: store.installationURL)
+        try Data(#"{"version":2,"portals":[],"alerts":[]}"#.utf8).write(to: store.versionTwoInstallationURL)
+
+        XCTAssertThrowsError(try store.loadInstallation())
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), unsupported)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.versionTwoInstallationURL.path))
+    }
+
+    func testFailedVersionTwoMigrationPreservesOlderAuthority() throws {
+        struct ExpectedFailure: Error {}
+        let root = temporaryRoot()
+        let versionTwoURL = root.appendingPathComponent("installation-v2.json")
+        let source = Data(#"{"version":2,"portals":[],"alerts":[]}"#.utf8)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try source.write(to: versionTwoURL)
+        let store = PortalStore(rootURL: root, writeData: { _, _ in throw ExpectedFailure() })
+
+        XCTAssertThrowsError(try store.loadInstallation())
+        XCTAssertEqual(try Data(contentsOf: versionTwoURL), source)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.installationURL.path))
+    }
+
     func testMigratesValidVersionOnePortalIntoUnboundVersionTwoInstallation() throws {
         let root = temporaryRoot()
         let store = PortalStore(rootURL: root)
         let legacyURL = root.appendingPathComponent("portal-v1.json", isDirectory: false)
-        let installationURL = root.appendingPathComponent("installation-v2.json", isDirectory: false)
+        let installationURL = store.installationURL
         let portal = PortalConfiguration(
             id: UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!,
             name: "hermes",
@@ -23,7 +138,10 @@ final class PortalStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: legacyURL.path))
         XCTAssertEqual(try permissions(of: root), 0o700)
         XCTAssertEqual(try permissions(of: installationURL), 0o600)
-        XCTAssertEqual(try store.loadInstallation(), InstallationRecord(portals: [portal]))
+        XCTAssertEqual(
+            try store.loadInstallation(),
+            InstallationRecord(portals: [portal], operationalLogging: .enabled)
+        )
     }
 
     func testFailedVersionTwoWritePreservesVersionOneSource() throws {
@@ -80,36 +198,45 @@ final class PortalStoreTests: XCTestCase {
         XCTAssertEqual(try permissions(of: store.installationURL), 0o600)
     }
 
-    func testHistoricalVersionTwoDefaultsToEnabledAndNextSavePersistsDesiredState() throws {
-        struct ExpectedFailure: Error {}
+    func testSavingReplacesAnExistingFileWithSecurePermissions() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
+        try Data("stale".utf8).write(to: store.installationURL)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o644],
+            ofItemAtPath: store.installationURL.path
+        )
 
+        try store.save(InstallationRecord(operationalLogging: .disabled))
+
+        XCTAssertEqual(try permissions(of: store.installationURL), 0o600)
+        XCTAssertEqual(
+            try store.loadInstallation(),
+            InstallationRecord(operationalLogging: .disabled)
+        )
+    }
+
+    func testHistoricalVersionTwoDefaultsToEnabledAndNextSavePersistsDesiredState() throws {
         let root = temporaryRoot()
-        let installationURL = root.appendingPathComponent("installation-v2.json", isDirectory: false)
+        let versionTwoURL = root.appendingPathComponent("installation-v2.json", isDirectory: false)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let historical = Data(
             #"{"version":2,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"lifecycle":"active"},{"id":"5EA74329-3144-4BA2-925F-138D14D61FCC","name":"atlas","localAppPort":8788,"createdAt":807692801,"lifecycle":"active"}],"alerts":[]}"#.utf8
         )
-        try historical.write(to: installationURL)
-        var shouldFail = true
-        let store = PortalStore(rootURL: root, writeData: { data, url in
-            guard !shouldFail else { throw ExpectedFailure() }
-            try data.write(to: url, options: .atomic)
-        })
+        try historical.write(to: versionTwoURL)
+        let store = PortalStore(rootURL: root)
 
         var installation = try store.loadInstallation()
 
         XCTAssertEqual(installation.portals.map(\.desiredState), [.enabled, .enabled])
         installation.portals[1].desiredState = .stopped
-        XCTAssertThrowsError(try store.save(installation))
-        XCTAssertEqual(try Data(contentsOf: installationURL), historical)
-
-        shouldFail = false
         try store.save(installation)
 
-        let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: installationURL)) as? [String: Any])
-        XCTAssertEqual(saved["version"] as? Int, 2)
+        let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: store.installationURL)) as? [String: Any])
+        XCTAssertEqual(saved["version"] as? Int, 3)
         let portals = try XCTUnwrap(saved["portals"] as? [[String: Any]])
         XCTAssertEqual(portals.map { $0["desiredState"] as? String }, ["enabled", "stopped"])
+        XCTAssertEqual(saved["operationalLogging"] as? String, "enabled")
         XCTAssertEqual(try store.loadInstallation(), installation)
     }
 
@@ -119,11 +246,11 @@ final class PortalStoreTests: XCTestCase {
         let historical = Data(
             #"{"version":2,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"desiredState":"enabled","lifecycle":"active"}],"alerts":[]}"#.utf8
         )
-        try historical.write(to: store.installationURL)
+        try historical.write(to: store.versionTwoInstallationURL)
 
         var installation = try store.loadInstallation()
 
-        XCTAssertEqual(installation.version, 2)
+        XCTAssertEqual(installation.version, 3)
         XCTAssertNil(installation.portals[0].removalAssignedName)
 
         installation.portals[0].lifecycle = .pendingRemoval
@@ -131,7 +258,7 @@ final class PortalStoreTests: XCTestCase {
         try store.save(installation)
 
         XCTAssertEqual(try store.loadInstallation(), installation)
-        XCTAssertEqual(try store.loadInstallation().version, 2)
+        XCTAssertEqual(try store.loadInstallation().version, 3)
     }
 
     func testExplicitNullDesiredStateIsCorruptRatherThanDefaulting() throws {
@@ -140,10 +267,10 @@ final class PortalStoreTests: XCTestCase {
         let corrupt = Data(
             #"{"version":2,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"desiredState":null,"lifecycle":"active"}],"alerts":[]}"#.utf8
         )
-        try corrupt.write(to: store.installationURL)
+        try corrupt.write(to: store.versionTwoInstallationURL)
 
         XCTAssertThrowsError(try store.loadInstallation())
-        XCTAssertEqual(try Data(contentsOf: store.installationURL), corrupt)
+        XCTAssertEqual(try Data(contentsOf: store.versionTwoInstallationURL), corrupt)
     }
 
     func testSavedPortalReloadsWithSameImmutableDefinition() throws {

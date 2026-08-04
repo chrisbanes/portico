@@ -2,6 +2,14 @@ import XCTest
 @testable import Portico
 
 final class PortalConfigurationTests: XCTestCase {
+    func testVersionThreeInstallationDefaultsRequireLoggingChoiceAndHaveNotOfferedLogin() {
+        let installation = InstallationRecord()
+
+        XCTAssertEqual(installation.version, 3)
+        XCTAssertEqual(installation.operationalLogging, .undecided)
+        XCTAssertEqual(installation.launchAtLoginOffer, .notOffered)
+    }
+
     func testAcceptsDNSLabelAndPortBoundaries() throws {
         for name in ["a", "portal-1", String(repeating: "a", count: 63)] {
             XCTAssertNoThrow(try PortalInputValidator.validate(name: name, port: "1"))

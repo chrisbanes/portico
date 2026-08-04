@@ -111,6 +111,8 @@ enum DiagnosticReportRenderer {
         switch event {
         case let .helper(availability):
             switch availability {
+            case .awaitingLoggingChoice: return "Helper awaiting logging choice"
+            case .restarting: return "Helper restarting"
             case .connecting: return "Helper connecting"
             case let .retrying(attempt, delay): return "Helper retry \(attempt) in \(Int(delay))s"
             case .connected: return "Helper connected"
@@ -124,6 +126,8 @@ enum DiagnosticReportRenderer {
 
     private static func describeHelper(_ availability: HelperAvailability) -> String {
         switch availability {
+        case .awaitingLoggingChoice: return "awaiting logging choice"
+        case .restarting: return "restarting"
         case .connecting: return "connecting"
         case let .retrying(attempt, delay): return "retry \(attempt) in \(Int(delay))s"
         case .connected: return "connected"

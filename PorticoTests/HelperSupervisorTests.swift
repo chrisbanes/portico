@@ -4,6 +4,103 @@ import XCTest
 
 @MainActor
 final class HelperSupervisorTests: XCTestCase {
+    func testUndecidedLoggingWaitsWithoutLaunchingChild() {
+        let launcher = FakeHelperLauncher()
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher
+        )
+
+        supervisor.start(loggingPreference: .undecided)
+
+        XCTAssertEqual(supervisor.availability, .awaitingLoggingChoice)
+        XCTAssertTrue(launcher.processes.isEmpty)
+    }
+
+    func testControlledRestartWaitsForOldOwnershipBeforeLaunchingWithNewPreference() throws {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "shutdown-1", "handshake-2"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
+
+        supervisor.restart(loggingPreference: .disabled)
+
+        XCTAssertEqual(supervisor.availability, .restarting)
+        XCTAssertEqual(launcher.processes.count, 1)
+        XCTAssertTrue(launcher.process.inputClosed)
+        let shutdown = try JSONDecoder().decode(
+            HelperRequest<EmptyPayload>.self,
+            from: XCTUnwrap(launcher.process.sent.last)
+        )
+        XCTAssertEqual(shutdown.command, .shutdown)
+
+        launcher.exit(status: 0)
+
+        XCTAssertEqual(launcher.processes.count, 2)
+        XCTAssertEqual(launcher.loggingPreferences, [.enabled, .disabled])
+        XCTAssertEqual(launcher.processes.filter(\.isRunning).count, 1)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-2","result":{"protocolVersion":3}}"#)
+        XCTAssertEqual(supervisor.availability, .connected)
+    }
+
+    func testControlledRestartForcesOldChildButStillWaitsForExitOwnership() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "shutdown-1", "handshake-2"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60,
+            shutdownGraceInterval: 1
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
+
+        supervisor.restart(loggingPreference: .disabled)
+        scheduler.run(delay: 1)
+
+        XCTAssertTrue(launcher.process.terminated)
+        XCTAssertEqual(launcher.processes.count, 1)
+
+        launcher.exit(status: 0)
+        XCTAssertEqual(launcher.processes.count, 2)
+    }
+
+    func testControlledRestartRejectsOldEventsAndStartsFreshRecoveryBudget() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "shutdown-1", "handshake-2"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        var events: [PortalHelperEvent] = []
+        supervisor.onEvent = { events.append($0) }
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
+
+        supervisor.restart(loggingPreference: .disabled)
+        launcher.receive(line: #"{"version":3,"event":"portalStatus","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"state":"online","addresses":[]}}"#)
+        XCTAssertTrue(events.isEmpty)
+        launcher.exit(status: 0)
+        launcher.exit(status: 1)
+
+        XCTAssertEqual(supervisor.availability, .retrying(attempt: 1, delay: 1))
+    }
+
     func testRetriesUnexpectedExitWithOneChildAndFixedSharedBudget() {
         let launcher = FakeHelperLauncher()
         let scheduler = FakePorticoScheduler()
@@ -15,7 +112,7 @@ final class HelperSupervisorTests: XCTestCase {
             handshakeTimeout: 60
         )
 
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         for expectedDelay in [1.0, 2.0, 4.0, 8.0, 16.0] {
             launcher.exit(status: 1)
 
@@ -57,7 +154,7 @@ final class HelperSupervisorTests: XCTestCase {
             handshakeTimeout: 60
         )
 
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         launcher.exit(status: 1)
         scheduler.runNext()
         launcher.receive(line: #"{"version":3,"requestId":"handshake-2","result":{"protocolVersion":3}}"#)
@@ -87,7 +184,7 @@ final class HelperSupervisorTests: XCTestCase {
             handshakeTimeout: 1
         )
 
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
 
         XCTAssertEqual(supervisor.availability, .connecting)
         let requestData = try XCTUnwrap(launcher.process.sent.first)
@@ -112,7 +209,7 @@ final class HelperSupervisorTests: XCTestCase {
             handshakeTimeout: 0.01
         )
 
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         try await Task.sleep(nanoseconds: 50_000_000)
         launcher.exit(status: 1)
 
@@ -138,7 +235,7 @@ final class HelperSupervisorTests: XCTestCase {
                 requestIDProvider: { "request-1" },
                 handshakeTimeout: 1
             )
-            supervisor.start()
+            supervisor.start(loggingPreference: .enabled)
 
             trigger(launcher)
             if !alreadyExited {
@@ -164,7 +261,7 @@ final class HelperSupervisorTests: XCTestCase {
         )
         var events: [PortalHelperEvent] = []
         supervisor.onEvent = { events.append($0) }
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         XCTAssertEqual(launcher.arguments, ["--state-root", "/trusted/tsnet"])
         launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         let laterPortal = PortalConfiguration(
@@ -227,7 +324,7 @@ final class HelperSupervisorTests: XCTestCase {
             requestIDProvider: { requestIDs.removeFirst() },
             handshakeTimeout: 1
         )
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         var result: Result<ReconcilePortalsResult, Error>?
 
@@ -248,7 +345,7 @@ final class HelperSupervisorTests: XCTestCase {
             requestIDProvider: { requestIDs.removeFirst() },
             handshakeTimeout: 1
         )
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         var result: Result<[LocalAppCandidatePayload], Error>?
 
@@ -274,7 +371,7 @@ final class HelperSupervisorTests: XCTestCase {
             requestIDProvider: { requestIDs.removeFirst() },
             handshakeTimeout: 1
         )
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         let portalID = UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!
         var result: Result<Void, Error>?
@@ -299,7 +396,7 @@ final class HelperSupervisorTests: XCTestCase {
             requestIDProvider: { requestIDs.removeFirst() },
             handshakeTimeout: 1
         )
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         let portalID = UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!
         var result: Result<Void, Error>?
@@ -334,7 +431,7 @@ final class HelperSupervisorTests: XCTestCase {
             requestIDProvider: { requestIDs.removeFirst() },
             handshakeTimeout: 1
         )
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         var result: Result<[LocalAppCandidatePayload], Error>?
 
@@ -355,10 +452,12 @@ final class FakeHelperLauncher: HelperLaunching {
     private var onEOF: (() -> Void)?
     private var onExit: ((Int32) -> Void)?
     private(set) var arguments: [String] = []
+    private(set) var loggingPreferences: [OperationalLoggingPreference] = []
 
     func launch(
         at executableURL: URL,
         arguments: [String],
+        loggingPreference: OperationalLoggingPreference,
         onLine: @escaping (Data) -> Void,
         onEOF: @escaping () -> Void,
         onExit: @escaping (Int32) -> Void
@@ -366,6 +465,7 @@ final class FakeHelperLauncher: HelperLaunching {
         let process = FakeHelperProcess()
         processes.append(process)
         self.arguments = arguments
+        loggingPreferences.append(loggingPreference)
         self.onLine = onLine
         self.onEOF = onEOF
         self.onExit = onExit
