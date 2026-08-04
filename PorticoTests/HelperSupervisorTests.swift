@@ -60,18 +60,18 @@ final class HelperSupervisorTests: XCTestCase {
         supervisor.start()
         launcher.exit(status: 1)
         scheduler.runNext()
-        launcher.receive(line: #"{"version":2,"requestId":"handshake-2","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-2","result":{"protocolVersion":3}}"#)
         supervisor.reconcilePortals([]) { _ in }
-        launcher.receive(line: #"{"version":2,"requestId":"reconcile-2","result":{"entries":[]}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"reconcile-2","result":{"entries":[]}}"#)
 
         XCTAssertTrue(scheduler.pendingDelays.contains(300))
         launcher.exit(status: 1)
         XCTAssertEqual(supervisor.availability, .retrying(attempt: 2, delay: 2))
 
         scheduler.run(delay: 2)
-        launcher.receive(line: #"{"version":2,"requestId":"handshake-3","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-3","result":{"protocolVersion":3}}"#)
         supervisor.reconcilePortals([]) { _ in }
-        launcher.receive(line: #"{"version":2,"requestId":"reconcile-3","result":{"entries":[]}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"reconcile-3","result":{"entries":[]}}"#)
         scheduler.run(delay: 300)
         launcher.exit(status: 1)
 
@@ -92,14 +92,14 @@ final class HelperSupervisorTests: XCTestCase {
         XCTAssertEqual(supervisor.availability, .connecting)
         let requestData = try XCTUnwrap(launcher.process.sent.first)
         let request = try JSONDecoder().decode(HelperRequest<EmptyPayload>.self, from: requestData)
-        XCTAssertEqual(request.version, 2)
+        XCTAssertEqual(request.version, 3)
         XCTAssertEqual(request.requestId, "request-1")
         XCTAssertEqual(request.command, .handshake)
 
-        launcher.receive(line: #"{"version":2,"requestId":"other","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"other","result":{"protocolVersion":3}}"#)
         XCTAssertEqual(supervisor.availability, .connecting)
 
-        launcher.receive(line: #"{"version":2,"requestId":"request-1","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"request-1","result":{"protocolVersion":3}}"#)
         XCTAssertEqual(supervisor.availability, .connected)
     }
 
@@ -124,7 +124,7 @@ final class HelperSupervisorTests: XCTestCase {
     func testHandshakeFailuresEnterSharedRecoveryBudgetAfterChildExit() {
         let failures: [(String, Bool, (FakeHelperLauncher) -> Void)] = [
             ("malformed line", false, { $0.receive(line: "{") }),
-            ("correlated error", false, { $0.receive(line: #"{"version":2,"requestId":"request-1","error":{"code":"unsupportedVersion","message":"unsupported protocol version"}}"#) }),
+            ("correlated error", false, { $0.receive(line: #"{"version":3,"requestId":"request-1","error":{"code":"unsupportedVersion","message":"unsupported protocol version"}}"#) }),
             ("unsupported response version", false, { $0.receive(line: #"{"version":1,"requestId":"request-1","result":{"protocolVersion":1}}"#) }),
             ("EOF", false, { $0.receiveEOF() }),
             ("nonzero exit", true, { $0.exit(status: 1) }),
@@ -166,7 +166,7 @@ final class HelperSupervisorTests: XCTestCase {
         supervisor.onEvent = { events.append($0) }
         supervisor.start()
         XCTAssertEqual(launcher.arguments, ["--state-root", "/trusted/tsnet"])
-        launcher.receive(line: #"{"version":2,"requestId":"handshake-1","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         let laterPortal = PortalConfiguration(
             id: UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!,
             name: "hermes",
@@ -205,10 +205,10 @@ final class HelperSupervisorTests: XCTestCase {
                 ),
             ]
         )
-        launcher.receive(line: #"{"version":2,"event":"portalStatus","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"state":"connecting","addresses":[]}}"#)
+        launcher.receive(line: #"{"version":3,"event":"portalStatus","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"state":"connecting","addresses":[]}}"#)
         XCTAssertEqual(events, [.status(laterPortal.id, PortalStatusPayload(state: .connecting, stableNodeId: nil, assignedName: nil, portalURL: nil, addresses: []))])
         XCTAssertNil(result)
-        launcher.receive(line: #"{"version":2,"requestId":"reconcile-1","result":{"entries":[{"portalId":"5EA74329-3144-4BA2-925F-138D14D61FCC","outcome":"converged"},{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","outcome":"startFailed"}]}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"reconcile-1","result":{"entries":[{"portalId":"5EA74329-3144-4BA2-925F-138D14D61FCC","outcome":"converged"},{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","outcome":"startFailed"}]}}"#)
         XCTAssertEqual(
             try result?.get().entries,
             [
@@ -228,7 +228,7 @@ final class HelperSupervisorTests: XCTestCase {
             handshakeTimeout: 1
         )
         supervisor.start()
-        launcher.receive(line: #"{"version":2,"requestId":"handshake-1","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         var result: Result<ReconcilePortalsResult, Error>?
 
         supervisor.reconcilePortals([]) { result = $0 }
@@ -249,7 +249,7 @@ final class HelperSupervisorTests: XCTestCase {
             handshakeTimeout: 1
         )
         supervisor.start()
-        launcher.receive(line: #"{"version":2,"requestId":"handshake-1","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         var result: Result<[LocalAppCandidatePayload], Error>?
 
         supervisor.discoverLocalApps { result = $0 }
@@ -258,7 +258,7 @@ final class HelperSupervisorTests: XCTestCase {
         let request = try JSONDecoder().decode(HelperRequest<EmptyPayload>.self, from: requestData)
         XCTAssertEqual(request.command, .discoverLocalApps)
         XCTAssertEqual(request.requestId, "discover-1")
-        launcher.receive(line: #"{"version":2,"requestId":"discover-1","result":{"candidates":[{"localAppPort":3000,"processLabel":"node","suggestedPortalName":"hermes"}]}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"discover-1","result":{"candidates":[{"localAppPort":3000,"processLabel":"node","suggestedPortalName":"hermes"}]}}"#)
         XCTAssertEqual(
             try result?.get(),
             [LocalAppCandidatePayload(localAppPort: 3000, processLabel: "node", suggestedPortalName: "hermes")]
@@ -275,7 +275,7 @@ final class HelperSupervisorTests: XCTestCase {
             handshakeTimeout: 1
         )
         supervisor.start()
-        launcher.receive(line: #"{"version":2,"requestId":"handshake-1","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         let portalID = UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!
         var result: Result<Void, Error>?
 
@@ -286,8 +286,43 @@ final class HelperSupervisorTests: XCTestCase {
         XCTAssertEqual(request.command, .cleanupRejectedPortal)
         XCTAssertEqual(request.payload.portalId, portalID)
         XCTAssertNil(result)
-        launcher.receive(line: #"{"version":2,"requestId":"cleanup-1","result":{"accepted":true}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"cleanup-1","result":{"accepted":true}}"#)
         XCTAssertNoThrow(try result?.get())
+    }
+
+    func testRemovalRequestIsUUIDOnlyAndFailsWhenProcessGenerationIsLost() throws {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "remove-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 1
+        )
+        supervisor.start()
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
+        let portalID = UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!
+        var result: Result<Void, Error>?
+
+        supervisor.removePortal(id: portalID) { result = $0 }
+
+        let requestData = try XCTUnwrap(launcher.process.sent.last)
+        let request = try JSONDecoder().decode(HelperRequest<RemovePortalPayload>.self, from: requestData)
+        XCTAssertEqual(request.command, .removePortal)
+        XCTAssertEqual(request.payload, RemovePortalPayload(portalId: portalID))
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: requestData) as? NSDictionary, [
+            "version": 3,
+            "requestId": "remove-1",
+            "command": "removePortal",
+            "payload": ["portalId": portalID.uuidString],
+        ])
+        XCTAssertNil(result)
+
+        launcher.receiveEOF()
+
+        guard case .failure(HelperClientError.protocolFailure) = result else {
+            return XCTFail("expected unresolved removal to fail after process loss")
+        }
     }
 
     func testReturnsFixedHelperDiscoveryFailure() throws {
@@ -300,11 +335,11 @@ final class HelperSupervisorTests: XCTestCase {
             handshakeTimeout: 1
         )
         supervisor.start()
-        launcher.receive(line: #"{"version":2,"requestId":"handshake-1","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         var result: Result<[LocalAppCandidatePayload], Error>?
 
         supervisor.discoverLocalApps { result = $0 }
-        launcher.receive(line: #"{"version":2,"requestId":"discover-1","error":{"code":"discoveryFailure","message":"local app discovery failed"}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"discover-1","error":{"code":"discoveryFailure","message":"local app discovery failed"}}"#)
 
         guard case let .failure(HelperClientError.helper(error)) = result else {
             return XCTFail("expected fixed helper discovery failure")

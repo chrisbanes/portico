@@ -113,6 +113,27 @@ final class PortalStoreTests: XCTestCase {
         XCTAssertEqual(try store.loadInstallation(), installation)
     }
 
+    func testHistoricalVersionTwoDefaultsRemovalAssignedNameAndPendingRemovalRoundTrips() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
+        let historical = Data(
+            #"{"version":2,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"desiredState":"enabled","lifecycle":"active"}],"alerts":[]}"#.utf8
+        )
+        try historical.write(to: store.installationURL)
+
+        var installation = try store.loadInstallation()
+
+        XCTAssertEqual(installation.version, 2)
+        XCTAssertNil(installation.portals[0].removalAssignedName)
+
+        installation.portals[0].lifecycle = .pendingRemoval
+        installation.portals[0].removalAssignedName = "hermes-1"
+        try store.save(installation)
+
+        XCTAssertEqual(try store.loadInstallation(), installation)
+        XCTAssertEqual(try store.loadInstallation().version, 2)
+    }
+
     func testExplicitNullDesiredStateIsCorruptRatherThanDefaulting() throws {
         let store = PortalStore(rootURL: temporaryRoot())
         try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)

@@ -1,5 +1,18 @@
 import Foundation
 
+enum PortalRemovalState: Equatable {
+    case waitingForHelper
+    case reconciling
+    case removing
+    case failed
+}
+
+struct PortalRemovalNotice: Equatable, Identifiable {
+    let id: UUID
+    let portalName: String
+    let assignedName: String?
+}
+
 @MainActor
 final class PortalController: ObservableObject {
     static let manualRemovalURL = URL(
@@ -19,12 +32,17 @@ final class PortalController: ObservableObject {
     @Published private(set) var reachabilityStates: [UUID: LocalAppReachabilityState] = [:]
     @Published private(set) var staleStatusIDs: Set<UUID> = []
     @Published private(set) var diagnosticEntries: [DiagnosticEntry] = []
+    @Published private(set) var removalStates: [UUID: PortalRemovalState] = [:]
+    @Published private(set) var removalNotices: [PortalRemovalNotice] = []
 
     var portal: PortalConfiguration? { portals.first }
     var status: PortalStatusPayload? { portal.flatMap { statuses[$0.id] } }
     var canResetTailnet: Bool { portals.isEmpty && installation.tailnetBinding != nil }
     var pendingPortals: [PortalConfiguration] {
         portals.filter { $0.lifecycle == .pendingTailnetRejection }
+    }
+    var pendingRemovalPortals: [PortalConfiguration] {
+        portals.filter { $0.lifecycle == .pendingRemoval }
     }
 
     private let store: PortalStore
@@ -42,6 +60,8 @@ final class PortalController: ObservableObject {
     private var reconciliationGeneration = 0
     private var reconciliationInFlight = false
     private var pendingReconciliation: PortalReconciliation?
+    private var removalAttemptTokens: [UUID: Int] = [:]
+    private var removalsAwaitingReconciliation: [UUID: Int] = [:]
 
     init(
         store: PortalStore,
@@ -72,6 +92,9 @@ final class PortalController: ObservableObject {
         do {
             installation = try store.loadInstallation()
             publishInstallation()
+            for portal in installation.portals where portal.lifecycle == .pendingRemoval {
+                queueRemovalAttempt(portal.id, schedule: false)
+            }
         } catch {
             message = "Saved Portal configuration could not be loaded."
         }
@@ -180,6 +203,58 @@ final class PortalController: ObservableObject {
 
     func stopPortal(id: UUID) {
         updateDesiredState(id: id, desiredState: .stopped)
+    }
+
+    func removalWarningText(for portal: PortalConfiguration) -> String {
+        let assignedName = statuses[portal.id]?.assignedName ?? portal.removalAssignedName
+        let device = assignedName.map { " The Tailscale device “\($0)”" }
+            ?? " Its remote Tailscale device"
+        return "Remove Portal “\(portal.name)” from this Mac? This permanently deletes its local configuration and local Tailscale identity state.\(device) may remain in the tailnet and may require manual removal."
+    }
+
+    func removalNoticeText(for notice: PortalRemovalNotice) -> String {
+        let device = notice.assignedName.map { " The Tailscale device “\($0)”" }
+            ?? " Its remote Tailscale device"
+        return "Removed Portal “\(notice.portalName)” from this Mac.\(device) may remain in the tailnet and may require manual removal."
+    }
+
+    func pendingRemovalWarningText(for portal: PortalConfiguration) -> String {
+        let device = portal.removalAssignedName.map { " The Tailscale device “\($0)”" }
+            ?? " Its remote Tailscale device"
+        return "Removing Portal “\(portal.name)” from this Mac permanently deletes its local configuration and local Tailscale identity state.\(device) may remain in the tailnet and may require manual removal."
+    }
+
+    func removePortal(id: UUID) {
+        guard let index = installation.portals.firstIndex(where: {
+            $0.id == id && $0.lifecycle == .active
+        }) else { return }
+        var updated = installation
+        updated.portals[index].lifecycle = .pendingRemoval
+        updated.portals[index].removalAssignedName = statuses[id]?.assignedName
+        do {
+            try store.save(updated)
+            installation = updated
+            authenticationPending.remove(id)
+            statuses.removeValue(forKey: id)
+            staleStatusIDs.remove(id)
+            reachabilityStates.removeValue(forKey: id)
+            publishInstallation()
+            message = nil
+            queueRemovalAttempt(id)
+        } catch {
+            message = "The Portal could not be saved for removal."
+        }
+    }
+
+    func retryRemoval(id: UUID) {
+        guard installation.portals.contains(where: {
+            $0.id == id && $0.lifecycle == .pendingRemoval
+        }), removalStates[id] == .failed else { return }
+        queueRemovalAttempt(id)
+    }
+
+    func dismissRemovalNotice(id: UUID) {
+        removalNotices.removeAll { $0.id == id }
     }
 
     func updateLocalAppPort(id: UUID, port: String) {
@@ -306,6 +381,16 @@ final class PortalController: ObservableObject {
         }
     }
 
+    private func queueRemovalAttempt(_ id: UUID, schedule: Bool = true) {
+        let token = (removalAttemptTokens[id] ?? 0) + 1
+        removalAttemptTokens[id] = token
+        removalsAwaitingReconciliation[id] = token
+        removalStates[id] = .waitingForHelper
+        if schedule {
+            scheduleReconciliation()
+        }
+    }
+
     private func scheduleReconciliation() {
         reconciliationGeneration += 1
         let reconciliation = PortalReconciliation(
@@ -322,6 +407,15 @@ final class PortalController: ObservableObject {
 
     private func send(_ reconciliation: PortalReconciliation) {
         reconciliationInFlight = true
+        let removalAttempts = removalsAwaitingReconciliation.filter { id, token in
+            removalAttemptTokens[id] == token && installation.portals.contains(where: {
+                $0.id == id && $0.lifecycle == .pendingRemoval
+            })
+        }
+        for (id, _) in removalAttempts {
+            removalsAwaitingReconciliation.removeValue(forKey: id)
+            removalStates[id] = .reconciling
+        }
         helper.reconcilePortals(reconciliation.portals) { [weak self] result in
             guard let self else { return }
             self.reconciliationInFlight = false
@@ -331,8 +425,16 @@ final class PortalController: ObservableObject {
                     self.message = response.entries.contains { $0.outcome != .converged }
                         ? "Some Portals could not be reconciled."
                         : nil
+                    self.continueRemovalAttempts(removalAttempts, after: response)
                 case .failure:
                     self.message = "Portals could not be reconciled."
+                    for (id, token) in removalAttempts {
+                        self.failRemovalAttempt(id: id, token: token)
+                    }
+                }
+            } else {
+                for (id, token) in removalAttempts where self.removalAttemptTokens[id] == token {
+                    self.removalsAwaitingReconciliation[id] = token
                 }
             }
             if let pending = self.pendingReconciliation {
@@ -343,10 +445,78 @@ final class PortalController: ObservableObject {
         }
     }
 
+    private func continueRemovalAttempts(
+        _ attempts: [UUID: Int],
+        after response: ReconcilePortalsResult
+    ) {
+        for (id, token) in attempts {
+            guard removalAttemptTokens[id] == token,
+                  installation.portals.contains(where: {
+                      $0.id == id && $0.lifecycle == .pendingRemoval
+                  })
+            else { continue }
+            if let entry = response.entries.first(where: { $0.portalId == id }),
+               entry.outcome != .converged {
+                failRemovalAttempt(id: id, token: token)
+                continue
+            }
+            removalStates[id] = .removing
+            helper.removePortal(id: id) { [weak self] result in
+                guard let self, self.removalAttemptTokens[id] == token else { return }
+                switch result {
+                case .success:
+                    self.finishRemoval(id: id, token: token)
+                case .failure:
+                    self.failRemovalAttempt(id: id, token: token)
+                }
+            }
+        }
+    }
+
+    private func failRemovalAttempt(id: UUID, token: Int) {
+        guard removalAttemptTokens[id] == token else { return }
+        removalStates[id] = .failed
+        message = "Portal removal could not be completed. Retry when ready."
+    }
+
+    private func finishRemoval(id: UUID, token: Int) {
+        guard removalAttemptTokens[id] == token,
+              let portal = installation.portals.first(where: {
+                  $0.id == id && $0.lifecycle == .pendingRemoval
+              })
+        else { return }
+        var updated = installation
+        updated.portals.removeAll { $0.id == id }
+        do {
+            try store.save(updated)
+            installation = updated
+            statuses.removeValue(forKey: id)
+            authenticationPending.remove(id)
+            staleStatusIDs.remove(id)
+            reachabilityStates.removeValue(forKey: id)
+            removalAttemptTokens.removeValue(forKey: id)
+            removalsAwaitingReconciliation.removeValue(forKey: id)
+            removalStates.removeValue(forKey: id)
+            removalNotices.removeAll { $0.id == id }
+            removalNotices.append(PortalRemovalNotice(
+                id: id,
+                portalName: portal.name,
+                assignedName: portal.removalAssignedName
+            ))
+            publishInstallation()
+            message = nil
+        } catch {
+            failRemovalAttempt(id: id, token: token)
+            message = "Local cleanup completed, but the Portal record could not be removed. Retry when ready."
+        }
+    }
+
     private func receive(_ event: PortalHelperEvent) {
         switch event {
         case let .status(id, status):
-            guard let portal = installation.portals.first(where: { $0.id == id }) else { return }
+            guard let portal = installation.portals.first(where: {
+                $0.id == id && $0.lifecycle == .active
+            }) else { return }
             let displayStatus = status.sanitizedForDisplay()
             statuses[id] = displayStatus
             staleStatusIDs.remove(id)
@@ -465,7 +635,7 @@ final class PortalController: ObservableObject {
         portals = installation.portals
         alerts = installation.alerts
         tailnetDisplaySuffix = installation.tailnetBinding?.magicDNSSuffix.nonEmpty
-        reachability?.update(portals: installation.portals)
+        reachability?.update(portals: installation.portals.filter { $0.lifecycle == .active })
     }
 
     private func recordPortalState(_ portal: PortalConfiguration) {

@@ -1,6 +1,6 @@
 import Foundation
 
-let helperProtocolVersion = 2
+let helperProtocolVersion = 3
 
 enum HelperCommand: String, Codable {
     case handshake
@@ -8,6 +8,7 @@ enum HelperCommand: String, Codable {
     case reconcilePortals
     case authenticatePortal
     case cleanupRejectedPortal
+    case removePortal
     case discoverLocalApps
 }
 
@@ -74,6 +75,14 @@ struct CleanupRejectedPortalPayload: Codable, Equatable {
 }
 
 struct CleanupRejectedPortalResult: Codable, Equatable {
+    let accepted: Bool
+}
+
+struct RemovePortalPayload: Codable, Equatable {
+    let portalId: UUID
+}
+
+struct RemovePortalResult: Codable, Equatable {
     let accepted: Bool
 }
 

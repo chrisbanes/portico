@@ -254,26 +254,94 @@ func (r *Runtime) Authenticate(ctx context.Context, portalID string) error {
 }
 
 func (r *Runtime) CleanupRejectedPortal(portalID string) error {
+	return r.cleanupPortal(portalID)
+}
+
+func (r *Runtime) RemovePortal(portalID string) error {
+	return r.cleanupPortal(portalID)
+}
+
+func (r *Runtime) cleanupPortal(portalID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	portalID, err := normalizePortalID(portalID)
 	if err != nil {
 		return errors.New("invalid portal ID")
 	}
-	stateDirectory, err := validatedStateDirectory(r.stateRoot, portalID)
-	if err != nil {
+	stateRoot, targetExists, err := openPortalStateRoot(r.stateRoot, portalID)
+	if err != nil && !os.IsNotExist(err) {
 		return err
+	}
+	if stateRoot != nil {
+		defer stateRoot.Close()
 	}
 	if portal := r.portals[portalID]; portal != nil {
 		if err := portal.close(); err != nil {
 			return err
 		}
 	}
-	if err := os.RemoveAll(stateDirectory); err != nil {
-		return errors.New("remove portal state")
+	if stateRoot == nil {
+		stateRoot, targetExists, err = openPortalStateRoot(r.stateRoot, portalID)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if stateRoot != nil {
+			defer stateRoot.Close()
+		}
+	} else {
+		targetExists, err = portalStateTargetExists(stateRoot, portalID)
+		if err != nil {
+			return err
+		}
+	}
+	if targetExists {
+		if err := stateRoot.RemoveAll(portalID); err != nil {
+			return errors.New("remove portal state")
+		}
 	}
 	delete(r.portals, portalID)
 	return nil
+}
+
+func openPortalStateRoot(stateRoot, portalID string) (*os.Root, bool, error) {
+	root, err := filepath.Abs(filepath.Clean(stateRoot))
+	if err != nil {
+		return nil, false, errors.New("resolve state root")
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, err
+		}
+		return nil, false, errors.New("resolve state root")
+	}
+	openedRoot, err := os.OpenRoot(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, err
+		}
+		return nil, false, errors.New("open state root")
+	}
+	targetExists, err := portalStateTargetExists(openedRoot, portalID)
+	if err != nil {
+		_ = openedRoot.Close()
+		return nil, false, err
+	}
+	return openedRoot, targetExists, nil
+}
+
+func portalStateTargetExists(root *os.Root, portalID string) (bool, error) {
+	info, err := root.Lstat(portalID)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, errors.New("inspect portal state")
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false, errors.New("invalid portal state directory")
+	}
+	return true, nil
 }
 
 func (r *Runtime) Close() error {
@@ -296,22 +364,6 @@ func normalizePortalID(portalID string) (string, error) {
 		return "", errors.New("invalid portal ID")
 	}
 	return portalID, nil
-}
-
-func validatedStateDirectory(stateRoot, portalID string) (string, error) {
-	portalID, err := normalizePortalID(portalID)
-	if err != nil {
-		return "", err
-	}
-	root, err := filepath.Abs(filepath.Clean(stateRoot))
-	if err != nil {
-		return "", errors.New("resolve state root")
-	}
-	target := filepath.Join(root, portalID)
-	if filepath.Dir(target) != root || filepath.Base(target) != portalID {
-		return "", errors.New("invalid portal state directory")
-	}
-	return target, nil
 }
 
 func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emit func(Event)) error {
