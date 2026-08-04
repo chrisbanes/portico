@@ -21,6 +21,19 @@ import (
 const testPortalID = "9f55ca93-d7b3-4eab-a871-310ea576005a"
 const secondPortalID = "5ea74329-3144-4ba2-925f-138d14d61fcc"
 
+func localAppDestination(port uint16) Destination {
+	return Destination{Kind: DestinationLocalApp, Port: port}
+}
+
+func TestDestinationRejectsIPv4MappedLoopback(t *testing.T) {
+	destination := Destination{
+		Kind: DestinationRemoteApp, Scheme: "https", Host: "::ffff:127.0.0.1", Port: 443,
+	}
+	if err := destination.Validate(); err == nil {
+		t.Fatal("Destination.Validate() succeeded for IPv4-mapped loopback")
+	}
+}
+
 func TestRuntimeReconcileContinuesAfterStartFailureAndRetainsOwnershipUntilCleanup(t *testing.T) {
 	root := t.TempDir()
 	created := make(map[string][]*fakeNode)
@@ -35,8 +48,8 @@ func TestRuntimeReconcileContinuesAfterStartFailureAndRetainsOwnershipUntilClean
 		return node
 	})
 	desired := []Config{
-		{ID: testPortalID, Name: "hermes", Port: 8787, DesiredState: DesiredStateEnabled},
-		{ID: secondPortalID, Name: "atlas", Port: 8788, DesiredState: DesiredStateEnabled},
+		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
+		{ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
 	}
 
 	entries, err := runtime.Reconcile(context.Background(), desired, func(Event) {})
@@ -118,7 +131,7 @@ func TestRuntimePortEditPreservesIdentityAndDrainsAcceptedHTTPAndWebSocketTraffi
 	factory.node.realListener = tailnetListener
 	runtime := NewRuntime(t.TempDir(), factory.New)
 	desired := []Config{{
-		ID: testPortalID, Name: "hermes", Port: uint16(oldPort), DesiredState: DesiredStateEnabled,
+		ID: testPortalID, Name: "hermes", Destination: localAppDestination(uint16(oldPort)), DesiredState: DesiredStateEnabled,
 	}}
 	if entries, reconcileErr := runtime.Reconcile(context.Background(), desired, func(Event) {}); reconcileErr != nil || entries[0].Outcome != OutcomeConverged {
 		t.Fatalf("initial Reconcile = (%+v, %v), want converged", entries, reconcileErr)
@@ -154,7 +167,7 @@ func TestRuntimePortEditPreservesIdentityAndDrainsAcceptedHTTPAndWebSocketTraffi
 	}
 	defer oldWebSocket.CloseNow()
 
-	desired[0].Port = uint16(newPort)
+	desired[0].Destination = localAppDestination(uint16(newPort))
 	entries, err := runtime.Reconcile(context.Background(), desired, func(Event) {})
 	if err != nil || entries[0].Outcome != OutcomeConverged {
 		t.Fatalf("port-edit Reconcile = (%+v, %v), want converged", entries, err)
@@ -197,8 +210,8 @@ func TestRuntimeReconcileStopsAndOmitsPortalsWithoutDeletingIdentity(t *testing.
 		return node
 	})
 	desired := []Config{
-		{ID: testPortalID, Name: "hermes", Port: 8787, DesiredState: DesiredStateEnabled},
-		{ID: secondPortalID, Name: "atlas", Port: 8788, DesiredState: DesiredStateEnabled},
+		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
+		{ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
 	}
 	if _, err := runtime.Reconcile(context.Background(), desired, func(Event) {}); err != nil {
 		t.Fatal(err)
@@ -210,7 +223,7 @@ func TestRuntimeReconcileStopsAndOmitsPortalsWithoutDeletingIdentity(t *testing.
 	}
 
 	entries, err := runtime.Reconcile(context.Background(), []Config{{
-		ID: testPortalID, Name: "hermes", Port: 8787, DesiredState: DesiredStateStopped,
+		ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateStopped,
 	}}, func(Event) {})
 
 	if err != nil {
@@ -233,7 +246,7 @@ func TestRuntimeReconcileStopsAndOmitsPortalsWithoutDeletingIdentity(t *testing.
 	}
 
 	entries, err = runtime.Reconcile(context.Background(), []Config{{
-		ID: testPortalID, Name: "hermes", Port: 8787, DesiredState: DesiredStateStopped,
+		ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateStopped,
 	}}, func(Event) {})
 	if err != nil || len(entries) != 1 || entries[0].PortalID != testPortalID || entries[0].Outcome != OutcomeConverged {
 		t.Fatalf("already-converged retry = (%+v, %v)", entries, err)
@@ -251,7 +264,7 @@ func TestRuntimeReconcileRetainsOwnershipAfterCloseFailure(t *testing.T) {
 		created = append(created, node)
 		return node
 	})
-	enabled := Config{ID: testPortalID, Name: "hermes", Port: 8787, DesiredState: DesiredStateEnabled}
+	enabled := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	if _, err := runtime.Reconcile(context.Background(), []Config{enabled}, func(Event) {}); err != nil {
 		t.Fatal(err)
 	}
@@ -275,8 +288,8 @@ func TestRuntimeReconcileRejectsWholeInvalidSnapshotBeforeMutation(t *testing.T)
 		return &fakeNode{watcher: newFakeWatcher()}
 	})
 	configs := []Config{
-		{ID: testPortalID, Name: "hermes", Port: 8787, DesiredState: DesiredStateEnabled},
-		{ID: secondPortalID, Name: "Atlas", Port: 8788, DesiredState: DesiredStateEnabled},
+		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
+		{ID: secondPortalID, Name: "Atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
 	}
 
 	if entries, err := runtime.Reconcile(context.Background(), configs, func(Event) {}); err == nil || entries != nil {
@@ -284,6 +297,22 @@ func TestRuntimeReconcileRejectsWholeInvalidSnapshotBeforeMutation(t *testing.T)
 	}
 	if created != 0 {
 		t.Fatalf("created %d nodes before validating the full snapshot", created)
+	}
+}
+
+func TestRemoteAppDestinationRejectsLoopbackAndNoncanonicalHosts(t *testing.T) {
+	for _, destination := range []Destination{
+		{Kind: DestinationRemoteApp, Scheme: "https", Host: "localhost", Port: 443},
+		{Kind: DestinationRemoteApp, Scheme: "https", Host: "127.0.0.1", Port: 443},
+		{Kind: DestinationRemoteApp, Scheme: "https", Host: "[::1]", Port: 443},
+		{Kind: DestinationRemoteApp, Scheme: "https", Host: "Example.COM", Port: 443},
+	} {
+		if err := destination.Validate(); err == nil {
+			t.Fatalf("Validate(%+v) = nil, want rejection", destination)
+		}
+	}
+	if err := (Destination{Kind: DestinationRemoteApp, Scheme: "https", Host: "app.example.com", Port: 443}).Validate(); err != nil {
+		t.Fatalf("valid Remote App rejected: %v", err)
 	}
 }
 
@@ -345,8 +374,8 @@ func TestRuntimeKeepsTwoIndependentPortalsOnline(t *testing.T) {
 	}
 
 	configs := []Config{
-		{ID: testPortalID, Name: "hermes", Port: 8787, DesiredState: DesiredStateEnabled},
-		{ID: secondPortalID, Name: "atlas", Port: 8788, DesiredState: DesiredStateEnabled},
+		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
+		{ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
 	}
 	if _, err := runtime.Reconcile(context.Background(), configs, emit); err != nil {
 		t.Fatalf("Reconcile Portals: %v", err)
@@ -372,8 +401,8 @@ func TestCleanupRejectedPortalClosesAndDeletesOnlyAddressedPortal(t *testing.T) 
 		return node
 	})
 	configs := []Config{
-		{ID: testPortalID, Name: "hermes", Port: 8787, DesiredState: DesiredStateEnabled},
-		{ID: secondPortalID, Name: "atlas", Port: 8788, DesiredState: DesiredStateEnabled},
+		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
+		{ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
 	}
 	if _, err := runtime.Reconcile(context.Background(), configs, func(Event) {}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -417,8 +446,8 @@ func TestRemovePortalClosesAndDeletesOnlyAddressedPortal(t *testing.T) {
 		return node
 	})
 	configs := []Config{
-		{ID: testPortalID, Name: "hermes", Port: 8787, DesiredState: DesiredStateEnabled},
-		{ID: secondPortalID, Name: "atlas", Port: 8788, DesiredState: DesiredStateEnabled},
+		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
+		{ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
 	}
 	if _, err := runtime.Reconcile(context.Background(), configs, func(Event) {}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -460,7 +489,7 @@ func TestRemovePortalDeletesStateCreatedWhileRuntimeCloses(t *testing.T) {
 	}
 	runtime := NewRuntime(root, func(_, _ string) Node { return node })
 	if _, err := runtime.Reconcile(context.Background(), []Config{{
-		ID: testPortalID, Name: "hermes", Port: 8787, DesiredState: DesiredStateEnabled,
+		ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled,
 	}}, func(Event) {}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -482,7 +511,7 @@ func TestRemovePortalRejectsUntrustedTargetsWithoutClosingRuntime(t *testing.T) 
 	root := t.TempDir()
 	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
 	runtime := NewRuntime(root, func(_, _ string) Node { return node })
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Port: 8787}, func(Event) {}); err != nil {
+	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
@@ -515,7 +544,7 @@ func TestRemovePortalPreservesStateAndOwnershipWhenCloseFails(t *testing.T) {
 		closeResults: []error{errors.New("close failed"), nil},
 	}
 	runtime := NewRuntime(root, func(_, _ string) Node { return node })
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Port: 8787}, func(Event) {}); err != nil {
+	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	stateDirectory := filepath.Join(root, testPortalID)
@@ -613,7 +642,7 @@ func TestCleanupWaitsForStartBeforeDeletingAnyPortalState(t *testing.T) {
 	}
 	startDone := make(chan error, 1)
 	go func() {
-		startDone <- reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Port: 8787}, func(Event) {})
+		startDone <- reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {})
 	}()
 	<-blocked.startEntered
 	cleanupDone := make(chan error, 1)
@@ -640,7 +669,7 @@ func TestCleanupWaitsForStartBeforeDeletingAnyPortalState(t *testing.T) {
 func TestRuntimeUsesUUIDStateDirectoryAndStableIdentity(t *testing.T) {
 	factory := newFakeFactory()
 	root := t.TempDir()
-	config := Config{ID: testPortalID, Name: "hermes", Port: 8787}
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}
 
 	for range 2 {
 		runtime := NewRuntime(root, factory.New)
@@ -663,9 +692,9 @@ func TestRuntimeUsesUUIDStateDirectoryAndStableIdentity(t *testing.T) {
 
 func TestConfigRejectsUntrustedPathsAndDestinations(t *testing.T) {
 	invalid := []Config{
-		{ID: "../escape", Name: "hermes", Port: 8787},
-		{ID: testPortalID, Name: "Hermes", Port: 8787},
-		{ID: testPortalID, Name: "hermes", Port: 0},
+		{ID: "../escape", Name: "hermes", Destination: localAppDestination(8787)},
+		{ID: testPortalID, Name: "Hermes", Destination: localAppDestination(8787)},
+		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(0)},
 	}
 	for _, config := range invalid {
 		if err := config.Validate(); err == nil {
@@ -698,7 +727,7 @@ func TestRuntimeMapsStructuredStatus(t *testing.T) {
 			}
 			var events []Event
 			runtime := NewRuntime(t.TempDir(), factory.New)
-			if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Port: 8787}, func(event Event) {
+			if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(event Event) {
 				events = append(events, event)
 			}); err != nil {
 				t.Fatalf("Start: %v", err)
@@ -739,7 +768,7 @@ func TestAuthenticateEmitsTransientURLFromFreshNotification(t *testing.T) {
 	factory := newFakeFactory()
 	events := make(chan Event, 8)
 	runtime := NewRuntime(t.TempDir(), factory.New)
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Port: 8787}, func(event Event) {
+	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(event Event) {
 		events <- event
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -769,7 +798,7 @@ func TestStartAndCloseAreSerialized(t *testing.T) {
 	runtime := NewRuntime(t.TempDir(), factory.New)
 	startDone := make(chan error, 1)
 	go func() {
-		startDone <- reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Port: 8787}, func(Event) {})
+		startDone <- reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {})
 	}()
 	<-factory.node.startEntered
 	closeDone := make(chan error, 1)
@@ -800,7 +829,7 @@ func TestOnlineRuntimeListensTLSAndClosesListenerBeforeNode(t *testing.T) {
 		CertDomains:  []string{"hermes.example.ts.net"},
 	}
 	runtime := NewRuntime(t.TempDir(), factory.New)
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Port: 8787}, func(Event) {}); err != nil {
+	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if factory.node.listenNetwork != "tcp" || factory.node.listenAddress != ":443" {
@@ -822,7 +851,7 @@ func TestRuntimeCloseReturnsListenerFailure(t *testing.T) {
 		CertDomains:  []string{"hermes.example.ts.net"},
 	}
 	runtime := NewRuntime(t.TempDir(), factory.New)
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Port: 8787}, func(Event) {}); err != nil {
+	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
 		t.Fatal(err)
 	}
 	factory.node.listener.closeErr = errors.New("close failed")
@@ -950,7 +979,7 @@ func newOnlineRuntimeWithLocalApp(t *testing.T, handler http.Handler) (*Runtime,
 	}
 	factory.node.realListener = listener
 	runtime := NewRuntime(t.TempDir(), factory.New)
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Port: uint16(port)}, func(Event) {}); err != nil {
+	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(uint16(port))}, func(Event) {}); err != nil {
 		_ = listener.Close()
 		t.Fatal(err)
 	}

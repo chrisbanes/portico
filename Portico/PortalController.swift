@@ -7,6 +7,13 @@ enum PortalRemovalState: Equatable {
     case failed
 }
 
+enum PortalCreationKind: String, CaseIterable, Identifiable {
+    case localApp
+    case remoteApp
+
+    var id: Self { self }
+}
+
 struct PortalRemovalNotice: Equatable, Identifiable {
     let id: UUID
     let portalName: String
@@ -21,6 +28,10 @@ final class PortalController: ObservableObject {
 
     @Published var portalName = ""
     @Published var localAppPort = ""
+    @Published var creationKind: PortalCreationKind = .localApp
+    @Published var remoteAppScheme: RemoteAppScheme = .https
+    @Published var remoteAppHost = ""
+    @Published var remoteAppPort = ""
     @Published private(set) var portals: [PortalConfiguration] = []
     @Published private(set) var statuses: [UUID: PortalStatusPayload] = [:]
     @Published private(set) var alerts: [InstallationAlert] = []
@@ -220,7 +231,7 @@ final class PortalController: ObservableObject {
     }
 
     func selectLocalApp(_ candidate: LocalAppCandidatePayload) {
-        guard localApps.contains(candidate) else { return }
+        guard creationKind == .localApp, localApps.contains(candidate) else { return }
         localAppPort = String(candidate.localAppPort)
         if portalName.isEmpty, let suggestion = candidate.suggestedPortalName {
             portalName = suggestion
@@ -233,11 +244,11 @@ final class PortalController: ObservableObject {
             message = "Choose an operational-support logging setting before adding a Portal."
             return nil
         }
-        let port: UInt16
+        let destination: PortalDestination
         do {
-            port = try PortalInputValidator.validate(name: portalName, port: localAppPort)
+            destination = try newPortalDestination()
         } catch let error as PortalValidationError {
-            message = "Enter a lower-case DNS label and a port from 1 through 65535."
+            message = "Enter a lower-case DNS label and valid destination details."
             return error
         } catch {
             return nil
@@ -245,7 +256,7 @@ final class PortalController: ObservableObject {
         let configuration = PortalConfiguration(
             id: uuidProvider(),
             name: portalName,
-            localAppPort: port,
+            destination: destination,
             createdAt: dateProvider()
         )
         var updated = installation
@@ -257,6 +268,8 @@ final class PortalController: ObservableObject {
             message = nil
             portalName = ""
             localAppPort = ""
+            remoteAppHost = ""
+            remoteAppPort = ""
             discoveryGeneration += 1
             localApps = []
             isRefreshingLocalApps = false
@@ -342,7 +355,8 @@ final class PortalController: ObservableObject {
             message = "Enter a port from 1 through 65535."
             return
         }
-        guard installation.portals[index].destination.localAppPort != localAppPort,
+        guard installation.portals[index].destination.localAppPort != nil,
+              installation.portals[index].destination.localAppPort != localAppPort,
               let destination = PortalDestination(localAppPort: localAppPort)
         else { return }
         var updated = installation
@@ -404,12 +418,9 @@ final class PortalController: ObservableObject {
         for portal: PortalConfiguration? = nil,
         editedPort: String? = nil
     ) -> PortalActionAvailability {
-        let addInputsValid = portal == nil && (try? PortalInputValidator.validate(
-            name: portalName,
-            port: localAppPort
-        )) != nil
+        let addInputsValid = portal == nil && (try? newPortalDestination()) != nil
         let editedPortValid: Bool
-        if let portal, let editedPort, editedPort != String(portal.localAppPort),
+        if let portal, let localPort = portal.localAppPort, let editedPort, editedPort != String(localPort),
            let parsed = try? PortalInputValidator.validate(name: portal.name, port: editedPort) {
             editedPortValid = parsed > 0
         } else {
@@ -432,6 +443,23 @@ final class PortalController: ObservableObject {
             isEditedPortValid: editedPortValid,
             isRefreshingLocalApps: isRefreshingLocalApps
         ))
+    }
+
+    private func newPortalDestination() throws -> PortalDestination {
+        switch creationKind {
+        case .localApp:
+            let port = try PortalInputValidator.validate(name: portalName, port: localAppPort)
+            guard let destination = PortalDestination(localAppPort: port) else { throw PortalValidationError.invalidPort }
+            return destination
+        case .remoteApp:
+            let port = try PortalInputValidator.validate(name: portalName, port: remoteAppPort)
+            guard let destination = PortalDestination(
+                remoteAppScheme: remoteAppScheme,
+                host: remoteAppHost,
+                port: port
+            ) else { throw PortalValidationError.invalidRemoteHost }
+            return destination
+        }
     }
 
     func copyPortalURL(id: UUID) {

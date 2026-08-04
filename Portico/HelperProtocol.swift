@@ -1,6 +1,6 @@
 import Foundation
 
-let helperProtocolVersion = 3
+let helperProtocolVersion = 4
 
 enum HelperCommand: String, Codable {
     case handshake
@@ -39,8 +39,9 @@ struct ShutdownResult: Codable, Equatable {
 struct ReconcilePortalPayload: Codable, Equatable {
     let portalId: UUID
     let portalName: String
-    let localAppPort: UInt16
+    let destination: PortalDestination
     let desiredState: PortalDesiredState
+
 }
 
 struct ReconcilePortalsPayload: Codable, Equatable {

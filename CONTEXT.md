@@ -28,6 +28,13 @@ _Avoid_: Generated URL, requested URL
 An HTTP service on the same Mac that a Portal makes available to its tailnet.
 _Avoid_: Backend, upstream, target
 
+**Portal Destination**:
+The one configured Local App or Remote App to which a Portal forwards requests.
+
+**Remote App**:
+An HTTP or HTTPS service reached through the Mac network that a Portal makes
+available to its tailnet. A Remote App is configured by scheme, host, and port.
+
 **Enabled Portal**:
 A Portal whose desired state is to remain connected whenever Portico is
 running.

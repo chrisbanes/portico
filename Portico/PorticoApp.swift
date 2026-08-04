@@ -54,6 +54,8 @@ private struct PortalView: View {
     private enum AccessibilityFocusTarget: Hashable {
         case portalNameField
         case localAppPortField
+        case remoteAppHostField
+        case remoteAppPortField
         case portal(UUID)
         case removalNotice(UUID)
     }
@@ -267,11 +269,34 @@ private struct PortalView: View {
                 .focused($inputFocus, equals: .portalNameField)
                 .accessibilityFocused($accessibilityFocus, equals: .portalNameField)
                 .onSubmit { validateNameAndAdvance() }
-            TextField("Local App Port", text: $controller.localAppPort)
-                .accessibilityIdentifier("local-app-port-field")
-                .focused($inputFocus, equals: .localAppPortField)
-                .accessibilityFocused($accessibilityFocus, equals: .localAppPortField)
-                .onSubmit { submitPortal() }
+            Picker("Destination", selection: $controller.creationKind) {
+                Text("Local App").tag(PortalCreationKind.localApp)
+                Text("Remote App").tag(PortalCreationKind.remoteApp)
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("destination-kind")
+            if controller.creationKind == .localApp {
+                TextField("Local App Port", text: $controller.localAppPort)
+                    .accessibilityIdentifier("local-app-port-field")
+                    .focused($inputFocus, equals: .localAppPortField)
+                    .accessibilityFocused($accessibilityFocus, equals: .localAppPortField)
+                    .onSubmit { submitPortal() }
+            } else {
+                Picker("Scheme", selection: $controller.remoteAppScheme) {
+                    Text("HTTP").tag(RemoteAppScheme.http)
+                    Text("HTTPS").tag(RemoteAppScheme.https)
+                }
+                .accessibilityIdentifier("remote-app-scheme")
+                TextField("Remote App Host", text: $controller.remoteAppHost)
+                    .accessibilityIdentifier("remote-app-host-field")
+                    .focused($inputFocus, equals: .remoteAppHostField)
+                    .accessibilityFocused($accessibilityFocus, equals: .remoteAppHostField)
+                TextField("Remote App Port", text: $controller.remoteAppPort)
+                    .accessibilityIdentifier("remote-app-port-field")
+                    .focused($inputFocus, equals: .remoteAppPortField)
+                    .accessibilityFocused($accessibilityFocus, equals: .remoteAppPortField)
+                    .onSubmit { submitPortal() }
+            }
             Button("Add Portal") { submitPortal() }
                 .buttonStyle(.borderedProminent)
                 .disabled(!controller.actionAvailability().addPortal)
@@ -281,8 +306,11 @@ private struct PortalView: View {
     private func validateNameAndAdvance() {
         do {
             _ = try PortalInputValidator.validate(name: controller.portalName, port: "1")
-            inputFocus = .localAppPortField
-            accessibilityFocus = .localAppPortField
+            let target: AccessibilityFocusTarget = controller.creationKind == .localApp
+                ? .localAppPortField
+                : .remoteAppHostField
+            inputFocus = target
+            accessibilityFocus = target
         } catch {
             inputFocus = .portalNameField
             accessibilityFocus = .portalNameField
@@ -295,8 +323,14 @@ private struct PortalView: View {
             inputFocus = .portalNameField
             accessibilityFocus = .portalNameField
         case .invalidPort:
-            inputFocus = .localAppPortField
-            accessibilityFocus = .localAppPortField
+            let target: AccessibilityFocusTarget = controller.creationKind == .localApp
+                ? .localAppPortField
+                : .remoteAppPortField
+            inputFocus = target
+            accessibilityFocus = target
+        case .invalidRemoteHost:
+            inputFocus = .remoteAppHostField
+            accessibilityFocus = .remoteAppHostField
         case nil:
             break
         }
@@ -385,7 +419,7 @@ private struct PortalStatusView: View {
         self.controller = controller
         self.portal = portal
         self.onRemove = onRemove
-        _localAppPort = State(initialValue: String(portal.localAppPort))
+        _localAppPort = State(initialValue: portal.localAppPort.map(String.init) ?? "")
     }
 
     var body: some View {
@@ -413,8 +447,10 @@ private struct PortalStatusView: View {
             .accessibilityIdentifier("desired-state")
         LabeledContent("Tailscale", value: presentation.tailscaleState)
             .accessibilityIdentifier("tailscale-state")
-        LabeledContent("Local App", value: presentation.localAppReachability)
-            .accessibilityIdentifier("local-app-state")
+        if portal.localAppPort != nil {
+            LabeledContent("Local App", value: presentation.localAppReachability)
+                .accessibilityIdentifier("local-app-state")
+        }
         if let status = controller.statuses[portal.id] {
             if let portalURL = status.portalURL {
                 LabeledContent(
@@ -442,16 +478,21 @@ private struct PortalStatusView: View {
             }
         }
         HStack {
-            Text("Local App Port")
-            Spacer()
-            TextField("Local App Port", text: $localAppPort)
-                .frame(width: 80)
-                .onSubmit(updatePort)
-                .accessibilityIdentifier("edit-local-app-port")
-            Button("Update") { updatePort() }
-                .controlSize(.small)
-                .disabled(!editedPortActions.editPort)
-                .accessibilityIdentifier("update-local-app-port")
+            if portal.localAppPort != nil {
+                Text("Local App Port")
+                Spacer()
+                TextField("Local App Port", text: $localAppPort)
+                    .frame(width: 80)
+                    .onSubmit(updatePort)
+                    .accessibilityIdentifier("edit-local-app-port")
+                Button("Update") { updatePort() }
+                    .controlSize(.small)
+                    .disabled(!editedPortActions.editPort)
+                    .accessibilityIdentifier("update-local-app-port")
+            } else {
+                Text("Remote App")
+                Spacer()
+            }
             Button(portal.desiredState == .enabled ? "Stop" : "Start") {
                 if portal.desiredState == .enabled {
                     controller.stopPortal(id: portal.id)
