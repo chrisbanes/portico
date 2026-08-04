@@ -33,6 +33,9 @@ final class PortalController: ObservableObject {
     private var authenticationPending: Set<UUID> = []
     private var cleanupInFlight: Set<UUID> = []
     private var discoveryGeneration = 0
+    private var reconciliationGeneration = 0
+    private var reconciliationInFlight = false
+    private var pendingReconciliation: PortalReconciliation?
 
     init(
         store: PortalStore,
@@ -111,10 +114,38 @@ final class PortalController: ObservableObject {
             localApps = []
             isRefreshingLocalApps = false
             localAppsMessage = nil
-            start(configuration)
+            scheduleReconciliation()
         } catch {
             message = "The Portal could not be saved."
         }
+    }
+
+    func startPortal(id: UUID) {
+        updateDesiredState(id: id, desiredState: .enabled)
+    }
+
+    func stopPortal(id: UUID) {
+        updateDesiredState(id: id, desiredState: .stopped)
+    }
+
+    func updateLocalAppPort(id: UUID, port: String) {
+        guard let index = installation.portals.firstIndex(where: {
+            $0.id == id && $0.lifecycle == .active
+        }) else { return }
+        let localAppPort: UInt16
+        do {
+            localAppPort = try PortalInputValidator.validate(
+                name: installation.portals[index].name,
+                port: port
+            )
+        } catch {
+            message = "Enter a port from 1 through 65535."
+            return
+        }
+        guard installation.portals[index].localAppPort != localAppPort else { return }
+        var updated = installation
+        updated.portals[index].localAppPort = localAppPort
+        savePortalOperation(updated)
     }
 
     func authenticate() {
@@ -179,21 +210,68 @@ final class PortalController: ObservableObject {
 
     private func helperConnected() {
         refreshLocalApps()
+        scheduleReconciliation()
         for portal in installation.portals {
-            switch portal.lifecycle {
-            case .active:
-                start(portal)
-            case .pendingTailnetRejection:
+            if portal.lifecycle == .pendingTailnetRejection {
                 cleanupRejectedPortal(portal, evidence: nil)
             }
         }
     }
 
-    private func start(_ portal: PortalConfiguration) {
-        guard helper.availability == .connected, portal.lifecycle == .active else { return }
-        helper.startPortal(portal) { [weak self] result in
-            if case .failure = result {
-                self?.message = "The Portal could not be started."
+    private func updateDesiredState(id: UUID, desiredState: PortalDesiredState) {
+        guard let index = installation.portals.firstIndex(where: {
+            $0.id == id && $0.lifecycle == .active
+        }), installation.portals[index].desiredState != desiredState else { return }
+        var updated = installation
+        updated.portals[index].desiredState = desiredState
+        savePortalOperation(updated)
+    }
+
+    private func savePortalOperation(_ updated: InstallationRecord) {
+        do {
+            try store.save(updated)
+            installation = updated
+            publishInstallation()
+            message = nil
+            scheduleReconciliation()
+        } catch {
+            message = "The Portal could not be saved."
+        }
+    }
+
+    private func scheduleReconciliation() {
+        reconciliationGeneration += 1
+        let reconciliation = PortalReconciliation(
+            generation: reconciliationGeneration,
+            portals: installation.portals.filter { $0.lifecycle == .active }
+        )
+        guard helper.availability == .connected else { return }
+        guard !reconciliationInFlight else {
+            pendingReconciliation = reconciliation
+            return
+        }
+        send(reconciliation)
+    }
+
+    private func send(_ reconciliation: PortalReconciliation) {
+        reconciliationInFlight = true
+        helper.reconcilePortals(reconciliation.portals) { [weak self] result in
+            guard let self else { return }
+            self.reconciliationInFlight = false
+            if reconciliation.generation == self.reconciliationGeneration {
+                switch result {
+                case let .success(response):
+                    self.message = response.entries.contains { $0.outcome != .converged }
+                        ? "Some Portals could not be reconciled."
+                        : nil
+                case .failure:
+                    self.message = "Portals could not be reconciled."
+                }
+            }
+            if let pending = self.pendingReconciliation {
+                self.pendingReconciliation = nil
+                guard self.helper.availability == .connected else { return }
+                self.send(pending)
             }
         }
     }
@@ -263,6 +341,7 @@ final class PortalController: ObservableObject {
             try store.save(updated)
             installation = updated
             publishInstallation()
+            scheduleReconciliation()
             cleanupRejectedPortal(
                 updated.portals[index],
                 evidence: RejectionEvidence(
@@ -320,6 +399,11 @@ final class PortalController: ObservableObject {
 private struct RejectionEvidence {
     let assignedName: String?
     let rejectedMagicDNSSuffix: String?
+}
+
+private struct PortalReconciliation {
+    let generation: Int
+    let portals: [PortalConfiguration]
 }
 
 private extension String {

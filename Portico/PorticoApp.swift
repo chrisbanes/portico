@@ -31,8 +31,8 @@ private struct PortalView: View {
             ForEach(controller.alerts) { alert in
                 completedWarning(alert)
             }
-            ForEach(controller.portals, id: \.id) { portal in
-                portalStatus(portal)
+            ForEach(controller.portals.filter { $0.lifecycle == .active }, id: \.id) { portal in
+                PortalStatusView(controller: controller, portal: portal)
                 Divider()
             }
             addPortalForm
@@ -105,34 +105,6 @@ private struct PortalView: View {
         }
     }
 
-    @ViewBuilder
-    private func portalStatus(_ portal: PortalConfiguration) -> some View {
-        Text(portal.name).font(.headline)
-        LabeledContent("Local App Port", value: String(portal.localAppPort))
-        if portal.lifecycle == .pendingTailnetRejection {
-            Text("Cleanup pending")
-                .foregroundStyle(.secondary)
-        } else if let status = controller.statuses[portal.id] {
-            LabeledContent("Tailscale", value: status.state.title)
-            if let assignedName = status.assignedName {
-                LabeledContent("Assigned Name", value: assignedName)
-            }
-            if let portalURL = status.portalURL {
-                LabeledContent("Portal URL", value: portalURL.absoluteString)
-            }
-            if !status.addresses.isEmpty {
-                LabeledContent("Addresses", value: status.addresses.joined(separator: ", "))
-            }
-            if status.state == .authenticating {
-                Button("Authenticate") { controller.authenticate(id: portal.id) }
-                    .buttonStyle(.borderedProminent)
-            }
-        } else {
-            Text("Waiting for Portal status…")
-                .foregroundStyle(.secondary)
-        }
-    }
-
     private func pendingWarning(_ portal: PortalConfiguration) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Label("Cleanup in progress", systemImage: "exclamationmark.triangle.fill")
@@ -155,6 +127,63 @@ private struct PortalView: View {
             Button("Dismiss") { controller.dismissAlert(id: alert.id) }
                 .controlSize(.small)
         }
+    }
+}
+
+private struct PortalStatusView: View {
+    @ObservedObject var controller: PortalController
+    let portal: PortalConfiguration
+    @State private var localAppPort: String
+
+    init(controller: PortalController, portal: PortalConfiguration) {
+        self.controller = controller
+        self.portal = portal
+        _localAppPort = State(initialValue: String(portal.localAppPort))
+    }
+
+    var body: some View {
+        Text(portal.name).font(.headline)
+        LabeledContent("Desired State", value: portal.desiredState.title)
+        HStack {
+            Text("Local App Port")
+            Spacer()
+            TextField("Local App Port", text: $localAppPort)
+                .frame(width: 80)
+                .onSubmit(updatePort)
+            Button("Update") { updatePort() }
+                .controlSize(.small)
+            Button(portal.desiredState == .enabled ? "Stop" : "Start") {
+                if portal.desiredState == .enabled {
+                    controller.stopPortal(id: portal.id)
+                } else {
+                    controller.startPortal(id: portal.id)
+                }
+            }
+            .controlSize(.small)
+        }
+        if let status = controller.statuses[portal.id] {
+            LabeledContent("Tailscale", value: status.state.title)
+            if let assignedName = status.assignedName {
+                LabeledContent("Assigned Name", value: assignedName)
+            }
+            if let portalURL = status.portalURL {
+                LabeledContent("Portal URL", value: portalURL.absoluteString)
+            }
+            if !status.addresses.isEmpty {
+                LabeledContent("Addresses", value: status.addresses.joined(separator: ", "))
+            }
+            if status.state == .authenticating {
+                Button("Authenticate") { controller.authenticate(id: portal.id) }
+                    .buttonStyle(.borderedProminent)
+            }
+        } else {
+            Text("Waiting for Portal status…")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func updatePort() {
+        controller.updateLocalAppPort(id: portal.id, port: localAppPort)
     }
 }
 
@@ -185,6 +214,15 @@ private extension PortalTailscaleState {
         case .online: "Online"
         case .stopped: "Stopped"
         case .error: "Error"
+        }
+    }
+}
+
+private extension PortalDesiredState {
+    var title: String {
+        switch self {
+        case .enabled: "Enabled"
+        case .stopped: "Stopped"
         }
     }
 }

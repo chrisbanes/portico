@@ -80,6 +80,51 @@ final class PortalStoreTests: XCTestCase {
         XCTAssertEqual(try permissions(of: store.installationURL), 0o600)
     }
 
+    func testHistoricalVersionTwoDefaultsToEnabledAndNextSavePersistsDesiredState() throws {
+        struct ExpectedFailure: Error {}
+
+        let root = temporaryRoot()
+        let installationURL = root.appendingPathComponent("installation-v2.json", isDirectory: false)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let historical = Data(
+            #"{"version":2,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"lifecycle":"active"},{"id":"5EA74329-3144-4BA2-925F-138D14D61FCC","name":"atlas","localAppPort":8788,"createdAt":807692801,"lifecycle":"active"}],"alerts":[]}"#.utf8
+        )
+        try historical.write(to: installationURL)
+        var shouldFail = true
+        let store = PortalStore(rootURL: root, writeData: { data, url in
+            guard !shouldFail else { throw ExpectedFailure() }
+            try data.write(to: url, options: .atomic)
+        })
+
+        var installation = try store.loadInstallation()
+
+        XCTAssertEqual(installation.portals.map(\.desiredState), [.enabled, .enabled])
+        installation.portals[1].desiredState = .stopped
+        XCTAssertThrowsError(try store.save(installation))
+        XCTAssertEqual(try Data(contentsOf: installationURL), historical)
+
+        shouldFail = false
+        try store.save(installation)
+
+        let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: installationURL)) as? [String: Any])
+        XCTAssertEqual(saved["version"] as? Int, 2)
+        let portals = try XCTUnwrap(saved["portals"] as? [[String: Any]])
+        XCTAssertEqual(portals.map { $0["desiredState"] as? String }, ["enabled", "stopped"])
+        XCTAssertEqual(try store.loadInstallation(), installation)
+    }
+
+    func testExplicitNullDesiredStateIsCorruptRatherThanDefaulting() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
+        let corrupt = Data(
+            #"{"version":2,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"desiredState":null,"lifecycle":"active"}],"alerts":[]}"#.utf8
+        )
+        try corrupt.write(to: store.installationURL)
+
+        XCTAssertThrowsError(try store.loadInstallation())
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), corrupt)
+    }
+
     func testSavedPortalReloadsWithSameImmutableDefinition() throws {
         let root = temporaryRoot()
         let store = PortalStore(rootURL: root)

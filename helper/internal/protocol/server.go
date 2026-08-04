@@ -16,12 +16,12 @@ import (
 	"github.com/chrisbanes/portico/helper/internal/portal"
 )
 
-const Version = 1
+const Version = 2
 
 const invalidRequestDiagnostic = "portico-helper: invalid request\n"
 
 type PortalRuntime interface {
-	Start(context.Context, portal.Config, func(portal.Event)) error
+	Reconcile(context.Context, []portal.Config, func(portal.Event)) ([]portal.ReconcileEntry, error)
 	Authenticate(context.Context, string) error
 	CleanupRejectedPortal(string) error
 	Close() error
@@ -67,10 +67,19 @@ type discoverLocalAppsResult struct {
 	Candidates []discovery.Candidate `json:"candidates"`
 }
 
-type startPortalPayload struct {
-	PortalID     string `json:"portalId"`
-	PortalName   string `json:"portalName"`
-	LocalAppPort uint16 `json:"localAppPort"`
+type reconcilePortalPayload struct {
+	PortalID     string              `json:"portalId"`
+	PortalName   string              `json:"portalName"`
+	LocalAppPort uint16              `json:"localAppPort"`
+	DesiredState portal.DesiredState `json:"desiredState"`
+}
+
+type reconcilePortalsPayload struct {
+	Portals *[]reconcilePortalPayload `json:"portals"`
+}
+
+type reconcilePortalsResult struct {
+	Entries []portal.ReconcileEntry `json:"entries"`
 }
 
 type authenticatePortalPayload struct {
@@ -233,28 +242,25 @@ func ServeWithServices(input io.Reader, output, diagnostics io.Writer, services 
 					failOutput()
 				}
 			}()
-		case "startPortal":
-			var payload startPortalPayload
-			if runtime == nil || decodePayload(request.Payload, &payload) != nil {
+		case "reconcilePortals":
+			configs, err := decodeReconcilePortalsPayload(request.Payload)
+			if runtime == nil || err != nil {
 				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
 					return 1
 				}
 				continue
 			}
-			config := portal.Config{ID: strings.ToLower(payload.PortalID), Name: payload.PortalName, Port: payload.LocalAppPort}
-			if err := config.Validate(); err != nil {
+			entries, err := runtime.Reconcile(ctx, configs, emit)
+			if err != nil {
 				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
 					return 1
 				}
 				continue
 			}
-			if err := runtime.Start(ctx, config, emit); err != nil {
-				if writer.write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed")) != nil {
-					return 1
-				}
-				continue
-			}
-			if writer.write(response{Version: Version, RequestID: request.RequestID, Result: acceptedResult{Accepted: true}}) != nil {
+			if writer.write(response{
+				Version: Version, RequestID: request.RequestID,
+				Result: reconcilePortalsResult{Entries: entries},
+			}) != nil {
 				return 1
 			}
 		case "authenticatePortal":
@@ -332,6 +338,35 @@ func validatedPortalID(raw string) (string, bool) {
 	portalID := strings.ToLower(raw)
 	err := (portal.Config{ID: portalID, Name: "a", Port: 1}).Validate()
 	return portalID, err == nil
+}
+
+func decodeReconcilePortalsPayload(raw json.RawMessage) ([]portal.Config, error) {
+	var payload reconcilePortalsPayload
+	if err := decodePayload(raw, &payload); err != nil || payload.Portals == nil {
+		return nil, fmt.Errorf("invalid reconcile payload")
+	}
+	configs := make([]portal.Config, 0, len(*payload.Portals))
+	seen := make(map[string]struct{}, len(*payload.Portals))
+	for _, requested := range *payload.Portals {
+		config := portal.Config{
+			ID:           strings.ToLower(requested.PortalID),
+			Name:         requested.PortalName,
+			Port:         requested.LocalAppPort,
+			DesiredState: requested.DesiredState,
+		}
+		if err := config.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid reconcile payload")
+		}
+		if config.DesiredState != portal.DesiredStateEnabled && config.DesiredState != portal.DesiredStateStopped {
+			return nil, fmt.Errorf("invalid reconcile payload")
+		}
+		if _, exists := seen[config.ID]; exists {
+			return nil, fmt.Errorf("invalid reconcile payload")
+		}
+		seen[config.ID] = struct{}{}
+		configs = append(configs, config)
+	}
+	return configs, nil
 }
 
 func canonicalCandidates(candidates []discovery.Candidate) []discovery.Candidate {

@@ -3,9 +3,48 @@ import Foundation
 struct PortalConfiguration: Codable, Equatable {
     let id: UUID
     let name: String
-    let localAppPort: UInt16
+    var localAppPort: UInt16
     let createdAt: Date
+    var desiredState: PortalDesiredState = .enabled
     var lifecycle: PortalLifecycle = .active
+}
+
+enum PortalDesiredState: String, Codable, Equatable {
+    case enabled
+    case stopped
+}
+
+extension PortalConfiguration {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case localAppPort
+        case createdAt
+        case desiredState
+        case lifecycle
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        localAppPort = try container.decode(UInt16.self, forKey: .localAppPort)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        desiredState = try container.contains(.desiredState)
+            ? container.decode(PortalDesiredState.self, forKey: .desiredState)
+            : .enabled
+        lifecycle = try container.decode(PortalLifecycle.self, forKey: .lifecycle)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(localAppPort, forKey: .localAppPort)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(desiredState, forKey: .desiredState)
+        try container.encode(lifecycle, forKey: .lifecycle)
+    }
 }
 
 enum PortalLifecycle: String, Codable, Equatable {

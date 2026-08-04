@@ -3,6 +3,7 @@ package portal
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -316,4 +318,40 @@ func TestLoopbackDestinationCannotContainHostSchemePathOrURL(t *testing.T) {
 			t.Fatalf("destination = %q, want internally constructed loopback URL", got)
 		}
 	}
+}
+
+func TestProxyCloseCanRetryAfterUnconfirmedListenerClose(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	flaky := &flakyCloseListener{Listener: listener}
+	flaky.failuresRemaining.Store(2)
+	proxy := startProxyServer(context.Background(), flaky, http.NotFoundHandler())
+
+	if err := proxy.close(); err == nil {
+		t.Fatal("first close succeeded, want unconfirmed close failure")
+	}
+	done := make(chan error, 1)
+	go func() { done <- proxy.close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("retry close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("retry close blocked after Serve result was already collected")
+	}
+}
+
+type flakyCloseListener struct {
+	net.Listener
+	failuresRemaining atomic.Int32
+}
+
+func (l *flakyCloseListener) Close() error {
+	if l.failuresRemaining.Add(-1) >= 0 {
+		return errors.New("injected listener close failure")
+	}
+	return l.Listener.Close()
 }
