@@ -61,6 +61,22 @@ final class LocalAppReachabilityTests: XCTestCase {
         XCTAssertEqual(monitor.states[stopped.id], .unavailable)
     }
 
+    func testRemoteAppsAreExcludedFromLocalAppReachability() {
+        let probe = FakeLocalAppProbe()
+        let monitor = LocalAppReachability(probe: probe, scheduler: FakePorticoScheduler())
+        let remote = PortalConfiguration(
+            id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+            name: "remote",
+            destination: PortalDestination(remoteAppScheme: .https, host: "app.example.com", port: 443)!,
+            createdAt: Date()
+        )
+
+        monitor.update(portals: [remote])
+
+        XCTAssertTrue(probe.requests.isEmpty)
+        XCTAssertTrue(monitor.states.isEmpty)
+    }
+
     private func portal(
         id: String,
         port: UInt16,

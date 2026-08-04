@@ -255,7 +255,7 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
                     ReconcilePortalPayload(
                         portalId: $0.id,
                         portalName: $0.name,
-                        localAppPort: $0.destination.localAppPort,
+                        destination: $0.destination,
                         desiredState: $0.desiredState
                     )
                 }

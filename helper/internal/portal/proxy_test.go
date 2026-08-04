@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -40,6 +42,70 @@ func TestLoopbackProxyPreservesPublicPathAndQuery(t *testing.T) {
 	wantAuthority := "127.0.0.1:" + portText
 	if response.Header().Get("X-Local-App-Host") != wantAuthority {
 		t.Fatalf("Local App Host = %q, want %q", response.Header().Get("X-Local-App-Host"), wantAuthority)
+	}
+}
+
+func TestRemoteAppHTTPProxyUsesConfiguredAuthority(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("X-Remote-Host", request.Host)
+		_, _ = io.WriteString(writer, request.URL.RequestURI())
+	}))
+	defer remote.Close()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(remote.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := &url.URL{Scheme: "http", Host: "app.example.com:" + port}
+	transport := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, strings.TrimPrefix(remote.URL, "http://"))
+	}}
+	proxy := newRemoteProxy(target, transport)
+	response := httptest.NewRecorder()
+	proxy.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://portal.example.ts.net/path?ok=yes", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "/path?ok=yes" {
+		t.Fatalf("response = (%d, %q), want proxied Remote App response", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("X-Remote-Host"); got != "app.example.com:"+port {
+		t.Fatalf("Remote App authority = %q, want %q", got, "app.example.com:"+port)
+	}
+}
+
+func TestRemoteAppHTTPSProxyUsesTrustedTestTransport(t *testing.T) {
+	remote := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, "trusted TLS")
+	}))
+	defer remote.Close()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(remote.URL, "https://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := remote.Client().Transport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, strings.TrimPrefix(remote.URL, "https://"))
+	}
+	proxy := newRemoteProxy(&url.URL{Scheme: "https", Host: "example.com:" + port}, transport)
+	response := httptest.NewRecorder()
+	proxy.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://portal.example.ts.net/", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "trusted TLS" {
+		t.Fatalf("response = (%d, %q), want trusted HTTPS Remote App", response.Code, response.Body.String())
+	}
+}
+
+func TestRemoteAppDialerNeverDialsLoopbackResolution(t *testing.T) {
+	dial := safeRemoteDialer(func(context.Context, string, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	})
+	if connection, err := dial(context.Background(), "tcp", "app.example.com:443"); err == nil || connection != nil {
+		t.Fatalf("loopback resolution dial = (%v, %v), want rejection", connection, err)
+	}
+}
+
+func TestRemoteAppDialerNeverDialsIPv4MappedLoopbackResolution(t *testing.T) {
+	dial := safeRemoteDialer(func(context.Context, string, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("::ffff:127.0.0.1")}, nil
+	})
+	if connection, err := dial(context.Background(), "tcp", "app.example.com:443"); err == nil || connection != nil {
+		t.Fatalf("IPv4-mapped loopback resolution dial = (%v, %v), want rejection", connection, err)
 	}
 }
 

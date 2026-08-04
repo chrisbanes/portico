@@ -2,6 +2,7 @@ import Foundation
 
 enum PortalStoreError: Error {
     case alreadyExists
+    case invalidHistoricalDestination
     case unsupportedVersion(Int)
 }
 
@@ -26,6 +27,10 @@ struct PortalStore {
     }
 
     var installationURL: URL {
+        rootURL.appendingPathComponent("installation-v4.json", isDirectory: false)
+    }
+
+    var versionThreeInstallationURL: URL {
         rootURL.appendingPathComponent("installation-v3.json", isDirectory: false)
     }
 
@@ -56,13 +61,24 @@ struct PortalStore {
             removeOlderFiles()
             return installation
         }
+        if FileManager.default.fileExists(atPath: versionThreeInstallationURL.path) {
+            let data = try Data(contentsOf: versionThreeInstallationURL)
+            let historical = try JSONDecoder().decode(VersionThreeInstallationRecord.self, from: data)
+            guard historical.version == VersionThreeInstallationRecord.currentVersion else {
+                throw PortalStoreError.unsupportedVersion(historical.version)
+            }
+            let installation = try historical.migrate()
+            try save(installation)
+            removeOlderFiles()
+            return installation
+        }
         if FileManager.default.fileExists(atPath: versionTwoInstallationURL.path) {
             let data = try Data(contentsOf: versionTwoInstallationURL)
             let historical = try JSONDecoder().decode(VersionTwoInstallationRecord.self, from: data)
             guard historical.version == VersionTwoInstallationRecord.currentVersion else {
                 throw PortalStoreError.unsupportedVersion(historical.version)
             }
-            let installation = historical.migrated
+            let installation = try historical.migrate()
             try save(installation)
             removeOlderFiles()
             return installation
@@ -76,7 +92,7 @@ struct PortalStore {
             throw PortalStoreError.unsupportedVersion(envelope.version)
         }
         let installation = InstallationRecord(
-            portals: [envelope.portal.migrated],
+            portals: [try envelope.portal.migrate()],
             operationalLogging: .enabled,
             launchAtLoginOffer: .notOffered
         )
@@ -97,34 +113,35 @@ struct PortalStore {
     }
 
     private func removeOlderFiles() {
-        for url in [versionTwoInstallationURL, legacyConfigurationURL]
+        for url in [versionThreeInstallationURL, versionTwoInstallationURL, legacyConfigurationURL]
         where FileManager.default.fileExists(atPath: url.path) {
             try? FileManager.default.removeItem(at: url)
         }
     }
 }
 
-private struct VersionTwoInstallationRecord: Decodable {
-    static let currentVersion = 2
+private struct VersionThreeInstallationRecord: Decodable {
+    static let currentVersion = 3
 
     let version: Int
     let tailnetBinding: TailnetBinding?
-    let portals: [VersionTwoPortalConfiguration]
+    let portals: [HistoricalLocalAppPortalConfiguration]
     let alerts: [InstallationAlert]
+    let operationalLogging: OperationalLoggingPreference
+    let launchAtLoginOffer: LaunchAtLoginOfferState
 
-    var migrated: InstallationRecord {
-        let isPristine = tailnetBinding == nil && portals.isEmpty && alerts.isEmpty
-        return InstallationRecord(
+    func migrate() throws -> InstallationRecord {
+        InstallationRecord(
             tailnetBinding: tailnetBinding,
-            portals: portals.map(\.migrated),
+            portals: try portals.map { try $0.migrate() },
             alerts: alerts,
-            operationalLogging: isPristine ? .undecided : .enabled,
-            launchAtLoginOffer: .notOffered
+            operationalLogging: operationalLogging,
+            launchAtLoginOffer: launchAtLoginOffer
         )
     }
 }
 
-private struct VersionTwoPortalConfiguration: Decodable {
+private struct HistoricalLocalAppPortalConfiguration: Decodable {
     let id: UUID
     let name: String
     let localAppPort: UInt16
@@ -158,15 +175,38 @@ private struct VersionTwoPortalConfiguration: Decodable {
             : nil
     }
 
-    var migrated: PortalConfiguration {
-        PortalConfiguration(
+    func migrate() throws -> PortalConfiguration {
+        guard let destination = PortalDestination(localAppPort: localAppPort) else {
+            throw PortalStoreError.invalidHistoricalDestination
+        }
+        return PortalConfiguration(
             id: id,
             name: name,
-            localAppPort: localAppPort,
+            destination: destination,
             createdAt: createdAt,
             desiredState: desiredState,
             lifecycle: lifecycle,
             removalAssignedName: removalAssignedName
+        )
+    }
+}
+
+private struct VersionTwoInstallationRecord: Decodable {
+    static let currentVersion = 2
+
+    let version: Int
+    let tailnetBinding: TailnetBinding?
+    let portals: [HistoricalLocalAppPortalConfiguration]
+    let alerts: [InstallationAlert]
+
+    func migrate() throws -> InstallationRecord {
+        let isPristine = tailnetBinding == nil && portals.isEmpty && alerts.isEmpty
+        return InstallationRecord(
+            tailnetBinding: tailnetBinding,
+            portals: try portals.map { try $0.migrate() },
+            alerts: alerts,
+            operationalLogging: isPristine ? .undecided : .enabled,
+            launchAtLoginOffer: .notOffered
         )
     }
 }
@@ -184,11 +224,14 @@ private struct LegacyPortalConfiguration: Decodable {
     let localAppPort: UInt16
     let createdAt: Date
 
-    var migrated: PortalConfiguration {
-        PortalConfiguration(
+    func migrate() throws -> PortalConfiguration {
+        guard let destination = PortalDestination(localAppPort: localAppPort) else {
+            throw PortalStoreError.invalidHistoricalDestination
+        }
+        return PortalConfiguration(
             id: id,
             name: name,
-            localAppPort: localAppPort,
+            destination: destination,
             createdAt: createdAt,
             lifecycle: .active
         )

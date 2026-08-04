@@ -2,8 +2,10 @@ package portal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,8 +28,111 @@ const (
 type Config struct {
 	ID           string
 	Name         string
-	Port         uint16
+	Destination  Destination
 	DesiredState DesiredState
+}
+
+type Destination struct {
+	Kind   string `json:"kind"`
+	Scheme string `json:"scheme,omitempty"`
+	Host   string `json:"host,omitempty"`
+	Port   uint16 `json:"port"`
+}
+
+func (d *Destination) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	var kind string
+	if raw, ok := fields["kind"]; !ok || json.Unmarshal(raw, &kind) != nil {
+		return errors.New("invalid destination")
+	}
+	if kind == DestinationLocalApp {
+		if len(fields) != 2 || fields["port"] == nil {
+			return errors.New("invalid Local App destination")
+		}
+		var port uint16
+		if err := json.Unmarshal(fields["port"], &port); err != nil {
+			return err
+		}
+		*d = Destination{Kind: kind, Port: port}
+	} else if kind == DestinationRemoteApp {
+		if len(fields) != 4 || fields["scheme"] == nil || fields["host"] == nil || fields["port"] == nil {
+			return errors.New("invalid Remote App destination")
+		}
+		var scheme, host string
+		var port uint16
+		if err := json.Unmarshal(fields["scheme"], &scheme); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(fields["host"], &host); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(fields["port"], &port); err != nil {
+			return err
+		}
+		*d = Destination{Kind: kind, Scheme: scheme, Host: host, Port: port}
+	} else {
+		return errors.New("invalid destination kind")
+	}
+	return d.Validate()
+}
+
+const (
+	DestinationLocalApp  = "localApp"
+	DestinationRemoteApp = "remoteApp"
+)
+
+func (d Destination) Validate() error {
+	if d.Port == 0 {
+		return errors.New("invalid destination")
+	}
+	switch d.Kind {
+	case DestinationLocalApp:
+		if d.Scheme != "" || d.Host != "" {
+			return errors.New("invalid Local App destination")
+		}
+	case DestinationRemoteApp:
+		if d.Scheme != "http" && d.Scheme != "https" {
+			return errors.New("invalid Remote App scheme")
+		}
+		if !isCanonicalRemoteHost(d.Host) || isLoopbackHost(d.Host) {
+			return errors.New("invalid Remote App host")
+		}
+	default:
+		return errors.New("invalid destination kind")
+	}
+	return nil
+}
+
+func isCanonicalRemoteHost(host string) bool {
+	if host == "" || strings.TrimSpace(host) != host || strings.ContainsAny(host, "[]%") {
+		return false
+	}
+	if address, err := netip.ParseAddr(host); err == nil {
+		return address.String() == host
+	}
+	if len(host) > 253 || host != strings.ToLower(host) || strings.HasSuffix(host, ".") {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if !dnsLabelPattern.MatchString(label) {
+			return false
+		}
+	}
+	return true
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if address, err := netip.ParseAddr(host); err == nil {
+		address = address.Unmap()
+		return address.IsLoopback() || address.IsUnspecified()
+	}
+	return false
 }
 
 type DesiredState string
@@ -56,7 +161,7 @@ var (
 )
 
 func (c Config) Validate() error {
-	if !uuidPattern.MatchString(c.ID) || !dnsLabelPattern.MatchString(c.Name) || c.Port == 0 {
+	if !uuidPattern.MatchString(c.ID) || !dnsLabelPattern.MatchString(c.Name) || c.Destination.Validate() != nil {
 		return errors.New("invalid portal configuration")
 	}
 	return nil
@@ -218,8 +323,8 @@ func (r *Runtime) reconcilePortalLocked(
 	if portal.config.Name != config.Name {
 		return OutcomeStartFailed
 	}
-	if portal.config.Port != config.Port {
-		if err := portal.updatePort(config.Port); err != nil {
+	if portal.config.Destination != config.Destination {
+		if err := portal.updateDestination(config.Destination); err != nil {
 			return OutcomeStartFailed
 		}
 	}
@@ -393,20 +498,20 @@ func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emi
 	return nil
 }
 
-func (r *portalRuntime) updatePort(port uint16) error {
+func (r *portalRuntime) updateDestination(destination Destination) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.config == nil {
 		return errors.New("portal is not running")
 	}
-	handler, err := newLoopbackProxy(int(port))
+	handler, err := newDestinationProxy(destination)
 	if err != nil {
 		return err
 	}
 	if r.proxy != nil {
 		r.proxy.replaceHandler(handler)
 	}
-	r.config.Port = port
+	r.config.Destination = destination
 	return nil
 }
 
@@ -507,7 +612,7 @@ func (r *portalRuntime) ensureProxyLocked() error {
 	if r.proxy != nil {
 		return nil
 	}
-	handler, err := newLoopbackProxy(int(r.config.Port))
+	handler, err := newDestinationProxy(r.config.Destination)
 	if err != nil {
 		return err
 	}

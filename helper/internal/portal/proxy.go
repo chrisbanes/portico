@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"sync"
@@ -34,6 +35,62 @@ func newLoopbackProxy(port int) (http.Handler, error) {
 		http.Error(writer, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 	}
 	return proxy, nil
+}
+
+func newDestinationProxy(destination Destination) (http.Handler, error) {
+	if err := destination.Validate(); err != nil {
+		return nil, err
+	}
+	if destination.Kind == DestinationLocalApp {
+		return newLoopbackProxy(int(destination.Port))
+	}
+	target := &url.URL{Scheme: destination.Scheme, Host: net.JoinHostPort(destination.Host, strconv.Itoa(int(destination.Port)))}
+	transport := &http.Transport{DialContext: safeRemoteDialer(net.DefaultResolver.LookupNetIP)}
+	return newRemoteProxy(target, transport), nil
+}
+
+func newRemoteProxy(target *url.URL, transport http.RoundTripper) http.Handler {
+	proxy := &httputil.ReverseProxy{
+		Transport: transport,
+		Rewrite: func(request *httputil.ProxyRequest) {
+			request.SetURL(target)
+		},
+		ErrorLog: log.New(io.Discard, "", 0),
+	}
+	proxy.ErrorHandler = func(writer http.ResponseWriter, _ *http.Request, _ error) {
+		http.Error(writer, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+	}
+	return proxy
+}
+
+func safeRemoteDialer(resolve func(context.Context, string, string) ([]netip.Addr, error)) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		if literal, err := netip.ParseAddr(host); err == nil {
+			literal = literal.Unmap()
+			if literal.IsLoopback() || literal.IsUnspecified() {
+				return nil, errors.New("loopback Remote App destination")
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(literal.String(), port))
+		}
+		addresses, err := resolve(ctx, "ip", host)
+		if err != nil {
+			return nil, err
+		}
+		for _, resolved := range addresses {
+			resolved = resolved.Unmap()
+			if resolved.IsLoopback() || resolved.IsUnspecified() {
+				continue
+			}
+			if connection, err := (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(resolved.String(), port)); err == nil {
+				return connection, nil
+			}
+		}
+		return nil, errors.New("Remote App destination is unavailable")
+	}
 }
 
 func loopbackDestination(port int) *url.URL {

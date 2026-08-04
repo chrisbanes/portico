@@ -144,6 +144,32 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(client.started.count, 1)
     }
 
+    func testRemoteAppCreationValidatesBeforePersistenceAndDoesNotStartLocalDiscovery() throws {
+        let client = FakePortalHelperClient()
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(operationalLogging: .enabled))
+        var ids = 0
+        let controller = PortalController(
+            store: store,
+            helper: client,
+            uuidProvider: { ids += 1; return self.portalID },
+            openURL: { _ in }
+        )
+        controller.creationKind = .remoteApp
+        controller.portalName = "hermes"
+        controller.remoteAppHost = "127.0.0.1"
+        controller.remoteAppPort = "443"
+
+        XCTAssertEqual(controller.addPortal(), .invalidRemoteHost)
+        XCTAssertEqual(ids, 0)
+        XCTAssertTrue(client.started.isEmpty)
+
+        controller.remoteAppHost = "App.Example.COM"
+        XCTAssertNil(controller.addPortal())
+        XCTAssertEqual(ids, 1)
+        XCTAssertEqual(controller.portal?.destination, .remoteApp(scheme: .https, host: "app.example.com", port: 443))
+    }
+
     func testInitialDiscoveryAfterConnectionDoesNotChangeManualFields() {
         let client = FakePortalHelperClient(availability: .connecting)
         let controller = PortalController(store: PortalStore(rootURL: temporaryRoot()), helper: client, openURL: { _ in })
@@ -991,12 +1017,12 @@ final class PortalControllerTests: XCTestCase {
         )
         let controller = PortalController(store: store, helper: supervisor, openURL: { _ in })
         supervisor.start(loggingPreference: .enabled)
-        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
         controller.stopPortal(id: portalID)
 
         launcher.exit(status: 1)
         scheduler.run(delay: 1)
-        launcher.receive(line: #"{"version":3,"requestId":"handshake-2","result":{"protocolVersion":3}}"#)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-2","result":{"protocolVersion":4}}"#)
 
         let request = try JSONDecoder().decode(
             HelperRequest<ReconcilePortalsPayload>.self,

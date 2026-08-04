@@ -75,9 +75,11 @@ final class LocalAppReachability: ObservableObject {
     }
 
     func update(portals: [PortalConfiguration]) {
-        let updated = Dictionary(uniqueKeysWithValues: portals
-            .filter { $0.lifecycle == .active }
-            .map { ($0.id, $0.localAppPort) })
+        let pairs: [(UUID, UInt16)] = portals.compactMap { portal in
+            guard portal.lifecycle == .active, let port = portal.localAppPort else { return nil }
+            return (portal.id, port)
+        }
+        let updated = Dictionary(uniqueKeysWithValues: pairs)
         let previous = portalPorts
         guard updated != previous else { return }
         portalPorts = updated
