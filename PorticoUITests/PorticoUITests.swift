@@ -68,7 +68,6 @@ final class PorticoUITests: XCTestCase {
 
     func testLoggingRestartAndTerminalFailureStates() {
         var app = launch(scenario: "restarting")
-        openMenuBarExtra(app)
         app.typeKey(",", modifierFlags: .command)
         let disabledLogging = app.radioButtons["Disable operational-support logging"]
         XCTAssertTrue(disabledLogging.waitForExistence(timeout: 3), app.debugDescription)
