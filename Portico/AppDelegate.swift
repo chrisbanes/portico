@@ -10,15 +10,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .appendingPathComponent("Portico", isDirectory: true)
         let helperURL = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Helpers/portico-helper", isDirectory: false)
+        let scheduler = MainQueueScheduler()
+        let history = DiagnosticHistory()
         let supervisor = HelperSupervisor(
             helperURL: helperURL,
             stateRootURL: applicationRoot.appendingPathComponent("tsnet", isDirectory: true),
-            launcher: ProcessHelperLauncher()
+            launcher: ProcessHelperLauncher(),
+            scheduler: scheduler,
+            history: history
         )
         self.supervisor = supervisor
         self.portalController = PortalController(
             store: PortalStore(rootURL: applicationRoot),
             helper: supervisor,
+            reachability: LocalAppReachability(probe: LoopbackTCPProbe(), scheduler: scheduler),
+            history: history,
             openURL: { NSWorkspace.shared.open($0) }
         )
         super.init()

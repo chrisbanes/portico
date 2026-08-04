@@ -10,10 +10,15 @@ struct PorticoApp: App {
             PortalView(controller: appDelegate.portalController, supervisor: appDelegate.supervisor)
         }
         .menuBarExtraStyle(.window)
+        Window("Portico Diagnostics", id: "diagnostics") {
+            DiagnosticsView(controller: appDelegate.portalController)
+        }
+        .defaultSize(width: 720, height: 520)
     }
 }
 
 private struct PortalView: View {
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
     @State private var showingResetConfirmation = false
@@ -21,9 +26,14 @@ private struct PortalView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(supervisor.availability.title, systemImage: supervisor.availability.symbolName)
+            if supervisor.availability == .failed {
+                Button("Retry Helper") { controller.retryHelper() }
+                    .buttonStyle(.borderedProminent)
+            }
             if let suffix = controller.tailnetDisplaySuffix {
                 LabeledContent("Tailnet", value: suffix)
             }
+            Button("Diagnostics") { openWindow(id: "diagnostics") }
             Divider()
             ForEach(controller.pendingPortals, id: \.id) { portal in
                 pendingWarning(portal)
@@ -131,6 +141,7 @@ private struct PortalView: View {
 }
 
 private struct PortalStatusView: View {
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var controller: PortalController
     let portal: PortalConfiguration
     @State private var localAppPort: String
@@ -176,10 +187,21 @@ private struct PortalStatusView: View {
                 Button("Authenticate") { controller.authenticate(id: portal.id) }
                     .buttonStyle(.borderedProminent)
             }
+            if controller.staleStatusIDs.contains(portal.id) {
+                Text("Last known Tailscale facts — stale")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         } else {
             Text("Waiting for Portal status…")
                 .foregroundStyle(.secondary)
         }
+        LabeledContent(
+            "Local App",
+            value: (controller.reachabilityStates[portal.id] ?? .unknown).title
+        )
+        Button("Diagnostics") { openWindow(id: "diagnostics") }
+            .controlSize(.small)
     }
 
     private func updatePort() {
@@ -187,20 +209,58 @@ private struct PortalStatusView: View {
     }
 }
 
+private struct DiagnosticsView: View {
+    @ObservedObject var controller: PortalController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Portico Diagnostics").font(.title2)
+            HStack {
+                Button("Refresh Local App Reachability") { controller.refreshReachability() }
+                Spacer()
+                Button("Copy Report") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(controller.diagnosticReport(), forType: .string)
+                }
+            }
+            ScrollView {
+                Text(controller.diagnosticReport())
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding()
+    }
+}
+
+private extension LocalAppReachabilityState {
+    var title: String {
+        switch self {
+        case .unknown: "Unknown"
+        case .reachable: "Reachable"
+        case .unavailable: "Unavailable"
+        }
+    }
+}
+
 private extension HelperAvailability {
     var title: String {
         switch self {
         case .connecting: "Connecting"
+        case let .retrying(attempt, delay): "Retry \(attempt) in \(Int(delay))s"
         case .connected: "Connected"
         case .failed: "Helper unavailable"
+        case .shuttingDown: "Shutting down"
         }
     }
 
     var symbolName: String {
         switch self {
-        case .connecting: "ellipsis.circle"
+        case .connecting, .retrying: "ellipsis.circle"
         case .connected: "checkmark.circle"
         case .failed: "exclamationmark.triangle"
+        case .shuttingDown: "stop.circle"
         }
     }
 }

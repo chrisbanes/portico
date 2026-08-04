@@ -287,6 +287,58 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(try store.loadInstallation().portals.first?.desiredState, .stopped)
     }
 
+    func testCommittedStartAndStopRecordDesiredStateWithoutReachabilityProbe() throws {
+        let saved = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date()
+        )
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(saved)
+        let history = DiagnosticHistory()
+        let probe = FakeLocalAppProbe()
+        let reachability = LocalAppReachability(
+            probe: probe,
+            scheduler: FakePorticoScheduler()
+        )
+        let controller = PortalController(
+            store: store,
+            helper: FakePortalHelperClient(),
+            reachability: reachability,
+            history: history,
+            openURL: { _ in }
+        )
+
+        controller.stopPortal(id: portalID)
+        controller.startPortal(id: portalID)
+
+        XCTAssertEqual(history.entries.map(\.event), [
+            .portal(
+                name: "hermes",
+                desired: .enabled,
+                tailscale: nil,
+                reachability: .unknown,
+                stale: false
+            ),
+            .portal(
+                name: "hermes",
+                desired: .stopped,
+                tailscale: nil,
+                reachability: .unknown,
+                stale: false
+            ),
+            .portal(
+                name: "hermes",
+                desired: .enabled,
+                tailscale: nil,
+                reachability: .unknown,
+                stale: false
+            ),
+        ])
+        XCTAssertEqual(probe.requests.count, 1)
+    }
+
     func testCurrentPartialFailureKeepsCommittedDesiredState() throws {
         let saved = PortalConfiguration(
             id: portalID,
@@ -322,13 +374,22 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: "node-1",
             assignedName: "hermes-1",
             portalURL: URL(string: "https://hermes-1.example.ts.net/"),
-            addresses: ["100.64.0.1"]
+            addresses: ["100.64.0.1"],
+            magicDNSSuffix: "example.ts.net"
+        )
+        let displayStatus = PortalStatusPayload(
+            state: .online,
+            stableNodeId: nil,
+            assignedName: "hermes-1",
+            portalURL: URL(string: "https://hermes-1.example.ts.net/"),
+            addresses: ["100.64.0.1"],
+            magicDNSSuffix: "example.ts.net"
         )
 
         client.send(.status(UUID(), status))
         XCTAssertNil(controller.status)
         client.send(.status(portalID, status))
-        XCTAssertEqual(controller.status, status)
+        XCTAssertEqual(controller.status, displayStatus)
     }
 
     func testOpensAuthenticationURLOnlyForPendingExplicitAction() throws {
@@ -586,6 +647,145 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertNil(try store.loadInstallation().tailnetBinding)
     }
 
+    func testRecoveryMarksFactsStaleAndReconcilesNewestCommittedSnapshot() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(InstallationRecord(portals: [saved]))
+        let client = FakePortalHelperClient(availability: .connecting)
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+        client.connect()
+        client.send(.status(portalID, onlineStatus(tailnetName: "opaque", suffix: "example.ts.net")))
+
+        XCTAssertEqual(client.reconciliations, [[saved]])
+        XCTAssertFalse(controller.staleStatusIDs.contains(portalID))
+
+        client.disconnect(as: .retrying(attempt: 1, delay: 1))
+        controller.stopPortal(id: portalID)
+        XCTAssertTrue(controller.staleStatusIDs.contains(portalID))
+        XCTAssertEqual(client.reconciliations.count, 1)
+
+        client.connect()
+
+        XCTAssertEqual(client.reconciliations.count, 2)
+        XCTAssertEqual(client.reconciliations.last?.first?.desiredState, .stopped)
+        XCTAssertTrue(controller.staleStatusIDs.contains(portalID))
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .stopped,
+            stableNodeId: nil,
+            assignedName: "hermes-1",
+            portalURL: URL(string: "https://hermes-1.example.ts.net/"),
+            addresses: ["100.64.0.1"],
+            magicDNSSuffix: "example.ts.net"
+        )))
+        XCTAssertFalse(controller.staleStatusIDs.contains(portalID))
+
+        controller.retryHelper()
+        XCTAssertEqual(client.retryCount, 1)
+    }
+
+    func testConnectionLossCannotStrandPendingNewestReconciliation() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(InstallationRecord(portals: [saved]))
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = [
+            "handshake-1", "discover-1", "reconcile-1",
+            "handshake-2", "discover-2", "reconcile-2",
+        ]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        let controller = PortalController(store: store, helper: supervisor, openURL: { _ in })
+        supervisor.start()
+        launcher.receive(line: #"{"version":2,"requestId":"handshake-1","result":{"protocolVersion":2}}"#)
+        controller.stopPortal(id: portalID)
+
+        launcher.exit(status: 1)
+        scheduler.run(delay: 1)
+        launcher.receive(line: #"{"version":2,"requestId":"handshake-2","result":{"protocolVersion":2}}"#)
+
+        let request = try JSONDecoder().decode(
+            HelperRequest<ReconcilePortalsPayload>.self,
+            from: XCTUnwrap(launcher.process.sent.last)
+        )
+        XCTAssertEqual(request.command, .reconcilePortals)
+        XCTAssertEqual(request.payload.portals.first?.desiredState, .stopped)
+    }
+
+    func testHostileHelperFactsAreExcludedFromDisplayAndReport() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(InstallationRecord(portals: [saved]))
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .connecting,
+            stableNodeId: "secret-stable-node",
+            assignedName: "login",
+            portalURL: URL(string: "file:///Users/chris/private/auth"),
+            addresses: ["Authorization: Bearer secret"],
+            magicDNSSuffix: "tailscale.com"
+        )))
+
+        XCTAssertNil(controller.statuses[portalID]?.stableNodeId)
+        XCTAssertEqual(controller.statuses[portalID]?.assignedName, "login")
+        XCTAssertNil(controller.statuses[portalID]?.portalURL)
+        XCTAssertTrue(controller.statuses[portalID]?.addresses.isEmpty == true)
+        XCTAssertNil(controller.statuses[portalID]?.magicDNSSuffix)
+        let report = controller.diagnosticReport()
+        for excluded in ["secret-stable-node", "file:///Users/chris/private/auth", "Bearer secret", "tailscale.com"] {
+            XCTAssertFalse(report.contains(excluded), excluded)
+        }
+    }
+
+    func testOnlineHostileFactsCannotBindOrPersistRejectionEvidence() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(InstallationRecord(portals: [saved]))
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+        let unsafeSuffix = "file:///Users/chris/private"
+
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .online,
+            stableNodeId: "secret-node",
+            assignedName: "bad\nname",
+            portalURL: URL(string: "file:///Users/chris/private/auth"),
+            addresses: ["Authorization: Bearer secret"],
+            tailnetName: "opaque-first",
+            magicDNSSuffix: unsafeSuffix
+        )))
+
+        XCTAssertNil(try store.loadInstallation().tailnetBinding)
+        XCTAssertNil(controller.tailnetDisplaySuffix)
+
+        try store.save(InstallationRecord(
+            tailnetBinding: TailnetBinding(name: "opaque-expected", magicDNSSuffix: "expected.ts.net"),
+            portals: [saved]
+        ))
+        let rebound = PortalController(store: store, helper: client, openURL: { _ in })
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .online,
+            stableNodeId: "secret-node",
+            assignedName: "bad\nname",
+            portalURL: URL(string: "file:///Users/chris/private/auth"),
+            addresses: ["Authorization: Bearer secret"],
+            tailnetName: "opaque-different",
+            magicDNSSuffix: unsafeSuffix
+        )))
+
+        let alert = try XCTUnwrap(rebound.alerts.first)
+        XCTAssertNil(alert.assignedName)
+        XCTAssertNil(alert.rejectedMagicDNSSuffix)
+        XCTAssertFalse(rebound.completedWarningText(for: alert).contains(unsafeSuffix))
+    }
+
     private func onlineStatus(
         tailnetName: String,
         suffix: String,
@@ -611,6 +811,7 @@ final class PortalControllerTests: XCTestCase {
 final class FakePortalHelperClient: PortalHelperClient {
     var availability: HelperAvailability
     var onConnected: (() -> Void)?
+    var onAvailabilityChange: ((HelperAvailability) -> Void)?
     var onEvent: ((PortalHelperEvent) -> Void)?
     private(set) var reconciliations: [[PortalConfiguration]] = []
     var started: [PortalConfiguration] { reconciliations.flatMap { $0 } }
@@ -623,6 +824,7 @@ final class FakePortalHelperClient: PortalHelperClient {
     var completeReconciliationImmediately = true
     var onCleanup: ((UUID) -> Void)?
     var onReconcile: (([PortalConfiguration]) -> Void)?
+    private(set) var retryCount = 0
 
     init(availability: HelperAvailability = .connected) {
         self.availability = availability
@@ -642,6 +844,8 @@ final class FakePortalHelperClient: PortalHelperClient {
             reconciliationCompletions.append(completion)
         }
     }
+
+    func retry() { retryCount += 1 }
 
     func authenticatePortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void) {
         authenticated.append(id)
@@ -664,7 +868,13 @@ final class FakePortalHelperClient: PortalHelperClient {
 
     func connect() {
         availability = .connected
+        onAvailabilityChange?(.connected)
         onConnected?()
+    }
+
+    func disconnect(as availability: HelperAvailability) {
+        self.availability = availability
+        onAvailabilityChange?(availability)
     }
 
     func send(_ event: PortalHelperEvent) { onEvent?(event) }
