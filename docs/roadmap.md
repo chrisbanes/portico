@@ -22,6 +22,8 @@
 
 ## Phase 2: Publishable 1.0
 
+- Add Remote Apps as Portal Destinations over explicit HTTP or HTTPS through
+  the Mac's normal network, with system-trusted HTTPS certificates.
 - Harden crash recovery, state migrations, redaction, and destructive path
   validation.
 - Complete accessibility, keyboard navigation, VoiceOver, localization
@@ -37,6 +39,5 @@
   architecture in advance.
 - Consider automatic updates, optional tagged-node provisioning, and narrower
   delegated cleanup credentials only as separately designed features.
-- Keep Funnel, Tailscale Services, non-loopback targets, raw forwarding, and
-  multi-tailnet installations outside 1.0 unless product scope is explicitly
-  reopened.
+- Keep Funnel, Tailscale Services, raw forwarding, and multi-tailnet
+  installations outside 1.0 unless product scope is explicitly reopened.

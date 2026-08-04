@@ -1,14 +1,15 @@
 # Portico
 
-Portico gives a local web app a durable private doorway on a Tailscale
-tailnet. This glossary defines the product language used in the app,
-documentation, and code.
+Portico gives a web service reachable from a Mac a durable private doorway on
+a Tailscale tailnet. This glossary defines the product language used in the
+app, documentation, and code.
 
 ## Language
 
 **Portal**:
-A durable private doorway from an HTTPS tailnet address to one Local App. A
-Portal retains its identity until it is removed.
+A durable private doorway from an HTTPS tailnet address to one Portal
+Destination. A Portal retains its identity until it is removed, even when it
+is repointed to a different Portal Destination.
 _Avoid_: Mapping, endpoint, tunnel
 
 **Portal Name**:
@@ -24,9 +25,24 @@ _Avoid_: Portal Name, requested name
 The HTTPS address issued for a Portal's Assigned Name on its tailnet.
 _Avoid_: Generated URL, requested URL
 
+**Portal Destination**:
+The web service a Portal makes available to its tailnet. It is either a Local
+App or a Remote App.
+_Avoid_: Backend, upstream, target
+
 **Local App**:
 An HTTP service on the same Mac that a Portal makes available to its tailnet.
-_Avoid_: Backend, upstream, target
+_Avoid_: Localhost app, on-device service
+
+**Remote App**:
+An HTTP or HTTPS service running on another host and reachable through the
+Mac's normal network. It may be on any non-loopback network the Mac can reach.
+_Avoid_: External App, Network App, remote target
+
+**Online Portal**:
+A Portal whose Tailscale node is connected and accepting tailnet requests. It
+does not imply that the Portal Destination is reachable or healthy.
+_Avoid_: Healthy Portal, available app
 
 **Enabled Portal**:
 A Portal whose desired state is to remain connected whenever Portico is
