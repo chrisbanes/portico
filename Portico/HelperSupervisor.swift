@@ -1,6 +1,8 @@
 import Foundation
 
 enum HelperAvailability: Equatable {
+    case awaitingLoggingChoice
+    case restarting
     case connecting
     case retrying(attempt: Int, delay: TimeInterval)
     case connected
@@ -27,6 +29,7 @@ protocol PortalHelperClient: AnyObject {
     var onEvent: ((PortalHelperEvent) -> Void)? { get set }
 
     func retry()
+    func restart(loggingPreference: OperationalLoggingPreference)
 
     func reconcilePortals(
         _ portals: [PortalConfiguration],
@@ -50,6 +53,7 @@ protocol HelperLaunching {
     func launch(
         at executableURL: URL,
         arguments: [String],
+        loggingPreference: OperationalLoggingPreference,
         onLine: @escaping (Data) -> Void,
         onEOF: @escaping () -> Void,
         onExit: @escaping (Int32) -> Void
@@ -83,6 +87,7 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
     private var shutdownTimeoutTask: ScheduledTask?
     private var retryTask: ScheduledTask?
     private var stabilityTask: ScheduledTask?
+    private var restartTimeoutTask: ScheduledTask?
     private var processGeneration = 0
     private var reconciliationGeneration = 0
     private var retryDelayIndex = 0
@@ -90,6 +95,8 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
     private var isShuttingDown = false
     private var isShutdownComplete = false
     private var shutdownCompletions: [() -> Void] = []
+    private var loggingPreference: OperationalLoggingPreference = .undecided
+    private var restartingGeneration: Int?
 
     init(
         helperURL: URL,
@@ -111,8 +118,13 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         self.shutdownGraceInterval = shutdownGraceInterval
     }
 
-    func start() {
+    func start(loggingPreference: OperationalLoggingPreference) {
         guard process == nil, retryTask == nil, !isShuttingDown else { return }
+        self.loggingPreference = loggingPreference
+        guard loggingPreference != .undecided else {
+            availability = .awaitingLoggingChoice
+            return
+        }
         launch()
     }
 
@@ -143,6 +155,53 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         }
     }
 
+    func restart(loggingPreference: OperationalLoggingPreference) {
+        guard loggingPreference != .undecided,
+              loggingPreference != self.loggingPreference,
+              !isShuttingDown
+        else { return }
+        self.loggingPreference = loggingPreference
+        retryTask?.cancel()
+        retryTask = nil
+        stabilityTask?.cancel()
+        stabilityTask = nil
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = nil
+        restartTimeoutTask?.cancel()
+        restartTimeoutTask = nil
+        reconciliationGeneration += 1
+        failPendingResponses()
+        retryDelayIndex = 0
+        failureHandled = false
+        availability = .restarting
+
+        guard let process else {
+            launch()
+            return
+        }
+        guard process.isRunning else {
+            self.process = nil
+            launch()
+            return
+        }
+
+        let generation = processGeneration
+        restartingGeneration = generation
+        do {
+            try sendWithoutResponse(
+                command: .shutdown,
+                requestID: requestIDProvider(),
+                payload: EmptyPayload()
+            )
+        } catch {
+            process.terminate()
+        }
+        process.closeInput()
+        restartTimeoutTask = scheduler.schedule(after: shutdownGraceInterval) { [weak self] in
+            self?.forceRestart(generation: generation)
+        }
+    }
+
     private func launch() {
         guard process == nil, !isShuttingDown else { return }
         processGeneration += 1
@@ -153,6 +212,7 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
             process = try launcher.launch(
                 at: helperURL,
                 arguments: ["--state-root", stateRootURL.path],
+                loggingPreference: loggingPreference,
                 onLine: { [weak self] data in self?.receive(line: data, generation: generation) },
                 onEOF: { [weak self] in self?.handleFailure(generation: generation) },
                 onExit: { [weak self] _ in self?.processExited(generation: generation) }
@@ -325,7 +385,10 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
     }
 
     private func receive(line: Data, generation: Int) {
-        guard generation == processGeneration, !failureHandled else { return }
+        guard generation == processGeneration,
+              restartingGeneration == nil,
+              !failureHandled
+        else { return }
         guard !isShuttingDown else { return }
         guard let envelope = try? JSONDecoder().decode(IncomingHelperEnvelope.self, from: line),
               envelope.version == helperProtocolVersion
@@ -406,7 +469,11 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
     }
 
     private func handleFailure(generation: Int) {
-        guard generation == processGeneration, !failureHandled, !isShuttingDown else { return }
+        guard generation == processGeneration,
+              restartingGeneration == nil,
+              !failureHandled,
+              !isShuttingDown
+        else { return }
         failureHandled = true
         handshakeTimeoutTask?.cancel()
         handshakeTimeoutTask = nil
@@ -452,6 +519,14 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
     }
 
     private func processExited(generation: Int) {
+        if restartingGeneration == generation {
+            process = nil
+            restartTimeoutTask?.cancel()
+            restartTimeoutTask = nil
+            restartingGeneration = nil
+            launch()
+            return
+        }
         guard generation == processGeneration, process != nil else { return }
         process = nil
         if isShuttingDown {
@@ -477,6 +552,13 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         guard isShuttingDown, !isShutdownComplete else { return }
         if process?.isRunning == true { process?.terminate() }
         finishShutdown()
+    }
+
+    private func forceRestart(generation: Int) {
+        guard restartingGeneration == generation else { return }
+        if process?.isRunning == true {
+            process?.terminate()
+        }
     }
 
     nonisolated private static func defaultStateRootURL() -> URL {

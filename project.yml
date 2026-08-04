@@ -23,7 +23,9 @@ targets:
     settings:
       base:
         ARCHS: arm64
-        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_ALLOWED: "YES"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
         CODE_SIGNING_REQUIRED: "NO"
         ENABLE_USER_SCRIPT_SANDBOXING: "NO"
         GENERATE_INFOPLIST_FILE: "YES"
@@ -36,6 +38,7 @@ targets:
       configs:
         Debug:
           ENABLE_TESTABILITY: "YES"
+          PRODUCT_BUNDLE_IDENTIFIER: dev.chrisbanes.Portico.Debug
           SWIFT_OPTIMIZATION_LEVEL: "-Onone"
     postBuildScripts:
       - name: Build and Embed Helper
@@ -72,6 +75,28 @@ targets:
         SWIFT_VERSION: "5.0"
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Portico.app/Contents/MacOS/Portico"
 
+  PorticoUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: PorticoUITests
+    dependencies:
+      - target: Portico
+    settings:
+      base:
+        ARCHS: arm64
+        CODE_SIGNING_ALLOWED: "YES"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        GENERATE_INFOPLIST_FILE: "YES"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        ONLY_ACTIVE_ARCH: "YES"
+        PRODUCT_BUNDLE_IDENTIFIER: dev.chrisbanes.PorticoUITests
+        PRODUCT_NAME: "$(TARGET_NAME)"
+        SWIFT_VERSION: "5.0"
+        TEST_TARGET_NAME: Portico
+
 schemes:
   Portico:
     build:
@@ -82,3 +107,4 @@ schemes:
       config: Debug
       targets:
         - PorticoTests
+        - PorticoUITests

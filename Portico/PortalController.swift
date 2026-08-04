@@ -34,6 +34,11 @@ final class PortalController: ObservableObject {
     @Published private(set) var diagnosticEntries: [DiagnosticEntry] = []
     @Published private(set) var removalStates: [UUID: PortalRemovalState] = [:]
     @Published private(set) var removalNotices: [PortalRemovalNotice] = []
+    @Published private(set) var operationalLogging: OperationalLoggingPreference = .undecided
+    @Published private(set) var operationalLoggingError: String?
+    @Published private(set) var launchAtLoginOffer: LaunchAtLoginOfferState = .notOffered
+
+    var onFreshPortalOnline: (() -> Void)?
 
     var portal: PortalConfiguration? { portals.first }
     var status: PortalStatusPayload? { portal.flatMap { statuses[$0.id] } }
@@ -50,6 +55,8 @@ final class PortalController: ObservableObject {
     private let uuidProvider: () -> UUID
     private let dateProvider: () -> Date
     private let openURL: (URL) -> Void
+    private let copyText: (String) -> Void
+    private let announce: (String) -> Void
     private let reachability: LocalAppReachability?
     private let history: DiagnosticHistory
     private let diagnosticVersions: DiagnosticVersions
@@ -62,6 +69,7 @@ final class PortalController: ObservableObject {
     private var pendingReconciliation: PortalReconciliation?
     private var removalAttemptTokens: [UUID: Int] = [:]
     private var removalsAwaitingReconciliation: [UUID: Int] = [:]
+    private var loggingRestartPending = false
 
     init(
         store: PortalStore,
@@ -71,6 +79,8 @@ final class PortalController: ObservableObject {
         reachability: LocalAppReachability? = nil,
         history: DiagnosticHistory? = nil,
         diagnosticVersions: DiagnosticVersions = .current,
+        copyText: @escaping (String) -> Void = { _ in },
+        announce: @escaping (String) -> Void = { _ in },
         openURL: @escaping (URL) -> Void
     ) {
         self.store = store
@@ -80,6 +90,8 @@ final class PortalController: ObservableObject {
         self.reachability = reachability
         self.history = history ?? DiagnosticHistory(dateProvider: dateProvider)
         self.diagnosticVersions = diagnosticVersions
+        self.copyText = copyText
+        self.announce = announce
         self.openURL = openURL
         self.history.onChange = { [weak self] entries in self?.diagnosticEntries = entries }
         self.reachability?.onChange = { [weak self] states in
@@ -108,6 +120,7 @@ final class PortalController: ObservableObject {
     }
 
     func refreshLocalApps() {
+        guard actionAvailability().refreshLocalApps else { return }
         discoveryGeneration += 1
         let generation = discoveryGeneration
         isRefreshingLocalApps = true
@@ -130,6 +143,48 @@ final class PortalController: ObservableObject {
 
     func retryHelper() {
         helper.retry()
+    }
+
+    func setOperationalLogging(_ preference: OperationalLoggingPreference) {
+        guard preference != .undecided,
+              preference != installation.operationalLogging
+        else { return }
+        var updated = installation
+        updated.operationalLogging = preference
+        do {
+            try store.save(updated)
+        } catch {
+            let errorMessage = "The operational-support logging setting could not be saved."
+            operationalLoggingError = errorMessage
+            message = errorMessage
+            return
+        }
+
+        installation = updated
+        publishInstallation()
+        operationalLoggingError = nil
+        message = nil
+        discoveryGeneration += 1
+        isRefreshingLocalApps = false
+        authenticationPending.removeAll()
+        reconciliationGeneration += 1
+        pendingReconciliation = nil
+        loggingRestartPending = true
+        helper.restart(loggingPreference: preference)
+    }
+
+    func commitLaunchAtLoginOffer(_ state: LaunchAtLoginOfferState) -> Bool {
+        guard state != installation.launchAtLoginOffer else { return true }
+        var updated = installation
+        updated.launchAtLoginOffer = state
+        do {
+            try store.save(updated)
+            installation = updated
+            publishInstallation()
+            return true
+        } catch {
+            return false
+        }
     }
 
     func diagnosticReport() -> String {
@@ -156,6 +211,14 @@ final class PortalController: ObservableObject {
         )
     }
 
+    func copyDiagnosticReport() {
+        copyText(diagnosticReport())
+    }
+
+    func openExternalURL(_ url: URL) {
+        openURL(url)
+    }
+
     func selectLocalApp(_ candidate: LocalAppCandidatePayload) {
         guard localApps.contains(candidate) else { return }
         localAppPort = String(candidate.localAppPort)
@@ -164,13 +227,20 @@ final class PortalController: ObservableObject {
         }
     }
 
-    func addPortal() {
+    @discardableResult
+    func addPortal() -> PortalValidationError? {
+        guard operationalLogging != .undecided else {
+            message = "Choose an operational-support logging setting before adding a Portal."
+            return nil
+        }
         let port: UInt16
         do {
             port = try PortalInputValidator.validate(name: portalName, port: localAppPort)
-        } catch {
+        } catch let error as PortalValidationError {
             message = "Enter a lower-case DNS label and a port from 1 through 65535."
-            return
+            return error
+        } catch {
+            return nil
         }
         let configuration = PortalConfiguration(
             id: uuidProvider(),
@@ -195,6 +265,7 @@ final class PortalController: ObservableObject {
         } catch {
             message = "The Portal could not be saved."
         }
+        return nil
     }
 
     func startPortal(id: UUID) {
@@ -249,7 +320,7 @@ final class PortalController: ObservableObject {
     func retryRemoval(id: UUID) {
         guard installation.portals.contains(where: {
             $0.id == id && $0.lifecycle == .pendingRemoval
-        }), removalStates[id] == .failed else { return }
+        }), actionAvailability(for: installation.portals.first(where: { $0.id == id })).retryRemoval else { return }
         queueRemovalAttempt(id)
     }
 
@@ -283,7 +354,8 @@ final class PortalController: ObservableObject {
     }
 
     func authenticate(id: UUID) {
-        guard portals.contains(where: { $0.id == id && $0.lifecycle == .active }),
+        guard let portal = portals.first(where: { $0.id == id && $0.lifecycle == .active }),
+              actionAvailability(for: portal).authenticate,
               authenticationPending.insert(id).inserted
         else { return }
         helper.authenticatePortal(id: id) { [weak self] result in
@@ -326,6 +398,56 @@ final class PortalController: ObservableObject {
         }
     }
 
+    func actionAvailability(
+        for portal: PortalConfiguration? = nil,
+        editedPort: String? = nil
+    ) -> PortalActionAvailability {
+        let addInputsValid = portal == nil && (try? PortalInputValidator.validate(
+            name: portalName,
+            port: localAppPort
+        )) != nil
+        let editedPortValid: Bool
+        if let portal, let editedPort, editedPort != String(portal.localAppPort),
+           let parsed = try? PortalInputValidator.validate(name: portal.name, port: editedPort) {
+            editedPortValid = parsed > 0
+        } else {
+            editedPortValid = false
+        }
+        let status = portal.flatMap { statuses[$0.id] }
+        return PortalActionAvailability(context: PortalActionContext(
+            loggingPreference: installation.operationalLogging,
+            inputsValid: addInputsValid,
+            helperAvailability: helper.availability,
+            lifecycle: portal?.lifecycle,
+            desiredState: portal?.desiredState,
+            tailscaleState: status?.state,
+            hasPortalURL: status?.portalURL != nil,
+            isTailscaleFactsStale: portal.map { staleStatusIDs.contains($0.id) } ?? false,
+            isAuthenticationPending: portal.map { authenticationPending.contains($0.id) } ?? false,
+            removalState: portal.flatMap { removalStates[$0.id] },
+            hasTailnetBinding: installation.tailnetBinding != nil,
+            portalCount: installation.portals.count,
+            isEditedPortValid: editedPortValid,
+            isRefreshingLocalApps: isRefreshingLocalApps
+        ))
+    }
+
+    func copyPortalURL(id: UUID) {
+        guard let portal = installation.portals.first(where: { $0.id == id }),
+              actionAvailability(for: portal).copyPortalURL,
+              let url = statuses[id]?.portalURL
+        else { return }
+        copyText(url.absoluteString)
+    }
+
+    func openPortalURL(id: UUID) {
+        guard let portal = installation.portals.first(where: { $0.id == id }),
+              actionAvailability(for: portal).openPortalURL,
+              let url = statuses[id]?.portalURL
+        else { return }
+        openURL(url)
+    }
+
     func pendingWarningText(for portal: PortalConfiguration) -> String {
         "Removing \(portal.name) from a different tailnet. Local cleanup is in progress; its remote node may still require manual removal."
     }
@@ -349,6 +471,19 @@ final class PortalController: ObservableObject {
     }
 
     private func helperAvailabilityChanged(_ availability: HelperAvailability) {
+        if availability == .connected {
+            let event: PorticoAnnouncementEvent = loggingRestartPending
+                ? .preferenceRestartCompleted
+                : .helperConnected
+            loggingRestartPending = false
+            announce(PorticoAnnouncement.text(for: event))
+        } else if availability == .failed {
+            let event: PorticoAnnouncementEvent = loggingRestartPending
+                ? .preferenceRestartFailed
+                : .helperTerminalFailure
+            loggingRestartPending = false
+            announce(PorticoAnnouncement.text(for: event))
+        }
         guard availability != .connected else { return }
         staleStatusIDs.formUnion(statuses.keys)
         for portal in installation.portals where portal.lifecycle == .active {
@@ -477,6 +612,7 @@ final class PortalController: ObservableObject {
         guard removalAttemptTokens[id] == token else { return }
         removalStates[id] = .failed
         message = "Portal removal could not be completed. Retry when ready."
+        announce(PorticoAnnouncement.text(for: .removalFailed))
     }
 
     private func finishRemoval(id: UUID, token: Int) {
@@ -505,6 +641,7 @@ final class PortalController: ObservableObject {
             ))
             publishInstallation()
             message = nil
+            announce(PorticoAnnouncement.text(for: .removalSucceeded))
         } catch {
             failRemovalAttempt(id: id, token: token)
             message = "Local cleanup completed, but the Portal record could not be removed. Retry when ready."
@@ -517,10 +654,15 @@ final class PortalController: ObservableObject {
             guard let portal = installation.portals.first(where: {
                 $0.id == id && $0.lifecycle == .active
             }) else { return }
+            let wasFreshOnline = statuses[id]?.state == .online && !staleStatusIDs.contains(id)
             let displayStatus = status.sanitizedForDisplay()
             statuses[id] = displayStatus
             staleStatusIDs.remove(id)
             recordPortalState(portal)
+            if status.state == .online, !wasFreshOnline {
+                announce(PorticoAnnouncement.text(for: .portalOnline))
+                onFreshPortalOnline?()
+            }
             if portal.lifecycle == .active, status.state == .online,
                let tailnetName = status.tailnetName, !tailnetName.isEmpty {
                 receiveOnlineStatus(for: portal, displayStatus: displayStatus, tailnetName: tailnetName)
@@ -634,6 +776,8 @@ final class PortalController: ObservableObject {
     private func publishInstallation() {
         portals = installation.portals
         alerts = installation.alerts
+        operationalLogging = installation.operationalLogging
+        launchAtLoginOffer = installation.launchAtLoginOffer
         tailnetDisplaySuffix = installation.tailnetBinding?.magicDNSSuffix.nonEmpty
         reachability?.update(portals: installation.portals.filter { $0.lifecycle == .active })
     }

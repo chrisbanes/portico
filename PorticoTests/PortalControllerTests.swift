@@ -6,9 +6,109 @@ import XCTest
 final class PortalControllerTests: XCTestCase {
     private let portalID = UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!
 
+    func testUndecidedLoggingPreventsFirstPortalCreation() {
+        let controller = PortalController(
+            store: PortalStore(rootURL: temporaryRoot()),
+            helper: FakePortalHelperClient(),
+            openURL: { _ in }
+        )
+        controller.portalName = "hermes"
+        controller.localAppPort = "8787"
+
+        controller.addPortal()
+
+        XCTAssertTrue(controller.portals.isEmpty)
+        XCTAssertEqual(controller.message, "Choose an operational-support logging setting before adding a Portal.")
+    }
+
+    func testLoggingPreferenceCommitsBeforeControlledRestartAndSameValueIsNoOp() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(operationalLogging: .enabled))
+        let client = FakePortalHelperClient()
+        client.onRestart = { preference in
+            XCTAssertEqual(try? store.loadInstallation().operationalLogging, preference)
+        }
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        controller.setOperationalLogging(.enabled)
+        controller.setOperationalLogging(.disabled)
+
+        XCTAssertEqual(controller.operationalLogging, .disabled)
+        XCTAssertEqual(client.restartedWith, [.disabled])
+    }
+
+    func testLoggingPersistenceFailureLeavesPreferenceAndProcessUntouched() throws {
+        struct ExpectedFailure: Error {}
+        let root = temporaryRoot()
+        let initialStore = PortalStore(rootURL: root)
+        try initialStore.save(InstallationRecord(operationalLogging: .enabled))
+        let failingStore = PortalStore(rootURL: root, writeData: { _, _ in throw ExpectedFailure() })
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: failingStore, helper: client, openURL: { _ in })
+
+        controller.setOperationalLogging(.disabled)
+
+        XCTAssertEqual(controller.operationalLogging, .enabled)
+        XCTAssertTrue(client.restartedWith.isEmpty)
+        XCTAssertEqual(controller.message, "The operational-support logging setting could not be saved.")
+        XCTAssertEqual(
+            controller.operationalLoggingError,
+            "The operational-support logging setting could not be saved."
+        )
+    }
+
+    func testLoggingRestartRejectsOldAuthenticationURL() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let portal = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(InstallationRecord(portals: [portal], operationalLogging: .enabled))
+        let client = FakePortalHelperClient()
+        var opened: [URL] = []
+        let controller = PortalController(store: store, helper: client, openURL: { opened.append($0) })
+        controller.authenticate(id: portalID)
+
+        controller.setOperationalLogging(.disabled)
+        client.send(.authenticationURL(portalID, URL(string: "https://login.example/secret")!))
+
+        XCTAssertTrue(opened.isEmpty)
+    }
+
+    func testCurrentPortalURLCanCopyAndOpenButStaleURLCanOnlyCopy() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let portal = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(InstallationRecord(portals: [portal], operationalLogging: .enabled))
+        let client = FakePortalHelperClient()
+        var copied: [String] = []
+        var opened: [URL] = []
+        let controller = PortalController(
+            store: store,
+            helper: client,
+            copyText: { copied.append($0) },
+            openURL: { opened.append($0) }
+        )
+        let url = URL(string: "https://hermes.example.ts.net/")!
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .online,
+            stableNodeId: nil,
+            assignedName: "hermes",
+            portalURL: url,
+            addresses: [],
+            magicDNSSuffix: "example.ts.net"
+        )))
+
+        controller.copyPortalURL(id: portalID)
+        controller.openPortalURL(id: portalID)
+        client.disconnect(as: .retrying(attempt: 1, delay: 1))
+        controller.copyPortalURL(id: portalID)
+        controller.openPortalURL(id: portalID)
+
+        XCTAssertEqual(copied, [url.absoluteString, url.absoluteString])
+        XCTAssertEqual(opened, [url])
+    }
+
     func testAddValidatesBeforeCreatingOnePortalUUID() throws {
         let client = FakePortalHelperClient()
         let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(operationalLogging: .enabled))
         var UUIDCreationCount = 0
         let controller = PortalController(
             store: store,
@@ -20,14 +120,19 @@ final class PortalControllerTests: XCTestCase {
 
         controller.portalName = "Invalid Name"
         controller.localAppPort = "8787"
-        controller.addPortal()
+        XCTAssertEqual(controller.addPortal(), .invalidName)
         XCTAssertNil(controller.portal)
         XCTAssertEqual(UUIDCreationCount, 0)
         XCTAssertTrue(client.started.isEmpty)
 
         controller.portalName = "hermes"
+        controller.localAppPort = "0"
+        XCTAssertEqual(controller.addPortal(), .invalidPort)
+        XCTAssertNil(controller.portal)
+        XCTAssertEqual(UUIDCreationCount, 0)
+
         controller.localAppPort = "8787"
-        controller.addPortal()
+        XCTAssertNil(controller.addPortal())
         let portal = try XCTUnwrap(controller.portal)
         XCTAssertEqual(portal.id, portalID)
         XCTAssertEqual(UUIDCreationCount, 1)
@@ -108,6 +213,7 @@ final class PortalControllerTests: XCTestCase {
     func testAddPersistsFinalEditableFieldsAndIgnoresStaleDiscovery() throws {
         let client = FakePortalHelperClient()
         let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(operationalLogging: .enabled))
         let controller = PortalController(
             store: store,
             helper: client,
@@ -142,7 +248,7 @@ final class PortalControllerTests: XCTestCase {
     func testStartsSavedPortalAfterHandshakeWithSameDefinition() throws {
         let store = PortalStore(rootURL: temporaryRoot())
         let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date(timeIntervalSince1970: 1_786_000_000))
-        try store.save(saved)
+        try store.save(InstallationRecord(portals: [saved], operationalLogging: .enabled))
         let client = FakePortalHelperClient(availability: .connecting)
         let controller = PortalController(store: store, helper: client, openURL: { _ in })
 
@@ -576,6 +682,13 @@ final class PortalControllerTests: XCTestCase {
         var opened: [URL] = []
         let controller = PortalController(store: store, helper: client, openURL: { opened.append($0) })
         let transient = URL(string: "https://login.tailscale.com/a/transient")!
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .authenticating,
+            stableNodeId: nil,
+            assignedName: nil,
+            portalURL: nil,
+            addresses: []
+        )))
 
         client.send(.authenticationURL(portalID, transient))
         XCTAssertTrue(opened.isEmpty)
@@ -596,7 +709,7 @@ final class PortalControllerTests: XCTestCase {
         let secondID = UUID(uuidString: "5ea74329-3144-4ba2-925f-138d14d61fcc")!
         let first = PortalConfiguration(id: firstID, name: "hermes", localAppPort: 8787, createdAt: Date())
         let store = PortalStore(rootURL: temporaryRoot())
-        try store.save(InstallationRecord(portals: [first]))
+        try store.save(InstallationRecord(portals: [first], operationalLogging: .enabled))
         let client = FakePortalHelperClient()
         let controller = PortalController(
             store: store,
@@ -877,7 +990,7 @@ final class PortalControllerTests: XCTestCase {
             handshakeTimeout: 60
         )
         let controller = PortalController(store: store, helper: supervisor, openURL: { _ in })
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         controller.stopPortal(id: portalID)
 
@@ -1004,6 +1117,8 @@ final class FakePortalHelperClient: PortalHelperClient {
     var onCleanup: ((UUID) -> Void)?
     var onReconcile: (([PortalConfiguration]) -> Void)?
     private(set) var retryCount = 0
+    private(set) var restartedWith: [OperationalLoggingPreference] = []
+    var onRestart: ((OperationalLoggingPreference) -> Void)?
 
     init(availability: HelperAvailability = .connected) {
         self.availability = availability
@@ -1025,6 +1140,11 @@ final class FakePortalHelperClient: PortalHelperClient {
     }
 
     func retry() { retryCount += 1 }
+
+    func restart(loggingPreference: OperationalLoggingPreference) {
+        restartedWith.append(loggingPreference)
+        onRestart?(loggingPreference)
+    }
 
     func authenticatePortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void) {
         authenticated.append(id)

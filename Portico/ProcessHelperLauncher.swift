@@ -1,9 +1,30 @@
 import Foundation
 
+enum ProcessHelperLauncherError: Error {
+    case loggingChoiceRequired
+}
+
 final class ProcessHelperLauncher: HelperLaunching {
+    static func childEnvironment(
+        for preference: OperationalLoggingPreference,
+        inherited: [String: String]
+    ) throws -> [String: String] {
+        var environment = inherited
+        switch preference {
+        case .undecided:
+            throw ProcessHelperLauncherError.loggingChoiceRequired
+        case .enabled:
+            environment.removeValue(forKey: "TS_NO_LOGS_NO_SUPPORT")
+        case .disabled:
+            environment["TS_NO_LOGS_NO_SUPPORT"] = "true"
+        }
+        return environment
+    }
+
     func launch(
         at executableURL: URL,
         arguments: [String],
+        loggingPreference: OperationalLoggingPreference,
         onLine: @escaping (Data) -> Void,
         onEOF: @escaping () -> Void,
         onExit: @escaping (Int32) -> Void
@@ -16,6 +37,10 @@ final class ProcessHelperLauncher: HelperLaunching {
 
         process.executableURL = executableURL
         process.arguments = arguments
+        process.environment = try Self.childEnvironment(
+            for: loggingPreference,
+            inherited: ProcessInfo.processInfo.environment
+        )
         process.standardInput = input
         process.standardOutput = output
         process.standardError = diagnostics

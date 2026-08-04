@@ -14,7 +14,7 @@ final class HelperShutdownTests: XCTestCase {
             handshakeTimeout: 1,
             shutdownGraceInterval: 1
         )
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         var completionCount = 0
 
@@ -46,7 +46,7 @@ final class HelperShutdownTests: XCTestCase {
             handshakeTimeout: 1,
             shutdownGraceInterval: 0.01
         )
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         var completionCount = 0
 
@@ -64,7 +64,7 @@ final class HelperShutdownTests: XCTestCase {
             launcher: launcher,
             requestIDProvider: { "request-1" }
         )
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         launcher.exit(status: 1)
         var completionCount = 0
 
@@ -83,7 +83,7 @@ final class HelperShutdownTests: XCTestCase {
             requestIDProvider: { requestIDs.removeFirst() },
             shutdownGraceInterval: 1
         )
-        supervisor.start()
+        supervisor.start(loggingPreference: .enabled)
         launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         var completionCount = 0
 

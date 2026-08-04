@@ -54,6 +54,15 @@ Portico offers one non-blocking choice to enable it and does not repeat the
 prompt after the user declines. Enabled Portals reconnect whenever Portico is
 running; a Stopped Portal remains stopped across relaunches.
 
+The live `SMAppService.mainApp.status` value is the sole truth for whether
+launch at login is enabled, disabled, awaiting approval, or unavailable.
+Portico persists only whether the one-time offer has not been offered, was
+presented, was declined, or was accepted. It records the presented or accepted
+intent before showing the offer or asking ServiceManagement to register. A
+registration failure leaves the accepted intent intact and exposes an explicit
+Retry action in Settings. Signed-app registration is verified under #11 rather
+than from the unsigned development or UI-test app.
+
 ### Add Portal
 
 Before enrollment, Portico briefly explains that the tailnet might require:
@@ -98,8 +107,9 @@ Name blank. Suggested names are normalized conservatively to a DNS-style
 label and remain editable until enrollment starts.
 
 When tsnet requires authentication, Portico displays an **Authenticate**
-button. It opens the transient URL only after the user clicks; the URL can be
-copied from diagnostics but is never persisted or logged.
+button. It opens the transient URL only after the user clicks. Authentication
+URLs are never persisted, logged, copied into diagnostics, or reused after the
+helper generation that supplied them becomes stale.
 
 The first Portal to become online binds this Portico installation to one
 tailnet. Later Portals must report the same `CurrentTailnet.Name`. A Portal
@@ -132,6 +142,43 @@ tsnet identity after one explicit warning. The warning shows the Assigned
 Name, states that the remote tailnet node remains, and links to Tailscale's
 [manual device-removal instructions](https://tailscale.com/docs/features/access-control/device-management/how-to/remove).
 
+The UI derives every action from one authoritative availability projection:
+
+| Action | Available when | Unavailable or stale behavior |
+| --- | --- | --- |
+| Add Portal | Logging is decided and the name and port validate | Saves locally without requiring a helper connection |
+| Refresh Local Apps | Helper is connected and no refresh is active | Disabled while awaiting choice, restarting, retrying, or failed |
+| Start / Stop | Active Portal whose desired state permits the transition | Commits locally while the helper is unavailable |
+| Edit Local App Port | Active Portal and a changed, valid port | Commits locally while the helper is unavailable |
+| Authenticate | Active and Enabled, helper connected, current non-stale state authenticating, no request pending | Never uses stale state or a stale authentication URL |
+| Copy Portal URL | A sanitized current or session-stale URL exists | Session-stale URLs are labelled **Last Known** and remain copyable |
+| Open Portal URL | Current non-stale URL and current Tailscale state online | Never opens a stale URL; Local App unreachability does not disable it |
+| Diagnostics | Globally always; per Portal while its record exists | Independent of helper availability |
+| Remove | Active Portal | Commits destructive intent locally; cleanup waits for connection |
+| Retry Removal | Removing, cleanup failed, and helper connected | Otherwise waits for helper recovery |
+| Reset Tailnet | A binding exists and no Portal record remains | Preserves logging and launch-at-login offer state |
+| Settings | Always | Remains usable if ServiceManagement is unavailable |
+
+### Keyboard and accessibility
+
+The popover uses visible text and standard focusable controls; helper, Portal,
+and action status never relies on color or an icon alone. Traversal follows the
+visual source order: helper and global state, Portal rows in creation order,
+the Add Portal guidance and form, Reset Tailnet when eligible, then Settings,
+Diagnostics, and Quit. Within a row, identity and the three independent states
+precede URL actions, authentication, port edit, Start or Stop, Diagnostics,
+and Remove.
+
+`Command-,` opens Settings, `Command-Shift-D` opens Diagnostics, and
+`Command-Q` quits. Space or Return activates the focused control and Escape
+cancels destructive confirmation without mutation. Settings and Diagnostics
+initially focus their headings; removal restores focus to the Portal row or
+completion notice, and Add validation errors return focus to the invalid
+field. Portico posts one fixed polite VoiceOver announcement for helper
+connection or terminal failure, a Portal becoming online, removal success or
+failure, and logging-restart success or failure. It never announces retry
+ticks, raw errors, paths, URLs, or credentials.
+
 ## Runtime model
 
 ### State
@@ -149,14 +196,29 @@ TCP connection. It is not an application health check and never sends HTTP.
 
 ### Persistence
 
-Swift owns an atomically written, versioned configuration containing:
+Swift owns an atomically written version-3 configuration at
+`installation-v3.json` containing:
 
 - Portal UUID;
 - immutable Portal Name;
 - Local App port;
 - desired state;
-- creation time; and
-- safe cached last-known Assigned Name, Portal URL, tailnet, and IPs.
+- creation time;
+- the installation-global operational-support logging preference; and
+- the one-time launch-at-login offer state.
+
+Assigned Name, Portal URL, tailnet, IPs, and authentication URL are helper
+facts, not persisted Portal configuration. Safe Portal facts may remain marked
+**Last Known** only within the current app session after helper loss. After a
+relaunch, actions wait for newly received current facts.
+
+A genuinely new installation starts with logging undecided and does not launch
+the helper. Existing v1 installations, and v2 installations containing any
+Portal, tailnet binding, or alert, migrate to logging enabled so their previous
+behavior is preserved; a pristine empty v2 installation migrates to undecided.
+Every migration starts with the launch-at-login offer not offered. A valid v3
+record takes precedence, while an invalid v3 fails closed instead of falling
+back. Migration atomically saves v3 before removing the older record.
 
 The installation tailnet binding stores `CurrentTailnet.Name` and caches its
 MagicDNS suffix for display. The helper owns no separate product database.
@@ -320,6 +382,21 @@ If the helper exits unexpectedly, Swift restarts it with bounded exponential
 backoff and restores Enabled Portals. After the retry budget is exhausted,
 Portico shows a global failure with a manual Retry action.
 
+Changing the committed operational-support logging choice is a controlled,
+commit-first restart. Swift saves and publishes the new value, marks helper
+facts stale, gracefully shuts down the old helper with the existing one-second
+limit, and starts the replacement only after old-process ownership clears.
+The replacement receives a fresh recovery budget and the newest coalesced
+Portal snapshot. Old-process responses, events, and authentication URLs are
+generation-fenced. Local Add, Start, Stop, port edit, and Remove intent may
+still commit while the helper is unavailable; helper-dependent Authenticate,
+listener refresh, and removal Retry remain unavailable until reconnection.
+
+For logging enabled, Swift removes any inherited
+`TS_NO_LOGS_NO_SUPPORT` from the child environment. For logging disabled, it
+sets that variable to exactly `true` before the helper starts. This preference
+does not alter the helper command line or protocol version.
+
 ### tsnet lifecycle
 
 Each server has a unique state directory and immutable requested hostname.
@@ -440,13 +517,24 @@ commands, secret-bearing arguments, and invalid name suggestions.
 
 ### Native UI
 
-- listener suggestion and manual-port Add Portal flows;
-- prerequisite explanation and explicit Authenticate action;
-- name-collision presentation;
-- Start, Stop, port edit, Copy, Open, and diagnostics;
-- cross-tailnet rejection;
-- removal warning content; and
-- Tailscale logging choice and launch-at-login suggestion.
+- first-run prerequisite guidance, logging gate, and Add availability;
+- separately labelled Portal identity, Assigned Name, desired state,
+  Tailscale state, and Local App reachability;
+- current versus session-stale URL actions and explicit Authenticate action;
+- Start, Stop, port edit, Copy, Open, Diagnostics, and Remove availability;
+- controlled logging restart, retry, and terminal helper failure;
+- removal confirmation, Escape cancellation, completion, in-progress, and
+  retryable-failure states;
+- one-time launch-at-login offer persistence plus approval and registration
+  error states;
+- separate native Settings and Diagnostics windows; and
+- `Command-,`, `Command-Shift-D`, `Command-Q`, Return, and Escape behavior.
+
+The XCUITest target selects a test-only launch configuration before dependency
+construction. It uses a retained temporary installation root, an in-process
+fake helper, a fake ServiceManagement adapter, and intercepted URL/open and
+copy actions. It never starts the real helper, writes Application Support,
+registers a login item, or opens an external URL.
 
 ### Packaging
 
@@ -455,11 +543,34 @@ commands, secret-bearing arguments, and invalid name suggestions.
 - the helper is present at the expected bundle path; and
 - a packaged app starts and shuts down without leaving a helper process.
 
+### Manual macOS 14 accessibility acceptance
+
+Automated UI tests do not replace a macOS 14 check with Full Keyboard Access,
+VoiceOver, and Accessibility Inspector. Before release, verify all of the
+following on that configuration:
+
+1. First-run traversal reads prerequisite guidance, logging choice, and Add
+   controls in visual order, with Add unavailable until logging is chosen.
+2. Portal Name, collision Assigned Name, desired state, Tailscale state, and
+   Local App reachability are read as separate facts.
+3. A current URL exposes Copy and Open, while a **Last Known** URL is labelled
+   stale, remains copyable, and cannot be opened or authenticated.
+4. `Command-,` and `Command-Shift-D` open separate native windows whose
+   headings receive initial accessibility focus.
+5. A logging change retains useful focus and produces exactly one restart
+   completion or failure announcement.
+6. Removal confirmation supports Return and Escape, cancellation preserves the
+   Portal, and focus returns to the row or completion notice.
+7. The launch-at-login offer is non-blocking and does not repeat after a
+   dismissed, declined, presented-before-crash, or accepted choice.
+8. Accessibility labels and values expose no authentication URL, credential,
+   raw error, sensitive path, or secret-bearing process argument.
+
 ## Deferred live acceptance
 
 The first implementation does not mutate a real tailnet or request public
 certificates automatically. Before calling the spike proven or publishing a
-release, run this explicit manual acceptance scenario:
+release, issue #12 owns this explicit manual acceptance scenario:
 
 1. Start an HTTP test server on `127.0.0.1:8787`.
 2. Add a Portal named `hermes`.
@@ -482,7 +593,8 @@ The first supported artifact is a macOS 14+ universal app distributed outside
 the Mac App Store. Build arm64 and x86_64 helper binaries, combine them,
 embed and sign the helper before signing the outer app, enable the hardened
 runtime, verify both signatures, notarize the final ZIP or DMG, and staple the
-ticket where supported.
+ticket where supported. Issue #11 owns this signed-app work, including the
+production `SMAppService.mainApp` registration smoke check.
 
 A Homebrew cask can consume the same notarized versioned artifact. Mac App
 Store sandbox feasibility is a separate investigation; it must not change the

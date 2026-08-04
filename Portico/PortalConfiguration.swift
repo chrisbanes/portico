@@ -80,23 +80,42 @@ struct InstallationAlert: Codable, Equatable, Identifiable {
     let createdAt: Date
 }
 
+enum OperationalLoggingPreference: String, Codable, Equatable, CaseIterable {
+    case undecided
+    case enabled
+    case disabled
+}
+
+enum LaunchAtLoginOfferState: String, Codable, Equatable {
+    case notOffered
+    case presented
+    case declined
+    case accepted
+}
+
 struct InstallationRecord: Codable, Equatable {
-    static let currentVersion = 2
+    static let currentVersion = 3
 
     let version: Int
     var tailnetBinding: TailnetBinding?
     var portals: [PortalConfiguration]
     var alerts: [InstallationAlert]
+    var operationalLogging: OperationalLoggingPreference
+    var launchAtLoginOffer: LaunchAtLoginOfferState
 
     init(
         tailnetBinding: TailnetBinding? = nil,
         portals: [PortalConfiguration] = [],
-        alerts: [InstallationAlert] = []
+        alerts: [InstallationAlert] = [],
+        operationalLogging: OperationalLoggingPreference = .undecided,
+        launchAtLoginOffer: LaunchAtLoginOfferState = .notOffered
     ) {
         version = Self.currentVersion
         self.tailnetBinding = tailnetBinding
         self.portals = portals
         self.alerts = alerts
+        self.operationalLogging = operationalLogging
+        self.launchAtLoginOffer = launchAtLoginOffer
     }
 }
 
