@@ -2,7 +2,7 @@
 
 **Status:** Confirmed product and technical specification
 
-**Last updated:** 2026-08-03
+**Last updated:** 2026-08-04
 
 ## Product
 
@@ -184,9 +184,104 @@ The protocol is versioned JSON Lines over standard input and output:
 - standard output is protocol-only while standard error is sanitized
   diagnostics-only.
 
-The initial command set covers handshake, full reconciliation, start, stop,
-Local App port update, removal, listener discovery, authentication retry, and
-graceful shutdown.
+The macOS app and bundled helper require an exact protocol-version match. Full
+desired-set reconciliation establishes protocol version 2; there is no
+protocol-v1 fallback. A new required command, field, outcome, or semantic
+change requires another version bump, while an optional field may remain in a
+version only when older peers can safely ignore its presence or absence. The
+app and helper ship together.
+
+Protocol version 2 uses `reconcilePortals` as the only command that starts or
+stops a Portal or changes its Local App port. The command carries the complete
+set of Portal records whose cleanup lifecycle is `active`:
+
+```json
+{
+  "version": 2,
+  "requestId": "request-42",
+  "command": "reconcilePortals",
+  "payload": {
+    "portals": [
+      {
+        "portalId": "9f55ca93-d7b3-4eab-a871-310ea576005a",
+        "portalName": "hermes",
+        "localAppPort": 8787,
+        "desiredState": "enabled"
+      }
+    ]
+  }
+}
+```
+
+The helper validates the complete snapshot before changing any runtime. An
+invalid UUID, Portal Name, Local App port, desired state, duplicate UUID, or
+unknown field rejects the whole command with the fixed `invalidPayload`
+protocol error and performs no lifecycle work. Request array order has no
+meaning.
+
+For a valid request, the helper serially processes the union of snapshot UUIDs
+and UUIDs present in its runtime map when reconciliation begins, in ascending
+lower-case UUID order. It returns exactly one entry for every UUID in that
+union, in the same order:
+
+```json
+{
+  "version": 2,
+  "requestId": "request-42",
+  "result": {
+    "entries": [
+      {
+        "portalId": "9f55ca93-d7b3-4eab-a871-310ea576005a",
+        "outcome": "converged"
+      }
+    ]
+  }
+}
+```
+
+The fixed outcome enum is `converged | startFailed | closeFailed`:
+
+- `converged` means the helper reached the local lifecycle target. An Enabled
+  Portal has one runtime with the requested immutable Portal Name and current
+  Local App port; it need not yet be authenticated or online. A Stopped Portal
+  has no runtime. A runtime omitted from the snapshot has been closed without
+  deleting its UUID-keyed identity directory. An already-satisfied target is
+  also `converged` and causes no restart.
+- `startFailed` means an Enabled Portal could not be brought to that local
+  target. The helper retains ownership of any partially created runtime until
+  cleanup is confirmed, never starts a second runtime for that UUID, and never
+  replaces an existing runtime whose Portal Name conflicts with the immutable
+  name for that UUID. A later reconciliation may retry.
+- `closeFailed` means a runtime that had to close is not confirmed closed. The
+  helper retains ownership of it, never starts a second runtime for that UUID,
+  and retries closure only during a later reconciliation. Other entries still
+  reconcile.
+
+Changing the Local App port on an existing Enabled Portal atomically routes
+new requests through a new loopback proxy handler. Requests and WebSockets
+already accepted by the old handler drain against the old port. The tsnet node,
+listener, state directory, Assigned Name, and Portal URL are unchanged.
+
+Per-Portal runtime errors map only to the fixed outcomes above. Raw error text,
+paths, and underlying library errors never appear in the result or a protocol
+error. A valid reconciliation always returns a result after every relevant
+entry has completed its attempt, even when one or more entries failed; partial
+failure is not an envelope error and does not terminate the helper. If the
+process or connection ends before the correlated response, Swift treats the
+request as unresolved and later reconciles the newest committed snapshot.
+
+The envelope `requestId` is the sole wire correlation token; the result does
+not repeat the snapshot or add an acceptance flag. Swift associates the
+request with a local configuration generation, permits newer edits while it is
+in flight, and coalesces them into the newest committed snapshot. An outcome
+for a superseded generation cannot update current UI state; after that request
+completes, Swift immediately sends the latest snapshot. Desired state is never
+rolled back after a failed outcome.
+
+Handshake, authentication, guarded identity cleanup, listener discovery, and
+graceful shutdown remain separate commands. Authentication remains transient.
+Imperative protocol-v1 `startPortal` is not accepted as a lifecycle fallback
+by a protocol-v2 helper.
 
 If the helper exits unexpectedly, Swift restarts it with bounded exponential
 backoff and restores Enabled Portals. After the retry budget is exhausted,
