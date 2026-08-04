@@ -2,8 +2,10 @@ import Foundation
 
 enum HelperAvailability: Equatable {
     case connecting
+    case retrying(attempt: Int, delay: TimeInterval)
     case connected
     case failed
+    case shuttingDown
 }
 
 enum PortalHelperEvent: Equatable {
@@ -21,7 +23,10 @@ enum HelperClientError: Error {
 protocol PortalHelperClient: AnyObject {
     var availability: HelperAvailability { get }
     var onConnected: (() -> Void)? { get set }
+    var onAvailabilityChange: ((HelperAvailability) -> Void)? { get set }
     var onEvent: ((PortalHelperEvent) -> Void)? { get set }
+
+    func retry()
 
     func reconcilePortals(
         _ portals: [PortalConfiguration],
@@ -52,20 +57,35 @@ protocol HelperLaunching {
 
 @MainActor
 final class HelperSupervisor: ObservableObject, PortalHelperClient {
-    @Published private(set) var availability: HelperAvailability = .connecting
+    @Published private(set) var availability: HelperAvailability = .connecting {
+        didSet {
+            guard oldValue != availability else { return }
+            history?.record(.helper(availability))
+            onAvailabilityChange?(availability)
+        }
+    }
     var onConnected: (() -> Void)?
+    var onAvailabilityChange: ((HelperAvailability) -> Void)?
     var onEvent: ((PortalHelperEvent) -> Void)?
 
     private let helperURL: URL
     private let stateRootURL: URL
     private let launcher: HelperLaunching
     private let requestIDProvider: () -> String
+    private let scheduler: PorticoScheduling
+    private let history: DiagnosticHistory?
     private let handshakeTimeout: TimeInterval
     private let shutdownGraceInterval: TimeInterval
     private var process: HelperProcess?
-    private var pendingResponses: [String: (Data?) -> Void] = [:]
-    private var handshakeTimeoutWorkItem: DispatchWorkItem?
-    private var shutdownTimeoutWorkItem: DispatchWorkItem?
+    private var pendingResponses: [String: (Data?) -> Bool] = [:]
+    private var handshakeTimeoutTask: ScheduledTask?
+    private var shutdownTimeoutTask: ScheduledTask?
+    private var retryTask: ScheduledTask?
+    private var stabilityTask: ScheduledTask?
+    private var processGeneration = 0
+    private var reconciliationGeneration = 0
+    private var retryDelayIndex = 0
+    private var failureHandled = false
     private var isShuttingDown = false
     private var isShutdownComplete = false
     private var shutdownCompletions: [() -> Void] = []
@@ -75,6 +95,8 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         stateRootURL: URL = HelperSupervisor.defaultStateRootURL(),
         launcher: HelperLaunching,
         requestIDProvider: @escaping () -> String = { UUID().uuidString },
+        scheduler: PorticoScheduling? = nil,
+        history: DiagnosticHistory? = nil,
         handshakeTimeout: TimeInterval = 3,
         shutdownGraceInterval: TimeInterval = 1
     ) {
@@ -82,38 +104,78 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         self.stateRootURL = stateRootURL
         self.launcher = launcher
         self.requestIDProvider = requestIDProvider
+        self.scheduler = scheduler ?? MainQueueScheduler()
+        self.history = history
         self.handshakeTimeout = handshakeTimeout
         self.shutdownGraceInterval = shutdownGraceInterval
     }
 
     func start() {
+        guard process == nil, retryTask == nil, !isShuttingDown else { return }
+        launch()
+    }
+
+    func retry() {
+        guard availability == .failed, !isShuttingDown else { return }
+        retryTask?.cancel()
+        retryTask = nil
+        stabilityTask?.cancel()
+        stabilityTask = nil
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = nil
+        processGeneration += 1
+        reconciliationGeneration += 1
+        failPendingResponses()
+        retryDelayIndex = 0
+        failureHandled = false
+        availability = .connecting
+        guard let process else {
+            launch()
+            return
+        }
+        process.closeInput()
+        if process.isRunning {
+            process.terminate()
+        } else {
+            self.process = nil
+            launch()
+        }
+    }
+
+    private func launch() {
+        guard process == nil, !isShuttingDown else { return }
+        processGeneration += 1
+        let generation = processGeneration
+        failureHandled = false
         availability = .connecting
         do {
             process = try launcher.launch(
                 at: helperURL,
                 arguments: ["--state-root", stateRootURL.path],
-                onLine: { [weak self] data in self?.receive(line: data) },
-                onEOF: { [weak self] in self?.processExited() },
-                onExit: { [weak self] _ in self?.processExited() }
+                onLine: { [weak self] data in self?.receive(line: data, generation: generation) },
+                onEOF: { [weak self] in self?.handleFailure(generation: generation) },
+                onExit: { [weak self] _ in self?.processExited(generation: generation) }
             )
             try sendRequest(command: .handshake, payload: EmptyPayload()) { [weak self] (result: Result<HandshakeResult, Error>) in
                 guard let self else { return }
+                guard generation == self.processGeneration, !self.failureHandled else { return }
                 guard case let .success(handshake) = result,
                       handshake.protocolVersion == helperProtocolVersion
                 else {
-                    self.fail()
+                    self.handleFailure(generation: generation)
                     return
                 }
-                self.handshakeTimeoutWorkItem?.cancel()
-                self.handshakeTimeoutWorkItem = nil
+                self.handshakeTimeoutTask?.cancel()
+                self.handshakeTimeoutTask = nil
                 self.availability = .connected
                 self.onConnected?()
             }
-            let workItem = DispatchWorkItem { [weak self] in self?.fail() }
-            handshakeTimeoutWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + handshakeTimeout, execute: workItem)
+            handshakeTimeoutTask = scheduler.schedule(after: handshakeTimeout) { [weak self] in
+                self?.handleFailure(generation: generation)
+            }
         } catch {
-            fail()
+            process = nil
+            handleFailure(generation: generation)
         }
     }
 
@@ -137,10 +199,34 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
                     )
                 }
         )
+        reconciliationGeneration += 1
+        let requestedReconciliation = reconciliationGeneration
+        let requestedProcess = processGeneration
+        stabilityTask?.cancel()
+        stabilityTask = nil
         do {
-            try sendRequest(command: .reconcilePortals, payload: payload, completion: completion)
+            try sendRequest(command: .reconcilePortals, payload: payload) { [weak self] result in
+                completion(result)
+                guard let self,
+                      requestedProcess == self.processGeneration,
+                      requestedReconciliation == self.reconciliationGeneration,
+                      self.availability == .connected,
+                      case let .success(response) = result,
+                      response.entries.allSatisfy({ $0.outcome == .converged })
+                else { return }
+                self.stabilityTask = self.scheduler.schedule(after: 300) { [weak self] in
+                    guard let self,
+                          requestedProcess == self.processGeneration,
+                          requestedReconciliation == self.reconciliationGeneration,
+                          self.availability == .connected
+                    else { return }
+                    self.retryDelayIndex = 0
+                    self.stabilityTask = nil
+                }
+            }
         } catch {
             completion(.failure(error))
+            handleFailure(generation: requestedProcess)
         }
     }
 
@@ -155,6 +241,7 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
             }
         } catch {
             completion(.failure(error))
+            handleFailure(generation: processGeneration)
         }
     }
 
@@ -169,6 +256,7 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
             }
         } catch {
             completion(.failure(error))
+            handleFailure(generation: processGeneration)
         }
     }
 
@@ -183,6 +271,7 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
             }
         } catch {
             completion(.failure(error))
+            handleFailure(generation: processGeneration)
         }
     }
 
@@ -194,8 +283,13 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         shutdownCompletions.append(completion)
         guard !isShuttingDown else { return }
         isShuttingDown = true
-        handshakeTimeoutWorkItem?.cancel()
-        handshakeTimeoutWorkItem = nil
+        availability = .shuttingDown
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = nil
+        retryTask?.cancel()
+        retryTask = nil
+        stabilityTask?.cancel()
+        stabilityTask = nil
 
         guard process?.isRunning == true else {
             finishShutdown()
@@ -204,9 +298,9 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         do {
             try sendWithoutResponse(command: .shutdown, requestID: requestIDProvider(), payload: EmptyPayload())
             process?.closeInput()
-            let workItem = DispatchWorkItem { [weak self] in self?.forceShutdown() }
-            shutdownTimeoutWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + shutdownGraceInterval, execute: workItem)
+            shutdownTimeoutTask = scheduler.schedule(after: shutdownGraceInterval) { [weak self] in
+                self?.forceShutdown()
+            }
         } catch {
             process?.closeInput()
             process?.terminate()
@@ -214,20 +308,23 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         }
     }
 
-    private func receive(line: Data) {
+    private func receive(line: Data, generation: Int) {
+        guard generation == processGeneration, !failureHandled else { return }
         guard !isShuttingDown else { return }
         guard let envelope = try? JSONDecoder().decode(IncomingHelperEnvelope.self, from: line),
               envelope.version == helperProtocolVersion
         else {
-            fail()
+            handleFailure(generation: generation)
             return
         }
         if let requestID = envelope.requestId {
-            pendingResponses.removeValue(forKey: requestID)?(line)
+            if pendingResponses.removeValue(forKey: requestID)?(line) == false {
+                handleFailure(generation: generation)
+            }
             return
         }
         guard let event = envelope.event else {
-            fail()
+            handleFailure(generation: generation)
             return
         }
         switch event {
@@ -235,7 +332,7 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
             guard let message = try? JSONDecoder().decode(HelperEvent<PortalStatusPayload>.self, from: line),
                   message.event == .portalStatus
             else {
-                fail()
+                handleFailure(generation: generation)
                 return
             }
             onEvent?(.status(message.portalId, message.payload))
@@ -243,7 +340,7 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
             guard let message = try? JSONDecoder().decode(HelperEvent<AuthenticationURLPayload>.self, from: line),
                   message.event == .authenticationURL
             else {
-                fail()
+                handleFailure(generation: generation)
                 return
             }
             onEvent?(.authenticationURL(message.portalId, message.payload.url))
@@ -263,7 +360,7 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
                   response.requestId == requestID
             else {
                 completion(.failure(HelperClientError.protocolFailure))
-                return
+                return false
             }
             if let error = response.error {
                 completion(.failure(HelperClientError.helper(error)))
@@ -271,7 +368,9 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
                 completion(.success(result))
             } else {
                 completion(.failure(HelperClientError.protocolFailure))
+                return false
             }
+            return true
         }
         do {
             try sendWithoutResponse(command: command, requestID: requestID, payload: payload)
@@ -290,28 +389,68 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         try process.send(data)
     }
 
-    private func fail() {
-        guard availability != .failed else { return }
-        handshakeTimeoutWorkItem?.cancel()
-        handshakeTimeoutWorkItem = nil
-        availability = .failed
-        let pending = pendingResponses.values
-        pendingResponses.removeAll()
-        pending.forEach { $0(nil) }
-        process?.closeInput()
-        if process?.isRunning == true {
-            process?.terminate()
+    private func handleFailure(generation: Int) {
+        guard generation == processGeneration, !failureHandled, !isShuttingDown else { return }
+        failureHandled = true
+        handshakeTimeoutTask?.cancel()
+        handshakeTimeoutTask = nil
+        stabilityTask?.cancel()
+        stabilityTask = nil
+        reconciliationGeneration += 1
+        availability = .connecting
+        failPendingResponses()
+        guard let process else {
+            scheduleRetry(generation: generation)
+            return
+        }
+        process.closeInput()
+        if process.isRunning {
+            process.terminate()
+        } else {
+            self.process = nil
+            scheduleRetry(generation: generation)
         }
     }
 
-    private func processExited() {
-        if isShuttingDown { finishShutdown() } else { fail() }
+    private func failPendingResponses() {
+        let pending = pendingResponses.values
+        pendingResponses.removeAll()
+        pending.forEach { _ = $0(nil) }
+    }
+
+    private func scheduleRetry(generation: Int) {
+        guard generation == processGeneration, !isShuttingDown else { return }
+        let delays: [TimeInterval] = [1, 2, 4, 8, 16]
+        guard retryDelayIndex < delays.count else {
+            availability = .failed
+            return
+        }
+        let delay = delays[retryDelayIndex]
+        retryDelayIndex += 1
+        availability = .retrying(attempt: retryDelayIndex, delay: delay)
+        retryTask = scheduler.schedule(after: delay) { [weak self] in
+            guard let self, generation == self.processGeneration, !self.isShuttingDown else { return }
+            self.retryTask = nil
+            self.launch()
+        }
+    }
+
+    private func processExited(generation: Int) {
+        guard generation == processGeneration, process != nil else { return }
+        process = nil
+        if isShuttingDown {
+            finishShutdown()
+        } else if failureHandled {
+            scheduleRetry(generation: generation)
+        } else {
+            handleFailure(generation: generation)
+        }
     }
 
     private func finishShutdown() {
         guard !isShutdownComplete else { return }
-        shutdownTimeoutWorkItem?.cancel()
-        shutdownTimeoutWorkItem = nil
+        shutdownTimeoutTask?.cancel()
+        shutdownTimeoutTask = nil
         isShutdownComplete = true
         let completions = shutdownCompletions
         shutdownCompletions.removeAll()

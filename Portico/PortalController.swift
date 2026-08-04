@@ -16,6 +16,9 @@ final class PortalController: ObservableObject {
     @Published private(set) var localApps: [LocalAppCandidatePayload] = []
     @Published private(set) var isRefreshingLocalApps = false
     @Published private(set) var localAppsMessage: String?
+    @Published private(set) var reachabilityStates: [UUID: LocalAppReachabilityState] = [:]
+    @Published private(set) var staleStatusIDs: Set<UUID> = []
+    @Published private(set) var diagnosticEntries: [DiagnosticEntry] = []
 
     var portal: PortalConfiguration? { portals.first }
     var status: PortalStatusPayload? { portal.flatMap { statuses[$0.id] } }
@@ -29,6 +32,9 @@ final class PortalController: ObservableObject {
     private let uuidProvider: () -> UUID
     private let dateProvider: () -> Date
     private let openURL: (URL) -> Void
+    private let reachability: LocalAppReachability?
+    private let history: DiagnosticHistory
+    private let diagnosticVersions: DiagnosticVersions
     private var installation = InstallationRecord()
     private var authenticationPending: Set<UUID> = []
     private var cleanupInFlight: Set<UUID> = []
@@ -42,13 +48,27 @@ final class PortalController: ObservableObject {
         helper: PortalHelperClient,
         uuidProvider: @escaping () -> UUID = UUID.init,
         dateProvider: @escaping () -> Date = Date.init,
+        reachability: LocalAppReachability? = nil,
+        history: DiagnosticHistory? = nil,
+        diagnosticVersions: DiagnosticVersions = .current,
         openURL: @escaping (URL) -> Void
     ) {
         self.store = store
         self.helper = helper
         self.uuidProvider = uuidProvider
         self.dateProvider = dateProvider
+        self.reachability = reachability
+        self.history = history ?? DiagnosticHistory(dateProvider: dateProvider)
+        self.diagnosticVersions = diagnosticVersions
         self.openURL = openURL
+        self.history.onChange = { [weak self] entries in self?.diagnosticEntries = entries }
+        self.reachability?.onChange = { [weak self] states in
+            guard let self else { return }
+            self.reachabilityStates = states
+            for portal in self.installation.portals where portal.lifecycle == .active {
+                self.recordPortalState(portal)
+            }
+        }
         do {
             installation = try store.loadInstallation()
             publishInstallation()
@@ -56,7 +76,9 @@ final class PortalController: ObservableObject {
             message = "Saved Portal configuration could not be loaded."
         }
         helper.onConnected = { [weak self] in self?.helperConnected() }
+        helper.onAvailabilityChange = { [weak self] in self?.helperAvailabilityChanged($0) }
         helper.onEvent = { [weak self] event in self?.receive(event) }
+        helperAvailabilityChanged(helper.availability)
         if helper.availability == .connected {
             helperConnected()
         }
@@ -77,6 +99,38 @@ final class PortalController: ObservableObject {
                 self.localAppsMessage = "Local Apps could not be refreshed."
             }
         }
+    }
+
+    func refreshReachability() {
+        reachability?.refresh()
+    }
+
+    func retryHelper() {
+        helper.retry()
+    }
+
+    func diagnosticReport() -> String {
+        DiagnosticReportRenderer.render(
+            versions: diagnosticVersions,
+            helper: helper.availability,
+            portals: installation.portals
+                .filter { $0.lifecycle == .active }
+                .map {
+                    let status = statuses[$0.id]
+                    return PortalDiagnosticFacts(
+                        portalName: $0.name,
+                        assignedName: status?.assignedName,
+                        portalURL: status?.portalURL,
+                        addresses: status?.addresses ?? [],
+                        magicDNSSuffix: status?.magicDNSSuffix,
+                        desiredState: $0.desiredState,
+                        tailscaleState: status?.state,
+                        reachability: reachabilityStates[$0.id] ?? .unknown,
+                        isStale: staleStatusIDs.contains($0.id)
+                    )
+                },
+            history: history.entries
+        )
     }
 
     func selectLocalApp(_ candidate: LocalAppCandidatePayload) {
@@ -145,7 +199,7 @@ final class PortalController: ObservableObject {
         guard installation.portals[index].localAppPort != localAppPort else { return }
         var updated = installation
         updated.portals[index].localAppPort = localAppPort
-        savePortalOperation(updated)
+        _ = savePortalOperation(updated)
     }
 
     func authenticate() {
@@ -209,6 +263,7 @@ final class PortalController: ObservableObject {
     }
 
     private func helperConnected() {
+        reachability?.helperRecovered()
         refreshLocalApps()
         scheduleReconciliation()
         for portal in installation.portals {
@@ -218,24 +273,36 @@ final class PortalController: ObservableObject {
         }
     }
 
+    private func helperAvailabilityChanged(_ availability: HelperAvailability) {
+        guard availability != .connected else { return }
+        staleStatusIDs.formUnion(statuses.keys)
+        for portal in installation.portals where portal.lifecycle == .active {
+            recordPortalState(portal)
+        }
+    }
+
     private func updateDesiredState(id: UUID, desiredState: PortalDesiredState) {
         guard let index = installation.portals.firstIndex(where: {
             $0.id == id && $0.lifecycle == .active
         }), installation.portals[index].desiredState != desiredState else { return }
         var updated = installation
         updated.portals[index].desiredState = desiredState
-        savePortalOperation(updated)
+        if savePortalOperation(updated) {
+            recordPortalState(updated.portals[index])
+        }
     }
 
-    private func savePortalOperation(_ updated: InstallationRecord) {
+    private func savePortalOperation(_ updated: InstallationRecord) -> Bool {
         do {
             try store.save(updated)
             installation = updated
             publishInstallation()
             message = nil
             scheduleReconciliation()
+            return true
         } catch {
             message = "The Portal could not be saved."
+            return false
         }
     }
 
@@ -280,10 +347,13 @@ final class PortalController: ObservableObject {
         switch event {
         case let .status(id, status):
             guard let portal = installation.portals.first(where: { $0.id == id }) else { return }
-            statuses[id] = status.redactingTailnetName()
+            let displayStatus = status.sanitizedForDisplay()
+            statuses[id] = displayStatus
+            staleStatusIDs.remove(id)
+            recordPortalState(portal)
             if portal.lifecycle == .active, status.state == .online,
                let tailnetName = status.tailnetName, !tailnetName.isEmpty {
-                receiveOnlineStatus(for: portal, status: status, tailnetName: tailnetName)
+                receiveOnlineStatus(for: portal, displayStatus: displayStatus, tailnetName: tailnetName)
             }
         case let .authenticationURL(id, url):
             guard authenticationPending.remove(id) != nil,
@@ -295,14 +365,15 @@ final class PortalController: ObservableObject {
 
     private func receiveOnlineStatus(
         for portal: PortalConfiguration,
-        status: PortalStatusPayload,
+        displayStatus: PortalStatusPayload,
         tailnetName: String
     ) {
         guard let binding = installation.tailnetBinding else {
+            guard let suffix = displayStatus.magicDNSSuffix else { return }
             var updated = installation
             updated.tailnetBinding = TailnetBinding(
                 name: tailnetName,
-                magicDNSSuffix: status.magicDNSSuffix ?? ""
+                magicDNSSuffix: suffix
             )
             do {
                 try store.save(updated)
@@ -315,11 +386,18 @@ final class PortalController: ObservableObject {
             return
         }
         guard binding.name == tailnetName else {
-            reject(portal, status: status)
+            reject(
+                portal,
+                evidence: RejectionEvidence(
+                    assignedName: displayStatus.assignedName,
+                    rejectedMagicDNSSuffix: displayStatus.magicDNSSuffix
+                )
+            )
             return
         }
-        let suffix = status.magicDNSSuffix ?? ""
-        guard suffix != binding.magicDNSSuffix else { return }
+        guard let suffix = displayStatus.magicDNSSuffix,
+              suffix != binding.magicDNSSuffix
+        else { return }
         var updated = installation
         updated.tailnetBinding?.magicDNSSuffix = suffix
         do {
@@ -331,7 +409,7 @@ final class PortalController: ObservableObject {
         }
     }
 
-    private func reject(_ portal: PortalConfiguration, status: PortalStatusPayload) {
+    private func reject(_ portal: PortalConfiguration, evidence: RejectionEvidence) {
         guard let index = installation.portals.firstIndex(where: { $0.id == portal.id && $0.lifecycle == .active }) else {
             return
         }
@@ -342,13 +420,7 @@ final class PortalController: ObservableObject {
             installation = updated
             publishInstallation()
             scheduleReconciliation()
-            cleanupRejectedPortal(
-                updated.portals[index],
-                evidence: RejectionEvidence(
-                    assignedName: status.assignedName,
-                    rejectedMagicDNSSuffix: status.magicDNSSuffix
-                )
-            )
+            cleanupRejectedPortal(updated.portals[index], evidence: evidence)
         } catch {
             message = "The rejected Portal could not be saved for cleanup."
         }
@@ -393,6 +465,17 @@ final class PortalController: ObservableObject {
         portals = installation.portals
         alerts = installation.alerts
         tailnetDisplaySuffix = installation.tailnetBinding?.magicDNSSuffix.nonEmpty
+        reachability?.update(portals: installation.portals)
+    }
+
+    private func recordPortalState(_ portal: PortalConfiguration) {
+        history.record(.portal(
+            name: portal.name,
+            desired: portal.desiredState,
+            tailscale: statuses[portal.id]?.state,
+            reachability: reachabilityStates[portal.id] ?? .unknown,
+            stale: staleStatusIDs.contains(portal.id)
+        ))
     }
 }
 
@@ -408,17 +491,4 @@ private struct PortalReconciliation {
 
 private extension String {
     var nonEmpty: String? { isEmpty ? nil : self }
-}
-
-private extension PortalStatusPayload {
-    func redactingTailnetName() -> PortalStatusPayload {
-        PortalStatusPayload(
-            state: state,
-            stableNodeId: stableNodeId,
-            assignedName: assignedName,
-            portalURL: portalURL,
-            addresses: addresses,
-            magicDNSSuffix: magicDNSSuffix
-        )
-    }
 }

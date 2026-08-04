@@ -4,6 +4,80 @@ import XCTest
 
 @MainActor
 final class HelperSupervisorTests: XCTestCase {
+    func testRetriesUnexpectedExitWithOneChildAndFixedSharedBudget() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { UUID().uuidString },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+
+        supervisor.start()
+        for expectedDelay in [1.0, 2.0, 4.0, 8.0, 16.0] {
+            launcher.exit(status: 1)
+
+            XCTAssertEqual(
+                supervisor.availability,
+                .retrying(attempt: launcher.processes.count, delay: expectedDelay)
+            )
+            XCTAssertEqual(scheduler.pendingDelays, [expectedDelay])
+            XCTAssertLessThanOrEqual(launcher.processes.filter(\.isRunning).count, 0)
+
+            scheduler.runNext()
+            XCTAssertEqual(supervisor.availability, .connecting)
+            XCTAssertEqual(launcher.processes.filter(\.isRunning).count, 1)
+        }
+
+        launcher.exit(status: 1)
+
+        XCTAssertEqual(supervisor.availability, .failed)
+        XCTAssertTrue(scheduler.pendingDelays.isEmpty)
+        XCTAssertEqual(scheduler.recordedDelays.filter { $0 < 60 }, [1, 2, 4, 8, 16])
+        XCTAssertEqual(launcher.processes.count, 6)
+
+        supervisor.retry()
+
+        XCTAssertEqual(supervisor.availability, .connecting)
+        XCTAssertEqual(launcher.processes.count, 7)
+        XCTAssertEqual(launcher.processes.filter(\.isRunning).count, 1)
+    }
+
+    func testRetryBudgetResetsOnlyAfterLatestConvergenceStaysConnectedForFiveMinutes() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "handshake-2", "reconcile-2", "handshake-3", "reconcile-3"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+
+        supervisor.start()
+        launcher.exit(status: 1)
+        scheduler.runNext()
+        launcher.receive(line: #"{"version":2,"requestId":"handshake-2","result":{"protocolVersion":2}}"#)
+        supervisor.reconcilePortals([]) { _ in }
+        launcher.receive(line: #"{"version":2,"requestId":"reconcile-2","result":{"entries":[]}}"#)
+
+        XCTAssertTrue(scheduler.pendingDelays.contains(300))
+        launcher.exit(status: 1)
+        XCTAssertEqual(supervisor.availability, .retrying(attempt: 2, delay: 2))
+
+        scheduler.run(delay: 2)
+        launcher.receive(line: #"{"version":2,"requestId":"handshake-3","result":{"protocolVersion":2}}"#)
+        supervisor.reconcilePortals([]) { _ in }
+        launcher.receive(line: #"{"version":2,"requestId":"reconcile-3","result":{"entries":[]}}"#)
+        scheduler.run(delay: 300)
+        launcher.exit(status: 1)
+
+        XCTAssertEqual(supervisor.availability, .retrying(attempt: 1, delay: 1))
+    }
+
     func testConnectsOnlyForCorrelatedHandshake() throws {
         let launcher = FakeHelperLauncher()
         let supervisor = HelperSupervisor(
@@ -40,22 +114,23 @@ final class HelperSupervisorTests: XCTestCase {
 
         supervisor.start()
         try await Task.sleep(nanoseconds: 50_000_000)
+        launcher.exit(status: 1)
 
-        XCTAssertEqual(supervisor.availability, .failed)
+        XCTAssertEqual(supervisor.availability, .retrying(attempt: 1, delay: 1))
         XCTAssertTrue(launcher.process.inputClosed)
         XCTAssertTrue(launcher.process.terminated)
     }
 
-    func testHandshakeFailuresBecomeUnavailable() {
-        let failures: [(String, (FakeHelperLauncher) -> Void)] = [
-            ("malformed line", { $0.receive(line: "{") }),
-            ("correlated error", { $0.receive(line: #"{"version":2,"requestId":"request-1","error":{"code":"unsupportedVersion","message":"unsupported protocol version"}}"#) }),
-            ("unsupported response version", { $0.receive(line: #"{"version":1,"requestId":"request-1","result":{"protocolVersion":1}}"#) }),
-            ("EOF", { $0.receiveEOF() }),
-            ("nonzero exit", { $0.exit(status: 1) }),
+    func testHandshakeFailuresEnterSharedRecoveryBudgetAfterChildExit() {
+        let failures: [(String, Bool, (FakeHelperLauncher) -> Void)] = [
+            ("malformed line", false, { $0.receive(line: "{") }),
+            ("correlated error", false, { $0.receive(line: #"{"version":2,"requestId":"request-1","error":{"code":"unsupportedVersion","message":"unsupported protocol version"}}"#) }),
+            ("unsupported response version", false, { $0.receive(line: #"{"version":1,"requestId":"request-1","result":{"protocolVersion":1}}"#) }),
+            ("EOF", false, { $0.receiveEOF() }),
+            ("nonzero exit", true, { $0.exit(status: 1) }),
         ]
 
-        for (name, trigger) in failures {
+        for (name, alreadyExited, trigger) in failures {
             let launcher = FakeHelperLauncher()
             let supervisor = HelperSupervisor(
                 helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
@@ -66,9 +141,14 @@ final class HelperSupervisorTests: XCTestCase {
             supervisor.start()
 
             trigger(launcher)
+            if !alreadyExited {
+                launcher.exit(status: 1)
+            }
 
-            XCTAssertEqual(supervisor.availability, .failed, name)
-            XCTAssertTrue(launcher.process.inputClosed, name)
+            XCTAssertEqual(supervisor.availability, .retrying(attempt: 1, delay: 1), name)
+            if !alreadyExited {
+                XCTAssertTrue(launcher.process.inputClosed, name)
+            }
         }
     }
 
@@ -234,7 +314,8 @@ final class HelperSupervisorTests: XCTestCase {
 }
 
 final class FakeHelperLauncher: HelperLaunching {
-    let process = FakeHelperProcess()
+    private(set) var processes: [FakeHelperProcess] = []
+    var process: FakeHelperProcess { processes.last! }
     private var onLine: ((Data) -> Void)?
     private var onEOF: (() -> Void)?
     private var onExit: ((Int32) -> Void)?
@@ -247,6 +328,8 @@ final class FakeHelperLauncher: HelperLaunching {
         onEOF: @escaping () -> Void,
         onExit: @escaping (Int32) -> Void
     ) throws -> HelperProcess {
+        let process = FakeHelperProcess()
+        processes.append(process)
         self.arguments = arguments
         self.onLine = onLine
         self.onEOF = onEOF
@@ -266,6 +349,50 @@ final class FakeHelperLauncher: HelperLaunching {
         process.isRunning = false
         onExit?(status)
     }
+}
+
+@MainActor
+final class FakePorticoScheduler: PorticoScheduling {
+    private struct Entry {
+        let delay: TimeInterval
+        let task: FakeScheduledTask
+        let action: () -> Void
+    }
+
+    private var entries: [Entry] = []
+    private(set) var recordedDelays: [TimeInterval] = []
+    var pendingDelays: [TimeInterval] {
+        entries.filter { !$0.task.isCancelled }.map(\.delay)
+    }
+
+    func schedule(after delay: TimeInterval, _ action: @escaping () -> Void) -> ScheduledTask {
+        let task = FakeScheduledTask()
+        recordedDelays.append(delay)
+        entries.append(Entry(delay: delay, task: task, action: action))
+        return task
+    }
+
+    func runNext() {
+        while !entries.isEmpty {
+            let entry = entries.removeFirst()
+            guard !entry.task.isCancelled else { continue }
+            entry.action()
+            return
+        }
+    }
+
+    func run(delay: TimeInterval) {
+        guard let index = entries.firstIndex(where: { $0.delay == delay && !$0.task.isCancelled }) else {
+            return
+        }
+        let entry = entries.remove(at: index)
+        entry.action()
+    }
+}
+
+final class FakeScheduledTask: ScheduledTask {
+    private(set) var isCancelled = false
+    func cancel() { isCancelled = true }
 }
 
 final class FakeHelperProcess: HelperProcess {
