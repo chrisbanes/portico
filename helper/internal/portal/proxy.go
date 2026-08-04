@@ -54,13 +54,31 @@ func newRemoteProxy(target *url.URL, transport http.RoundTripper) http.Handler {
 		Transport: transport,
 		Rewrite: func(request *httputil.ProxyRequest) {
 			request.SetURL(target)
+			request.SetXForwarded()
+			request.Out.Header.Set("X-Forwarded-Proto", "https")
 		},
-		ErrorLog: log.New(io.Discard, "", 0),
+		FlushInterval: -1,
+		ErrorLog:      log.New(io.Discard, "", 0),
 	}
 	proxy.ErrorHandler = func(writer http.ResponseWriter, _ *http.Request, _ error) {
 		http.Error(writer, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 	}
-	return proxy
+	return &remoteProxy{proxy: proxy, transport: transport}
+}
+
+type remoteProxy struct {
+	proxy     *httputil.ReverseProxy
+	transport http.RoundTripper
+}
+
+func (p *remoteProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	p.proxy.ServeHTTP(writer, request)
+}
+
+func (p *remoteProxy) CloseIdleConnections() {
+	if transport, ok := p.transport.(interface{ CloseIdleConnections() }); ok {
+		transport.CloseIdleConnections()
+	}
 }
 
 func safeRemoteDialer(resolve func(context.Context, string, string) ([]netip.Addr, error)) func(context.Context, string, string) (net.Conn, error) {
@@ -144,6 +162,7 @@ func (p *proxyServer) close() error {
 	cancel()
 	closeErr := p.server.Close()
 	listenerErr := p.listener.Close()
+	p.handler.closeIdleConnections()
 	p.handler.wait()
 	p.doneOnce.Do(func() { p.serveErr = <-p.done })
 	serveErr := p.serveErr
@@ -195,6 +214,15 @@ func (h *trackedHandler) stopAccepting() {
 	h.mu.Lock()
 	h.isAccepting = false
 	h.mu.Unlock()
+}
+
+func (h *trackedHandler) closeIdleConnections() {
+	h.mu.Lock()
+	handler := h.handler
+	h.mu.Unlock()
+	if closer, ok := handler.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 func (h *trackedHandler) wait() {

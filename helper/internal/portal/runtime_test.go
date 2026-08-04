@@ -7,9 +7,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +25,23 @@ const secondPortalID = "5ea74329-3144-4ba2-925f-138d14d61fcc"
 
 func localAppDestination(port uint16) Destination {
 	return Destination{Kind: DestinationLocalApp, Port: port}
+}
+
+func remoteAppDestination(t *testing.T, remote *httptest.Server) Destination {
+	t.Helper()
+	remoteURL, err := url.Parse(remote.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, portText, err := net.SplitHostPort(remoteURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Destination{Kind: DestinationRemoteApp, Scheme: remoteURL.Scheme, Host: "app.example.com", Port: uint16(port)}
 }
 
 func TestDestinationRejectsIPv4MappedLoopback(t *testing.T) {
@@ -927,6 +946,10 @@ func TestRuntimeCloseClosesIdleConnection(t *testing.T) {
 	if !factory.node.listenerClosedBeforeNode {
 		t.Fatal("TLS listener was not closed before the tsnet node")
 	}
+	if response, err = http.Get(proxyURL); err == nil {
+		_ = response.Body.Close()
+		t.Fatal("Remote App proxy accepted a new request after Runtime.Close")
+	}
 }
 
 func TestRuntimeCloseClosesWebSocket(t *testing.T) {
@@ -962,6 +985,232 @@ func TestRuntimeCloseClosesWebSocket(t *testing.T) {
 	}
 }
 
+func TestRuntimeCloseCancelsActiveRemoteAppRequestBeforeNodeClose(t *testing.T) {
+	requestEntered := make(chan struct{})
+	handlerExited := make(chan struct{})
+	remote := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(requestEntered)
+		<-request.Context().Done()
+		close(handlerExited)
+	}))
+	t.Cleanup(remote.Close)
+	runtime, proxyURL, factory, _ := newOnlineRuntimeWithRemoteApp(t, remote, func(Event) {})
+	factory.node.observeClose = func() {
+		select {
+		case <-handlerExited:
+			factory.node.handlersExitedBeforeNode = true
+		default:
+		}
+	}
+
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.Get(proxyURL)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	waitForSignal(t, requestEntered, "active Remote App request")
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close() }()
+	waitForSignal(t, handlerExited, "active Remote App handler exit")
+	if err := waitForRuntimeClose(t, closeDone); err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForError(t, requestDone, "Remote App client request")
+	if !factory.node.handlersExitedBeforeNode {
+		t.Fatal("tsnet node closed before the active Remote App handler exited")
+	}
+}
+
+func TestRuntimeCloseClosesIdleRemoteAppTransport(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "ok")
+	}))
+	t.Cleanup(remote.Close)
+	runtime, proxyURL, factory, transport := newOnlineRuntimeWithRemoteApp(t, remote, func(Event) {})
+	response, err := http.Get(proxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !transport.closed.Load() {
+		t.Fatal("Remote App idle transport connections were not closed")
+	}
+	if !factory.node.listenerClosedBeforeNode {
+		t.Fatal("TLS listener was not closed before the tsnet node")
+	}
+}
+
+func TestRemoteAppDestinationFailureDoesNotPublishPortalHealth(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		connection, _, err := writer.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = connection.Close()
+		}
+	}))
+	t.Cleanup(remote.Close)
+	events := make([]Event, 0, 1)
+	_, proxyURL, _, _ := newOnlineRuntimeWithRemoteApp(t, remote, func(event Event) {
+		events = append(events, event)
+	})
+	if len(events) != 1 || events[0].Status == nil || events[0].Status.State != StateOnline {
+		t.Fatalf("initial events = %+v, want only Online status", events)
+	}
+
+	response, err := http.Get(proxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want generic bad gateway", response.StatusCode)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events after destination failure = %+v, want no health event", events)
+	}
+}
+
+func TestRuntimeCloseClosesTrustedHTTPSRemoteAppWebSocket(t *testing.T) {
+	handlerEntered := make(chan struct{})
+	handlerExited := make(chan struct{})
+	remote := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := websocket.Accept(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer connection.CloseNow()
+		close(handlerEntered)
+		_, _, _ = connection.Read(request.Context())
+		close(handlerExited)
+	}))
+	t.Cleanup(remote.Close)
+	runtime, proxyURL, _, _ := newOnlineRuntimeWithRemoteApp(t, remote, func(Event) {})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	connection, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(proxyURL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	waitForSignal(t, handlerEntered, "trusted HTTPS Remote App WebSocket handler")
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close() }()
+	waitForSignal(t, handlerExited, "trusted HTTPS Remote App WebSocket handler exit")
+	if _, _, err := connection.Read(ctx); err == nil {
+		t.Fatal("client WebSocket remained open after Runtime.Close")
+	}
+	if err := waitForRuntimeClose(t, closeDone); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRemoteAppPortalsKeepTrafficAndFailuresIsolated(t *testing.T) {
+	firstRemote := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/fail" {
+			connection, _, err := writer.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = connection.Close()
+			}
+			return
+		}
+		_, _ = io.WriteString(writer, "first")
+	}))
+	t.Cleanup(firstRemote.Close)
+	secondRemote := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "second")
+	}))
+	t.Cleanup(secondRemote.Close)
+	firstListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = firstListener.Close()
+		t.Fatal(err)
+	}
+	firstDestination := remoteAppDestination(t, firstRemote)
+	secondDestination := remoteAppDestination(t, secondRemote)
+	listeners := map[string]net.Listener{testPortalID: firstListener, secondPortalID: secondListener}
+	remotes := map[uint16]*httptest.Server{
+		firstDestination.Port:  firstRemote,
+		secondDestination.Port: secondRemote,
+	}
+	runtime := NewRuntime(t.TempDir(), func(dir, _ string) Node {
+		portalID := filepath.Base(dir)
+		return &fakeNode{
+			watcher:      newFakeWatcher(),
+			realListener: listeners[portalID],
+			status: Status{
+				BackendState: "Running",
+				DNSName:      "hermes.example.ts.net.",
+				CertDomains:  []string{"hermes.example.ts.net"},
+			},
+		}
+	})
+	runtime.proxyForDestination = func(destination Destination) (http.Handler, error) {
+		remote := remotes[destination.Port]
+		remoteURL, err := url.Parse(remote.URL)
+		if err != nil {
+			return nil, err
+		}
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, remoteURL.Host)
+		}
+		target := &url.URL{
+			Scheme: destination.Scheme,
+			Host:   net.JoinHostPort(destination.Host, strconv.Itoa(int(destination.Port))),
+		}
+		return newRemoteProxy(target, transport), nil
+	}
+	events := make([]Event, 0, 2)
+	entries, err := runtime.Reconcile(context.Background(), []Config{
+		{
+			ID: testPortalID, Name: "hermes", Destination: firstDestination, DesiredState: DesiredStateEnabled,
+		},
+		{
+			ID: secondPortalID, Name: "atlas", Destination: secondDestination, DesiredState: DesiredStateEnabled,
+		},
+	}, func(event Event) {
+		events = append(events, event)
+	})
+	if err != nil || len(entries) != 2 ||
+		entries[0].Outcome != OutcomeConverged || entries[1].Outcome != OutcomeConverged {
+		t.Fatalf("Reconcile = (%+v, %v), want both Remote Apps online", entries, err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	assertRemoteAppResponse(t, "http://"+firstListener.Addr().String(), "/", http.StatusOK, "first")
+	assertRemoteAppResponse(t, "http://"+secondListener.Addr().String(), "/", http.StatusOK, "second")
+	assertRemoteAppResponse(t, "http://"+firstListener.Addr().String(), "/fail", http.StatusBadGateway, "Bad Gateway\n")
+	assertRemoteAppResponse(t, "http://"+secondListener.Addr().String(), "/", http.StatusOK, "second")
+	if len(events) != 2 {
+		t.Fatalf("events after first Remote App failure = %+v, want only initial Online states", events)
+	}
+}
+
+func assertRemoteAppResponse(t *testing.T, baseURL, path string, wantStatus int, wantBody string) {
+	t.Helper()
+	response, err := http.Get(baseURL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil || response.StatusCode != wantStatus || string(body) != wantBody {
+		t.Fatalf("response = (%d, %q, %v), want (%d, %q)", response.StatusCode, body, err, wantStatus, wantBody)
+	}
+}
+
 func newOnlineRuntimeWithLocalApp(t *testing.T, handler http.Handler) (*Runtime, string, *fakeFactory) {
 	t.Helper()
 	localApp := httptest.NewServer(handler)
@@ -985,6 +1234,56 @@ func newOnlineRuntimeWithLocalApp(t *testing.T, handler http.Handler) (*Runtime,
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
 	return runtime, "http://" + listener.Addr().String(), factory
+}
+
+func newOnlineRuntimeWithRemoteApp(
+	t *testing.T,
+	remote *httptest.Server,
+	emit func(Event),
+) (*Runtime, string, *fakeFactory, *closeTrackingTransport) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteURL, err := url.Parse(remote.URL)
+	if err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if remoteURL.Scheme == "https" {
+		transport = remote.Client().Transport.(*http.Transport).Clone()
+	}
+	trackedTransport := &closeTrackingTransport{Transport: transport}
+	trackedTransport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, remoteURL.Host)
+	}
+	factory := newFakeFactory()
+	factory.status = Status{
+		BackendState: "Running",
+		DNSName:      "hermes.example.ts.net.",
+		CertDomains:  []string{"hermes.example.ts.net"},
+	}
+	factory.node.realListener = listener
+	runtime := NewRuntime(t.TempDir(), factory.New)
+	runtime.proxyForDestination = func(destination Destination) (http.Handler, error) {
+		target := &url.URL{
+			Scheme: destination.Scheme,
+			Host:   net.JoinHostPort(destination.Host, strconv.Itoa(int(destination.Port))),
+		}
+		return newRemoteProxy(target, trackedTransport), nil
+	}
+	if err := reconcileOne(runtime, Config{
+		ID:          testPortalID,
+		Name:        "hermes",
+		Destination: remoteAppDestination(t, remote),
+	}, emit); err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	return runtime, "http://" + listener.Addr().String(), factory, trackedTransport
 }
 
 func reconcileOne(runtime *Runtime, config Config, emit func(Event)) error {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -229,10 +230,11 @@ type Event struct {
 }
 
 type Runtime struct {
-	mu        sync.Mutex
-	stateRoot string
-	factory   NodeFactory
-	portals   map[string]*portalRuntime
+	mu                  sync.Mutex
+	stateRoot           string
+	factory             NodeFactory
+	proxyForDestination func(Destination) (http.Handler, error)
+	portals             map[string]*portalRuntime
 }
 
 type portalRuntime struct {
@@ -244,13 +246,19 @@ type portalRuntime struct {
 	runContext            context.Context
 	watchDone             sync.WaitGroup
 	emit                  func(Event)
+	proxyForDestination   func(Destination) (http.Handler, error)
 	authenticationPending bool
 	proxy                 *proxyServer
 	isRunning             bool
 }
 
 func NewRuntime(stateRoot string, factory NodeFactory) *Runtime {
-	return &Runtime{stateRoot: stateRoot, factory: factory, portals: make(map[string]*portalRuntime)}
+	return &Runtime{
+		stateRoot:           stateRoot,
+		factory:             factory,
+		proxyForDestination: newDestinationProxy,
+		portals:             make(map[string]*portalRuntime),
+	}
 }
 
 func (r *Runtime) Reconcile(ctx context.Context, configs []Config, emit func(Event)) ([]ReconcileEntry, error) {
@@ -333,7 +341,7 @@ func (r *Runtime) reconcilePortalLocked(
 
 func (r *Runtime) startPortalLocked(ctx context.Context, config Config, emit func(Event)) ReconcileOutcome {
 	node := r.factory(filepath.Join(r.stateRoot, config.ID), config.Name)
-	portal := &portalRuntime{}
+	portal := &portalRuntime{proxyForDestination: r.proxyForDestination}
 	r.portals[config.ID] = portal
 	if err := portal.start(ctx, config, node, emit); err != nil {
 		if closeErr := portal.close(); closeErr == nil {
@@ -504,7 +512,7 @@ func (r *portalRuntime) updateDestination(destination Destination) error {
 	if r.config == nil {
 		return errors.New("portal is not running")
 	}
-	handler, err := newDestinationProxy(destination)
+	handler, err := r.proxyForDestination(destination)
 	if err != nil {
 		return err
 	}
@@ -612,7 +620,7 @@ func (r *portalRuntime) ensureProxyLocked() error {
 	if r.proxy != nil {
 		return nil
 	}
-	handler, err := newDestinationProxy(r.config.Destination)
+	handler, err := r.proxyForDestination(r.config.Destination)
 	if err != nil {
 		return err
 	}

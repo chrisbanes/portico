@@ -52,6 +52,39 @@ final class PortalPresentationTests: XCTestCase {
         )
     }
 
+    func testOnlineRemoteAppHasOnlyFixedPortalPresentation() {
+        let portal = PortalConfiguration(
+            id: UUID(uuidString: "9F55CA93-D7B3-4EAB-A871-310EA576005A")!,
+            name: "hermes",
+            destination: .remoteApp(scheme: .https, host: "app.example.com", port: 443),
+            createdAt: Date(),
+            desiredState: .enabled
+        )
+        let status = PortalStatusPayload(
+            state: .online,
+            stableNodeId: nil,
+            assignedName: "hermes",
+            portalURL: URL(string: "https://hermes.example.ts.net/"),
+            addresses: [],
+            magicDNSSuffix: "example.ts.net"
+        )
+
+        let presentation = PortalPresentation(
+            portal: portal,
+            status: status,
+            reachability: .unknown,
+            isStale: false
+        )
+
+        XCTAssertNil(portal.localAppPort)
+        XCTAssertEqual(presentation.portalName, "hermes")
+        XCTAssertEqual(presentation.assignedName, "hermes")
+        XCTAssertEqual(presentation.desiredState, "Enabled")
+        XCTAssertEqual(presentation.tailscaleState, "Online")
+        XCTAssertEqual(presentation.portalURLLabel, "Portal URL")
+        XCTAssertNil(presentation.collisionExplanation)
+    }
+
     func testAnnouncementsAreFixedAndContainNoRuntimeFacts() {
         XCTAssertEqual(PorticoAnnouncement.text(for: .helperConnected), "Helper connected.")
         XCTAssertEqual(PorticoAnnouncement.text(for: .helperTerminalFailure), "Helper unavailable.")
