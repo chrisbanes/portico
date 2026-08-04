@@ -23,7 +23,10 @@ protocol PortalHelperClient: AnyObject {
     var onConnected: (() -> Void)? { get set }
     var onEvent: ((PortalHelperEvent) -> Void)? { get set }
 
-    func startPortal(_ portal: PortalConfiguration, completion: @escaping (Result<Void, Error>) -> Void)
+    func reconcilePortals(
+        _ portals: [PortalConfiguration],
+        completion: @escaping (Result<ReconcilePortalsResult, Error>) -> Void
+    )
     func authenticatePortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void)
     func cleanupRejectedPortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void)
     func discoverLocalApps(completion: @escaping (Result<[LocalAppCandidatePayload], Error>) -> Void)
@@ -114,16 +117,28 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         }
     }
 
-    func startPortal(_ portal: PortalConfiguration, completion: @escaping (Result<Void, Error>) -> Void) {
+    func reconcilePortals(
+        _ portals: [PortalConfiguration],
+        completion: @escaping (Result<ReconcilePortalsResult, Error>) -> Void
+    ) {
         guard availability == .connected else {
             completion(.failure(HelperClientError.unavailable))
             return
         }
-        let payload = StartPortalPayload(portalId: portal.id, portalName: portal.name, localAppPort: portal.localAppPort)
+        let payload = ReconcilePortalsPayload(
+            portals: portals
+                .sorted { $0.id.uuidString.lowercased() < $1.id.uuidString.lowercased() }
+                .map {
+                    ReconcilePortalPayload(
+                        portalId: $0.id,
+                        portalName: $0.name,
+                        localAppPort: $0.localAppPort,
+                        desiredState: $0.desiredState
+                    )
+                }
+        )
         do {
-            try sendRequest(command: .startPortal, payload: payload) { (result: Result<StartPortalResult, Error>) in
-                completion(result.map { _ in () })
-            }
+            try sendRequest(command: .reconcilePortals, payload: payload, completion: completion)
         } catch {
             completion(.failure(error))
         }

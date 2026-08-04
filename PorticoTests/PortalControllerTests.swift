@@ -154,6 +154,163 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(client.discoveryCompletions.count, 1)
     }
 
+    func testConnectionReconcilesOneFullActiveSnapshotAndOmitsPendingCleanup() throws {
+        let stoppedID = UUID(uuidString: "5ea74329-3144-4ba2-925f-138d14d61fcc")!
+        let pendingID = UUID(uuidString: "1f93e456-69ec-445a-8374-d7fc5558d0c7")!
+        let enabled = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date(),
+            desiredState: .enabled
+        )
+        let stopped = PortalConfiguration(
+            id: stoppedID,
+            name: "atlas",
+            localAppPort: 8788,
+            createdAt: Date(),
+            desiredState: .stopped
+        )
+        let pending = PortalConfiguration(
+            id: pendingID,
+            name: "rejected",
+            localAppPort: 8789,
+            createdAt: Date(),
+            lifecycle: .pendingTailnetRejection
+        )
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(portals: [enabled, pending, stopped]))
+        let client = FakePortalHelperClient(availability: .connecting)
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        client.connect()
+
+        _ = controller
+        XCTAssertEqual(client.reconciliations, [[enabled, stopped]])
+        XCTAssertEqual(client.cleaned, [pendingID])
+    }
+
+    func testDesiredStateAndPortPersistBeforeReconciliation() throws {
+        let saved = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date()
+        )
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(saved)
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+        client.onReconcile = { snapshot in
+            XCTAssertEqual(try? store.loadInstallation().portals, snapshot)
+        }
+
+        controller.stopPortal(id: portalID)
+        controller.updateLocalAppPort(id: portalID, port: "4321")
+
+        XCTAssertEqual(client.reconciliations.last?.first?.desiredState, .stopped)
+        XCTAssertEqual(client.reconciliations.last?.first?.localAppPort, 4321)
+        XCTAssertEqual(try store.loadInstallation().portals.first?.desiredState, .stopped)
+        XCTAssertEqual(try store.loadInstallation().portals.first?.localAppPort, 4321)
+    }
+
+    func testSingleFlightCoalescesLatestSnapshotAndIgnoresStaleFailure() throws {
+        let saved = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date()
+        )
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(saved)
+        let client = FakePortalHelperClient()
+        client.completeReconciliationImmediately = false
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        controller.stopPortal(id: portalID)
+        controller.startPortal(id: portalID)
+        XCTAssertEqual(client.reconciliations.count, 1)
+
+        client.completeReconciliation(.success(ReconcilePortalsResult(entries: [
+            ReconcilePortalEntry(portalId: portalID, outcome: .startFailed)
+        ])))
+
+        XCTAssertNil(controller.message)
+        XCTAssertEqual(client.reconciliations.count, 2)
+        XCTAssertEqual(client.reconciliations.last?.first?.desiredState, .enabled)
+        client.completeReconciliation(.success(ReconcilePortalsResult(entries: [
+            ReconcilePortalEntry(portalId: portalID, outcome: .converged)
+        ])), at: 1)
+        XCTAssertNil(controller.message)
+    }
+
+    func testInvalidPortEditDoesNotPersistOrReconcile() throws {
+        let saved = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date(),
+            desiredState: .stopped
+        )
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(saved)
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+        let originalReconciliationCount = client.reconciliations.count
+
+        controller.updateLocalAppPort(id: portalID, port: "0")
+
+        XCTAssertEqual(try store.loadInstallation().portals, [saved])
+        XCTAssertEqual(client.reconciliations.count, originalReconciliationCount)
+        XCTAssertEqual(controller.message, "Enter a port from 1 through 65535.")
+    }
+
+    func testAlreadySatisfiedStartAndStopAreHarmless() throws {
+        let saved = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date()
+        )
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(saved)
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        controller.startPortal(id: portalID)
+        XCTAssertEqual(client.reconciliations.count, 1)
+        controller.stopPortal(id: portalID)
+        XCTAssertEqual(client.reconciliations.count, 2)
+        controller.stopPortal(id: portalID)
+
+        XCTAssertEqual(client.reconciliations.count, 2)
+        XCTAssertEqual(try store.loadInstallation().portals.first?.desiredState, .stopped)
+    }
+
+    func testCurrentPartialFailureKeepsCommittedDesiredState() throws {
+        let saved = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date()
+        )
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(saved)
+        let client = FakePortalHelperClient(availability: .connecting)
+        client.completeReconciliationImmediately = false
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        controller.stopPortal(id: portalID)
+        client.connect()
+        client.completeReconciliation(.success(ReconcilePortalsResult(entries: [
+            ReconcilePortalEntry(portalId: portalID, outcome: .closeFailed)
+        ])))
+
+        XCTAssertEqual(controller.portals.first?.desiredState, .stopped)
+        XCTAssertEqual(try store.loadInstallation().portals.first?.desiredState, .stopped)
+        XCTAssertEqual(controller.message, "Some Portals could not be reconciled.")
+    }
+
     func testPresentsOnlyMatchingStructuredStatus() throws {
         let store = PortalStore(rootURL: temporaryRoot())
         let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
@@ -217,7 +374,7 @@ final class PortalControllerTests: XCTestCase {
         controller.addPortal()
 
         XCTAssertEqual(controller.portals.map(\.id), [firstID, secondID])
-        XCTAssertEqual(client.started.map(\.id), [firstID, secondID])
+        XCTAssertEqual(client.reconciliations, [[first], try store.loadInstallation().portals])
         XCTAssertEqual(try store.loadInstallation().portals.map(\.id), [firstID, secondID])
     }
 
@@ -296,7 +453,8 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(controller.pendingPortals.map(\.id), [portalID])
         XCTAssertEqual(controller.portals.first(where: { $0.id == secondID })?.lifecycle, .active)
         XCTAssertEqual(controller.statuses[secondID]?.state, .online)
-        XCTAssertEqual(client.started.map(\.id), [portalID, secondID])
+        XCTAssertEqual(client.reconciliations.first?.map(\.id), [portalID, secondID])
+        XCTAssertEqual(client.reconciliations.last?.map(\.id), [secondID])
     }
 
     func testCompletedCleanupPersistenceFailureKeepsPendingAndUnrelatedPortalEnabled() throws {
@@ -330,7 +488,8 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(persisted.portals.first(where: { $0.id == secondID })?.lifecycle, .active)
         XCTAssertEqual(controller.pendingPortals.map(\.id), [portalID])
         XCTAssertEqual(controller.portals.first(where: { $0.id == secondID })?.lifecycle, .active)
-        XCTAssertEqual(client.started.map(\.id), [portalID, secondID])
+        XCTAssertEqual(client.reconciliations.first?.map(\.id), [portalID, secondID])
+        XCTAssertEqual(client.reconciliations.last?.map(\.id), [secondID])
     }
 
     func testMismatchPersistsTombstoneBeforeCleanupAndRelaunchNeverRestartsIt() throws {
@@ -453,21 +612,35 @@ final class FakePortalHelperClient: PortalHelperClient {
     var availability: HelperAvailability
     var onConnected: (() -> Void)?
     var onEvent: ((PortalHelperEvent) -> Void)?
-    private(set) var started: [PortalConfiguration] = []
+    private(set) var reconciliations: [[PortalConfiguration]] = []
+    var started: [PortalConfiguration] { reconciliations.flatMap { $0 } }
     private(set) var authenticated: [UUID] = []
     private(set) var cleaned: [UUID] = []
     private(set) var discoveryCompletions: [(Result<[LocalAppCandidatePayload], Error>) -> Void] = []
     private(set) var cleanupCompletions: [(Result<Void, Error>) -> Void] = []
+    private(set) var reconciliationCompletions: [(Result<ReconcilePortalsResult, Error>) -> Void] = []
     var completeCleanupImmediately = true
+    var completeReconciliationImmediately = true
     var onCleanup: ((UUID) -> Void)?
+    var onReconcile: (([PortalConfiguration]) -> Void)?
 
     init(availability: HelperAvailability = .connected) {
         self.availability = availability
     }
 
-    func startPortal(_ portal: PortalConfiguration, completion: @escaping (Result<Void, Error>) -> Void) {
-        started.append(portal)
-        completion(.success(()))
+    func reconcilePortals(
+        _ portals: [PortalConfiguration],
+        completion: @escaping (Result<ReconcilePortalsResult, Error>) -> Void
+    ) {
+        reconciliations.append(portals)
+        onReconcile?(portals)
+        if completeReconciliationImmediately {
+            completion(.success(ReconcilePortalsResult(entries: portals.map {
+                ReconcilePortalEntry(portalId: $0.id, outcome: .converged)
+            })))
+        } else {
+            reconciliationCompletions.append(completion)
+        }
     }
 
     func authenticatePortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void) {
@@ -502,5 +675,12 @@ final class FakePortalHelperClient: PortalHelperClient {
 
     func completeCleanup(_ result: Result<Void, Error>, at index: Int = 0) {
         cleanupCompletions[index](result)
+    }
+
+    func completeReconciliation(
+        _ result: Result<ReconcilePortalsResult, Error>,
+        at index: Int = 0
+    ) {
+        reconciliationCompletions[index](result)
     }
 }

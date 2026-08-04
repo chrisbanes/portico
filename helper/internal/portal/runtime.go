@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -23,9 +24,30 @@ const (
 )
 
 type Config struct {
-	ID   string
-	Name string
-	Port uint16
+	ID           string
+	Name         string
+	Port         uint16
+	DesiredState DesiredState
+}
+
+type DesiredState string
+
+const (
+	DesiredStateEnabled DesiredState = "enabled"
+	DesiredStateStopped DesiredState = "stopped"
+)
+
+type ReconcileOutcome string
+
+const (
+	OutcomeConverged   ReconcileOutcome = "converged"
+	OutcomeStartFailed ReconcileOutcome = "startFailed"
+	OutcomeCloseFailed ReconcileOutcome = "closeFailed"
+)
+
+type ReconcileEntry struct {
+	PortalID string           `json:"portalId"`
+	Outcome  ReconcileOutcome `json:"outcome"`
 }
 
 var (
@@ -43,6 +65,16 @@ func (c Config) Validate() error {
 func (c Config) normalized() Config {
 	c.ID = strings.ToLower(c.ID)
 	return c
+}
+
+func (c Config) validateDesired() error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if c.DesiredState != DesiredStateEnabled && c.DesiredState != DesiredStateStopped {
+		return errors.New("invalid portal desired state")
+	}
+	return nil
 }
 
 type Status struct {
@@ -109,29 +141,102 @@ type portalRuntime struct {
 	emit                  func(Event)
 	authenticationPending bool
 	proxy                 *proxyServer
+	isRunning             bool
 }
 
 func NewRuntime(stateRoot string, factory NodeFactory) *Runtime {
 	return &Runtime{stateRoot: stateRoot, factory: factory, portals: make(map[string]*portalRuntime)}
 }
 
-func (r *Runtime) Start(ctx context.Context, config Config, emit func(Event)) error {
+func (r *Runtime) Reconcile(ctx context.Context, configs []Config, emit func(Event)) ([]ReconcileEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if err := config.Validate(); err != nil {
-		return err
+
+	desired := make(map[string]Config, len(configs))
+	for _, config := range configs {
+		if err := config.validateDesired(); err != nil {
+			return nil, err
+		}
+		config = config.normalized()
+		if _, exists := desired[config.ID]; exists {
+			return nil, errors.New("duplicate portal configuration")
+		}
+		desired[config.ID] = config
 	}
-	config = config.normalized()
-	if _, exists := r.portals[config.ID]; exists {
-		return errors.New("portal is already running")
+
+	portalIDs := make([]string, 0, len(desired)+len(r.portals))
+	seen := make(map[string]struct{}, len(desired)+len(r.portals))
+	for portalID := range desired {
+		portalIDs = append(portalIDs, portalID)
+		seen[portalID] = struct{}{}
 	}
+	for portalID := range r.portals {
+		if _, exists := seen[portalID]; !exists {
+			portalIDs = append(portalIDs, portalID)
+		}
+	}
+	sort.Strings(portalIDs)
+
+	entries := make([]ReconcileEntry, 0, len(portalIDs))
+	for _, portalID := range portalIDs {
+		config, included := desired[portalID]
+		outcome := r.reconcilePortalLocked(ctx, portalID, config, included, emit)
+		entries = append(entries, ReconcileEntry{PortalID: portalID, Outcome: outcome})
+	}
+	return entries, nil
+}
+
+func (r *Runtime) reconcilePortalLocked(
+	ctx context.Context,
+	portalID string,
+	config Config,
+	included bool,
+	emit func(Event),
+) ReconcileOutcome {
+	portal := r.portals[portalID]
+	if !included || config.DesiredState == DesiredStateStopped {
+		if portal == nil {
+			return OutcomeConverged
+		}
+		if err := portal.close(); err != nil {
+			return OutcomeCloseFailed
+		}
+		delete(r.portals, portalID)
+		return OutcomeConverged
+	}
+
+	if portal == nil {
+		return r.startPortalLocked(ctx, config, emit)
+	}
+	if portal.config == nil || !portal.isRunning {
+		if err := portal.close(); err != nil {
+			return OutcomeStartFailed
+		}
+		delete(r.portals, portalID)
+		return r.startPortalLocked(ctx, config, emit)
+	}
+	if portal.config.Name != config.Name {
+		return OutcomeStartFailed
+	}
+	if portal.config.Port != config.Port {
+		if err := portal.updatePort(config.Port); err != nil {
+			return OutcomeStartFailed
+		}
+	}
+	return OutcomeConverged
+}
+
+func (r *Runtime) startPortalLocked(ctx context.Context, config Config, emit func(Event)) ReconcileOutcome {
 	node := r.factory(filepath.Join(r.stateRoot, config.ID), config.Name)
 	portal := &portalRuntime{}
-	if err := portal.start(ctx, config, node, emit); err != nil {
-		return err
-	}
 	r.portals[config.ID] = portal
-	return nil
+	if err := portal.start(ctx, config, node, emit); err != nil {
+		if closeErr := portal.close(); closeErr == nil {
+			delete(r.portals, config.ID)
+		}
+		return OutcomeStartFailed
+	}
+	return OutcomeConverged
 }
 
 func (r *Runtime) Authenticate(ctx context.Context, portalID string) error {
@@ -176,8 +281,11 @@ func (r *Runtime) Close() error {
 	defer r.mu.Unlock()
 	var errs []error
 	for portalID, portal := range r.portals {
-		errs = append(errs, portal.close())
-		delete(r.portals, portalID)
+		if err := portal.close(); err != nil {
+			errs = append(errs, err)
+		} else {
+			delete(r.portals, portalID)
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -209,29 +317,44 @@ func validatedStateDirectory(stateRoot, portalID string) (string, error) {
 func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emit func(Event)) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.config = &config
+	r.node = node
+	r.emit = emit
 	if err := node.Start(); err != nil {
-		_ = node.Close()
 		return errors.New("start portal")
 	}
 	watchContext, cancel := context.WithCancel(ctx)
 	watcher, err := node.Watch(watchContext)
 	if err != nil {
 		cancel()
-		_ = node.Close()
 		return errors.New("watch portal status")
 	}
-	r.config = &config
-	r.node = node
 	r.watcher = watcher
 	r.cancel = cancel
 	r.runContext = watchContext
-	r.emit = emit
 	if err := r.emitStatusLocked(ctx); err != nil {
-		r.closeLocked()
 		return err
 	}
 	r.watchDone.Add(1)
 	go r.watch(watchContext, watcher)
+	r.isRunning = true
+	return nil
+}
+
+func (r *portalRuntime) updatePort(port uint16) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.config == nil {
+		return errors.New("portal is not running")
+	}
+	handler, err := newLoopbackProxy(int(port))
+	if err != nil {
+		return err
+	}
+	if r.proxy != nil {
+		r.proxy.replaceHandler(handler)
+	}
+	r.config.Port = port
 	return nil
 }
 
@@ -260,26 +383,35 @@ func (r *portalRuntime) closeLocked() error {
 	var proxyErr error
 	if r.cancel != nil {
 		r.cancel()
+		r.cancel = nil
 	}
 	if r.watcher != nil {
 		_ = r.watcher.Close()
+		r.watcher = nil
 	}
 	if r.proxy != nil {
 		proxyErr = r.proxy.close()
+		if proxyErr == nil {
+			r.proxy = nil
+		}
 	}
 	var nodeErr error
 	if r.node != nil {
 		nodeErr = r.node.Close()
+		if nodeErr == nil {
+			r.node = nil
+		}
 	}
-	r.config = nil
-	r.node = nil
-	r.watcher = nil
-	r.cancel = nil
-	r.runContext = nil
-	r.emit = nil
+	err := errors.Join(proxyErr, nodeErr)
+	r.isRunning = false
+	if err == nil {
+		r.config = nil
+		r.runContext = nil
+		r.emit = nil
+		r.proxy = nil
+	}
 	r.authenticationPending = false
-	r.proxy = nil
-	return errors.Join(proxyErr, nodeErr)
+	return err
 }
 
 func (r *portalRuntime) watch(ctx context.Context, watcher Watcher) {

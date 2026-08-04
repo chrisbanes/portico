@@ -2,43 +2,65 @@ import XCTest
 @testable import Portico
 
 final class HelperProtocolTests: XCTestCase {
-    func testDecodesVersionOneHandshakeResponse() throws {
-        let fixture = Data(#"{"version":1,"requestId":"request-1","result":{"protocolVersion":1}}"#.utf8)
+    func testVersionTwoReconciliationFixturesRoundTrip() throws {
+        let requestFixture = #"{"version":2,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","localAppPort":8787,"desiredState":"enabled"},{"portalId":"5EA74329-3144-4BA2-925F-138D14D61FCC","portalName":"atlas","localAppPort":8788,"desiredState":"stopped"}]}}"#
+        let responseFixture = #"{"version":2,"requestId":"reconcile-1","result":{"entries":[{"portalId":"5EA74329-3144-4BA2-925F-138D14D61FCC","outcome":"converged"},{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","outcome":"startFailed"}]}}"#
+
+        try assertRoundTrip(requestFixture, as: HelperRequest<ReconcilePortalsPayload>.self)
+        let response = try JSONDecoder().decode(
+            HelperResponse<ReconcilePortalsResult>.self,
+            from: Data(responseFixture.utf8)
+        )
+
+        XCTAssertEqual(
+            response.result?.entries,
+            [
+                ReconcilePortalEntry(
+                    portalId: UUID(uuidString: "5ea74329-3144-4ba2-925f-138d14d61fcc")!,
+                    outcome: .converged
+                ),
+                ReconcilePortalEntry(
+                    portalId: UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!,
+                    outcome: .startFailed
+                ),
+            ]
+        )
+        try assertRoundTrip(responseFixture, as: HelperResponse<ReconcilePortalsResult>.self)
+    }
+
+    func testDecodesVersionTwoHandshakeResponse() throws {
+        let fixture = Data(#"{"version":2,"requestId":"request-1","result":{"protocolVersion":2}}"#.utf8)
 
         let response = try JSONDecoder().decode(HelperResponse<HandshakeResult>.self, from: fixture)
 
-        XCTAssertEqual(response.version, 1)
+        XCTAssertEqual(response.version, 2)
         XCTAssertEqual(response.requestId, "request-1")
-        XCTAssertEqual(response.result?.protocolVersion, 1)
+        XCTAssertEqual(response.result?.protocolVersion, 2)
         XCTAssertNil(response.error)
     }
 
     func testDecodesStructuredProtocolError() throws {
-        let fixture = Data(#"{"version":1,"requestId":"request-2","error":{"code":"unknownCommand","message":"unsupported command"}}"#.utf8)
+        let fixture = Data(#"{"version":2,"requestId":"request-2","error":{"code":"unknownCommand","message":"unsupported command"}}"#.utf8)
 
         let response = try JSONDecoder().decode(HelperResponse<HandshakeResult>.self, from: fixture)
 
-        XCTAssertEqual(response.version, 1)
+        XCTAssertEqual(response.version, 2)
         XCTAssertEqual(response.requestId, "request-2")
         XCTAssertNil(response.result)
         XCTAssertEqual(response.error, HelperProtocolError(code: "unknownCommand", message: "unsupported command"))
     }
 
-    func testVersionOnePortalFixturesRoundTrip() throws {
+    func testVersionTwoPortalFixturesRoundTrip() throws {
         let portalID = UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!
         try assertRoundTrip(
-            #"{"version":1,"requestId":"start-1","command":"startPortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","localAppPort":8787}}"#,
-            as: HelperRequest<StartPortalPayload>.self
-        )
-        try assertRoundTrip(
-            #"{"version":1,"requestId":"auth-1","command":"authenticatePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}"#,
+            #"{"version":2,"requestId":"auth-1","command":"authenticatePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}"#,
             as: HelperRequest<AuthenticatePortalPayload>.self
         )
         try assertRoundTrip(
-            #"{"version":1,"requestId":"cleanup-1","command":"cleanupRejectedPortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}"#,
+            #"{"version":2,"requestId":"cleanup-1","command":"cleanupRejectedPortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}"#,
             as: HelperRequest<CleanupRejectedPortalPayload>.self
         )
-        let statusFixture = #"{"version":1,"event":"portalStatus","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"state":"online","stableNodeId":"node-1","assignedName":"hermes-1","portalURL":"https:\/\/hermes-1.example.ts.net\/","addresses":["100.64.0.1","fd7a:115c:a1e0::1"],"tailnetName":"opaque-identity-do-not-display","magicDNSSuffix":"example.ts.net"}}"#
+        let statusFixture = #"{"version":2,"event":"portalStatus","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"state":"online","stableNodeId":"node-1","assignedName":"hermes-1","portalURL":"https:\/\/hermes-1.example.ts.net\/","addresses":["100.64.0.1","fd7a:115c:a1e0::1"],"tailnetName":"opaque-identity-do-not-display","magicDNSSuffix":"example.ts.net"}}"#
         let status = try JSONDecoder().decode(HelperEvent<PortalStatusPayload>.self, from: Data(statusFixture.utf8))
         XCTAssertEqual(status.portalId, portalID)
         XCTAssertEqual(status.payload.state, .online)
@@ -47,12 +69,12 @@ final class HelperProtocolTests: XCTestCase {
         XCTAssertEqual(status.payload.magicDNSSuffix, "example.ts.net")
         try assertRoundTrip(statusFixture, as: HelperEvent<PortalStatusPayload>.self)
 
-        let authenticationFixture = #"{"version":1,"event":"authenticationURL","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"url":"https:\/\/login.tailscale.com\/a\/secret"}}"#
+        let authenticationFixture = #"{"version":2,"event":"authenticationURL","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"url":"https:\/\/login.tailscale.com\/a\/secret"}}"#
         try assertRoundTrip(authenticationFixture, as: HelperEvent<AuthenticationURLPayload>.self)
     }
 
-    func testDecodesVersionOneDiscoverLocalAppsResult() throws {
-        let fixture = Data(#"{"version":1,"requestId":"discover-1","result":{"candidates":[{"localAppPort":3000,"processLabel":"node","suggestedPortalName":"hermes"},{"localAppPort":8787,"processLabel":"python3"}]}}"#.utf8)
+    func testDecodesVersionTwoDiscoverLocalAppsResult() throws {
+        let fixture = Data(#"{"version":2,"requestId":"discover-1","result":{"candidates":[{"localAppPort":3000,"processLabel":"node","suggestedPortalName":"hermes"},{"localAppPort":8787,"processLabel":"python3"}]}}"#.utf8)
 
         let response = try JSONDecoder().decode(HelperResponse<DiscoverLocalAppsResult>.self, from: fixture)
 

@@ -46,6 +46,10 @@ type proxyServer struct {
 	listener net.Listener
 	handler  *trackedHandler
 	done     chan error
+	closeMu  sync.Mutex
+	stopOnce sync.Once
+	doneOnce sync.Once
+	serveErr error
 }
 
 func startProxyServer(ctx context.Context, listener net.Listener, handler http.Handler) *proxyServer {
@@ -72,15 +76,21 @@ func startProxyServer(ctx context.Context, listener net.Listener, handler http.H
 }
 
 func (p *proxyServer) close() error {
-	p.cancel()
-	p.handler.stopAccepting()
+	p.closeMu.Lock()
+	defer p.closeMu.Unlock()
+	p.stopOnce.Do(func() {
+		p.cancel()
+		p.handler.stopAccepting()
+	})
 	shutdownContext, cancel := context.WithTimeout(context.Background(), proxyShutdownTimeout)
-	shutdownErr := p.server.Shutdown(shutdownContext)
+	_ = p.server.Shutdown(shutdownContext)
 	cancel()
 	closeErr := p.server.Close()
 	listenerErr := p.listener.Close()
 	p.handler.wait()
-	serveErr := <-p.done
+	p.doneOnce.Do(func() { p.serveErr = <-p.done })
+	serveErr := p.serveErr
+	p.serveErr = nil
 	if errors.Is(closeErr, http.ErrServerClosed) || errors.Is(closeErr, net.ErrClosed) {
 		closeErr = nil
 	}
@@ -90,7 +100,11 @@ func (p *proxyServer) close() error {
 	if errors.Is(serveErr, http.ErrServerClosed) || errors.Is(serveErr, net.ErrClosed) {
 		serveErr = nil
 	}
-	return errors.Join(shutdownErr, closeErr, listenerErr, serveErr)
+	return errors.Join(closeErr, listenerErr, serveErr)
+}
+
+func (p *proxyServer) replaceHandler(handler http.Handler) {
+	p.handler.replace(handler)
 }
 
 type trackedHandler struct {
@@ -107,10 +121,17 @@ func (h *trackedHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 		return
 	}
+	handler := h.handler
 	h.active.Add(1)
 	h.mu.Unlock()
 	defer h.active.Done()
-	h.handler.ServeHTTP(writer, request)
+	handler.ServeHTTP(writer, request)
+}
+
+func (h *trackedHandler) replace(handler http.Handler) {
+	h.mu.Lock()
+	h.handler = handler
+	h.mu.Unlock()
 }
 
 func (h *trackedHandler) stopAccepting() {
