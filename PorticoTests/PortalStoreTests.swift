@@ -291,6 +291,36 @@ final class PortalStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.save(portal))
     }
 
+    func testVersionThreePersistenceUsesTheLocalAppPortAdapter() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let portal = PortalConfiguration(
+            id: UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date(timeIntervalSince1970: 1_786_000_000)
+        )
+
+        try store.save(InstallationRecord(portals: [portal]))
+
+        let saved = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: store.installationURL)) as? [String: Any]
+        )
+        let savedPortal = try XCTUnwrap((saved["portals"] as? [[String: Any]])?.first)
+        XCTAssertEqual(savedPortal["localAppPort"] as? Int, 8787)
+        XCTAssertNil(savedPortal["destination"])
+        XCTAssertEqual(try store.loadInstallation().portals.first?.destination, portal.destination)
+    }
+
+    func testVersionThreeRejectsAnInvalidLocalAppPort() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
+        try Data(
+            #"{"version":3,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":0,"createdAt":807692800,"lifecycle":"active"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#.utf8
+        ).write(to: store.installationURL)
+
+        XCTAssertThrowsError(try store.loadInstallation())
+    }
+
     func testSavingFirstPortalPreservesInstallationBindingAndAlerts() throws {
         let store = PortalStore(rootURL: temporaryRoot())
         let alert = InstallationAlert(

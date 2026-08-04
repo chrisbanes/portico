@@ -342,9 +342,11 @@ final class PortalController: ObservableObject {
             message = "Enter a port from 1 through 65535."
             return
         }
-        guard installation.portals[index].localAppPort != localAppPort else { return }
+        guard installation.portals[index].destination.localAppPort != localAppPort,
+              let destination = PortalDestination(localAppPort: localAppPort)
+        else { return }
         var updated = installation
-        updated.portals[index].localAppPort = localAppPort
+        updated.portals[index].destination = destination
         _ = savePortalOperation(updated)
     }
 
