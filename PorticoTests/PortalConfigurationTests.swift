@@ -2,6 +2,12 @@ import XCTest
 @testable import Portico
 
 final class PortalConfigurationTests: XCTestCase {
+    func testLocalAppPortalDestinationAcceptsOnlyValidPorts() throws {
+        XCTAssertEqual(try XCTUnwrap(PortalDestination(localAppPort: 1)).localAppPort, 1)
+        XCTAssertEqual(try XCTUnwrap(PortalDestination(localAppPort: 65535)).localAppPort, 65535)
+        XCTAssertNil(PortalDestination(localAppPort: 0))
+    }
+
     func testVersionThreeInstallationDefaultsRequireLoggingChoiceAndHaveNotOfferedLogin() {
         let installation = InstallationRecord()
 

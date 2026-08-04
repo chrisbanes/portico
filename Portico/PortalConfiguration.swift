@@ -1,13 +1,53 @@
 import Foundation
 
+struct PortalDestination: Equatable {
+    let localAppPort: UInt16
+
+    init?(localAppPort: UInt16) {
+        guard localAppPort > 0 else { return nil }
+        self.localAppPort = localAppPort
+    }
+}
+
 struct PortalConfiguration: Codable, Equatable {
     let id: UUID
     let name: String
-    var localAppPort: UInt16
+    var destination: PortalDestination
     let createdAt: Date
     var desiredState: PortalDesiredState = .enabled
     var lifecycle: PortalLifecycle = .active
     var removalAssignedName: String?
+
+    init(
+        id: UUID,
+        name: String,
+        localAppPort: UInt16,
+        createdAt: Date,
+        desiredState: PortalDesiredState = .enabled,
+        lifecycle: PortalLifecycle = .active,
+        removalAssignedName: String? = nil
+    ) {
+        guard let destination = PortalDestination(localAppPort: localAppPort) else {
+            preconditionFailure("Portal destinations require a port from 1 through 65535.")
+        }
+        self.id = id
+        self.name = name
+        self.destination = destination
+        self.createdAt = createdAt
+        self.desiredState = desiredState
+        self.lifecycle = lifecycle
+        self.removalAssignedName = removalAssignedName
+    }
+
+    var localAppPort: UInt16 {
+        get { destination.localAppPort }
+        set {
+            guard let destination = PortalDestination(localAppPort: newValue) else {
+                preconditionFailure("Portal destinations require a port from 1 through 65535.")
+            }
+            self.destination = destination
+        }
+    }
 }
 
 enum PortalDesiredState: String, Codable, Equatable {
@@ -30,7 +70,15 @@ extension PortalConfiguration {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
-        localAppPort = try container.decode(UInt16.self, forKey: .localAppPort)
+        let localAppPort = try container.decode(UInt16.self, forKey: .localAppPort)
+        guard let destination = PortalDestination(localAppPort: localAppPort) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .localAppPort,
+                in: container,
+                debugDescription: "Portal destinations require a port from 1 through 65535."
+            )
+        }
+        self.destination = destination
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         desiredState = try container.contains(.desiredState)
             ? container.decode(PortalDesiredState.self, forKey: .desiredState)
@@ -45,7 +93,7 @@ extension PortalConfiguration {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(name, forKey: .name)
-        try container.encode(localAppPort, forKey: .localAppPort)
+        try container.encode(destination.localAppPort, forKey: .localAppPort)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(desiredState, forKey: .desiredState)
         try container.encode(lifecycle, forKey: .lifecycle)
