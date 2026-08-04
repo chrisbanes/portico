@@ -70,6 +70,47 @@ func TestRemoteAppHTTPProxyUsesConfiguredAuthority(t *testing.T) {
 	}
 }
 
+func TestRemoteAppHTTPProxyCanonicalizesForwardingHeaders(t *testing.T) {
+	received := make(chan *http.Request, 1)
+	remote := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		received <- request.Clone(request.Context())
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer remote.Close()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(remote.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, strings.TrimPrefix(remote.URL, "http://"))
+	}}
+	proxy := newRemoteProxy(&url.URL{Scheme: "http", Host: "app.example.com:" + port}, transport)
+	request := httptest.NewRequest(http.MethodGet, "https://portal.example.ts.net/app", nil)
+	request.RemoteAddr = "100.64.0.7:54321"
+	request.Header.Set("Forwarded", "for=attacker;host=attacker.example;proto=http")
+	request.Header.Set("X-Forwarded-For", "192.0.2.1")
+	request.Header.Set("X-Forwarded-Host", "attacker.example")
+	request.Header.Set("X-Forwarded-Proto", "http")
+	proxy.ServeHTTP(httptest.NewRecorder(), request)
+
+	got := <-received
+	if got.Host != "app.example.com:"+port {
+		t.Fatalf("Remote App Host = %q, want configured authority", got.Host)
+	}
+	if forwarded := got.Header.Get("Forwarded"); forwarded != "" {
+		t.Fatalf("Forwarded = %q, want removed", forwarded)
+	}
+	if got := got.Header.Values("X-Forwarded-For"); len(got) != 1 || got[0] != "100.64.0.7" {
+		t.Fatalf("X-Forwarded-For = %q, want actual client address", got)
+	}
+	if got := got.Header.Values("X-Forwarded-Host"); len(got) != 1 || got[0] != "portal.example.ts.net" {
+		t.Fatalf("X-Forwarded-Host = %q, want public Portal host", got)
+	}
+	if got := got.Header.Values("X-Forwarded-Proto"); len(got) != 1 || got[0] != "https" {
+		t.Fatalf("X-Forwarded-Proto = %q, want HTTPS", got)
+	}
+}
+
 func TestRemoteAppHTTPSProxyUsesTrustedTestTransport(t *testing.T) {
 	remote := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		_, _ = io.WriteString(writer, "trusted TLS")
@@ -88,6 +129,273 @@ func TestRemoteAppHTTPSProxyUsesTrustedTestTransport(t *testing.T) {
 	proxy.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://portal.example.ts.net/", nil))
 	if response.Code != http.StatusOK || response.Body.String() != "trusted TLS" {
 		t.Fatalf("response = (%d, %q), want trusted HTTPS Remote App", response.Code, response.Body.String())
+	}
+}
+
+func TestRemoteAppHTTPSProxyCanonicalizesForwardingHeaders(t *testing.T) {
+	received := make(chan *http.Request, 1)
+	remote := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		received <- request.Clone(request.Context())
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer remote.Close()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(remote.URL, "https://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := remote.Client().Transport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, strings.TrimPrefix(remote.URL, "https://"))
+	}
+	proxy := newRemoteProxy(&url.URL{Scheme: "https", Host: "app.example.com:" + port}, transport)
+	request := httptest.NewRequest(http.MethodGet, "https://portal.example.ts.net/app", nil)
+	request.RemoteAddr = "100.64.0.7:54321"
+	request.Header.Set("Forwarded", "for=attacker;host=attacker.example;proto=http")
+	request.Header.Set("X-Forwarded-For", "192.0.2.1")
+	request.Header.Set("X-Forwarded-Host", "attacker.example")
+	request.Header.Set("X-Forwarded-Proto", "http")
+	proxy.ServeHTTP(httptest.NewRecorder(), request)
+
+	got := <-received
+	if got.Host != "app.example.com:"+port {
+		t.Fatalf("Remote App Host = %q, want configured authority", got.Host)
+	}
+	if got.Header.Get("Forwarded") != "" || got.Header.Get("X-Forwarded-For") != "100.64.0.7" ||
+		got.Header.Get("X-Forwarded-Host") != "portal.example.ts.net" || got.Header.Get("X-Forwarded-Proto") != "https" {
+		t.Fatalf("forwarding headers = %#v, want canonical HTTPS values", got.Header)
+	}
+}
+
+func TestRemoteAppProxyReturnsOnlyGenericBadGatewayForDestinationFailures(t *testing.T) {
+	const providerSecret = "provider-error-do-not-expose"
+	for _, test := range []struct {
+		name      string
+		newTarget func(*testing.T) (*url.URL, http.RoundTripper)
+	}{
+		{
+			name: "DNS",
+			newTarget: func(*testing.T) (*url.URL, http.RoundTripper) {
+				transport := &http.Transport{
+					DialContext: safeRemoteDialer(func(context.Context, string, string) ([]netip.Addr, error) {
+						return nil, errors.New("DNS: " + providerSecret)
+					}),
+				}
+				return &url.URL{Scheme: "https", Host: "app.example.com:443"}, transport
+			},
+		},
+		{
+			name: "connection",
+			newTarget: func(*testing.T) (*url.URL, http.RoundTripper) {
+				transport := &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
+					return nil, errors.New("connection: " + providerSecret)
+				}}
+				return &url.URL{Scheme: "https", Host: "app.example.com:443"}, transport
+			},
+		},
+		{
+			name: "TLS",
+			newTarget: func(t *testing.T) (*url.URL, http.RoundTripper) {
+				remote := httptest.NewTLSServer(http.NotFoundHandler())
+				t.Cleanup(remote.Close)
+				target, err := url.Parse(remote.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return target, http.DefaultTransport.(*http.Transport).Clone()
+			},
+		},
+		{
+			name: "response",
+			newTarget: func(*testing.T) (*url.URL, http.RoundTripper) {
+				return &url.URL{Scheme: "https", Host: "app.example.com:443"}, responseFailureRoundTripper{
+					err: errors.New("response: " + providerSecret),
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target, transport := test.newTarget(t)
+			assertRemoteAppFailureIsRedacted(t, newRemoteProxy(target, transport), providerSecret)
+		})
+	}
+}
+
+func assertRemoteAppFailureIsRedacted(t *testing.T, proxy http.Handler, providerSecret string) {
+	t.Helper()
+	const requestSecret = "request-body-do-not-log"
+	var logs bytes.Buffer
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
+	previousPrefix := log.Prefix()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+		log.SetPrefix(previousPrefix)
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "https://portal.example.ts.net/", strings.NewReader(requestSecret))
+	request.Header.Set("Authorization", "Bearer "+requestSecret)
+	response := httptest.NewRecorder()
+	proxy.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway || response.Body.String() != "Bad Gateway\n" {
+		t.Fatalf("response = (%d, %q), want generic bad gateway", response.Code, response.Body.String())
+	}
+	for _, secret := range []string{providerSecret, requestSecret} {
+		if strings.Contains(response.Body.String(), secret) || strings.Contains(logs.String(), secret) {
+			t.Fatalf("secret %q leaked", secret)
+		}
+	}
+}
+
+func TestRemoteAppProxyStreamsImmediately(t *testing.T) {
+	for _, useTLS := range []bool{false, true} {
+		t.Run(strconv.FormatBool(useTLS), func(t *testing.T) {
+			release := make(chan struct{})
+			remote := startRemoteAppServer(t, useTLS, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				const firstWrite = "first chunk\n"
+				writer.Header().Set("Content-Length", strconv.Itoa(len(firstWrite)+len("finished\n")))
+				_, _ = io.WriteString(writer, firstWrite)
+				writer.(http.Flusher).Flush()
+				<-release
+				_, _ = io.WriteString(writer, "finished\n")
+			}))
+			proxy := newTestRemoteProxyServer(t, remote)
+
+			response, err := (&http.Client{Timeout: 2 * time.Second}).Get(proxy.URL)
+			if err != nil {
+				close(release)
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			delivered := make([]byte, len("first chunk\n"))
+			if _, err := io.ReadFull(response.Body, delivered); err != nil {
+				close(release)
+				t.Fatal(err)
+			}
+			if string(delivered) != "first chunk\n" {
+				close(release)
+				t.Fatalf("first delivery = %q, want response before Remote App completion", delivered)
+			}
+			close(release)
+		})
+	}
+}
+
+func TestRemoteAppProxyFlushesSSEImmediately(t *testing.T) {
+	for _, useTLS := range []bool{false, true} {
+		t.Run(strconv.FormatBool(useTLS), func(t *testing.T) {
+			release := make(chan struct{})
+			remote := startRemoteAppServer(t, useTLS, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(writer, "data: first\n\n")
+				writer.(http.Flusher).Flush()
+				<-release
+			}))
+			proxy := newTestRemoteProxyServer(t, remote)
+
+			response, err := (&http.Client{Timeout: 2 * time.Second}).Get(proxy.URL)
+			if err != nil {
+				close(release)
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			delivered := make([]byte, len("data: first\n\n"))
+			if _, err := io.ReadFull(response.Body, delivered); err != nil {
+				close(release)
+				t.Fatal(err)
+			}
+			if string(delivered) != "data: first\n\n" {
+				close(release)
+				t.Fatalf("first delivery = %q, want SSE event before Remote App completion", delivered)
+			}
+			close(release)
+		})
+	}
+}
+
+func TestRemoteAppProxyProxiesWebSocketBidirectionally(t *testing.T) {
+	for _, useTLS := range []bool{false, true} {
+		t.Run(strconv.FormatBool(useTLS), func(t *testing.T) {
+			remote := startRemoteAppServer(t, useTLS, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				connection, err := websocket.Accept(writer, request, nil)
+				if err != nil {
+					return
+				}
+				defer connection.CloseNow()
+				messageType, message, err := connection.Read(request.Context())
+				if err != nil {
+					return
+				}
+				_ = connection.Write(request.Context(), messageType, append([]byte("app-to-client:"), message...))
+			}))
+			proxy := newTestRemoteProxyServer(t, remote)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			connection, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(proxy.URL, "http"), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.CloseNow()
+			if err := connection.Write(ctx, websocket.MessageText, []byte("client-to-app")); err != nil {
+				t.Fatal(err)
+			}
+			messageType, message, err := connection.Read(ctx)
+			if err != nil || messageType != websocket.MessageText || string(message) != "app-to-client:client-to-app" {
+				t.Fatalf("WebSocket response = (%v, %q, %v), want bidirectional Remote App message", messageType, message, err)
+			}
+		})
+	}
+}
+
+func TestRemoteAppProxyPropagatesCancellation(t *testing.T) {
+	for _, useTLS := range []bool{false, true} {
+		t.Run(strconv.FormatBool(useTLS), func(t *testing.T) {
+			requestEntered := make(chan struct{})
+			requestCanceled := make(chan struct{})
+			remote := startRemoteAppServer(t, useTLS, http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+				close(requestEntered)
+				<-request.Context().Done()
+				close(requestCanceled)
+			}))
+			proxy := newTestRemoteProxyServer(t, remote)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, proxy.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestDone := make(chan error, 1)
+			go func() {
+				response, err := http.DefaultClient.Do(request)
+				if response != nil {
+					_ = response.Body.Close()
+				}
+				requestDone <- err
+			}()
+			select {
+			case <-requestEntered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Remote App request did not start")
+			}
+			cancel()
+			select {
+			case <-requestCanceled:
+			case <-time.After(2 * time.Second):
+				t.Fatal("client cancellation did not reach Remote App")
+			}
+			select {
+			case err := <-requestDone:
+				if err == nil {
+					t.Fatal("client request completed without cancellation error")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("client request did not finish after cancellation")
+			}
+		})
 	}
 }
 
@@ -339,6 +647,41 @@ func newTestProxyServer(t *testing.T, localAppURL string) *httptest.Server {
 	return httptest.NewServer(proxy)
 }
 
+func startRemoteAppServer(t *testing.T, useTLS bool, handler http.Handler) *httptest.Server {
+	t.Helper()
+	server := httptest.NewUnstartedServer(handler)
+	if useTLS {
+		server.StartTLS()
+	} else {
+		server.Start()
+	}
+	t.Cleanup(server.Close)
+	return server
+}
+
+func newTestRemoteProxyServer(t *testing.T, remote *httptest.Server) *httptest.Server {
+	t.Helper()
+	remoteURL, err := url.Parse(remote.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(remoteURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if remoteURL.Scheme == "https" {
+		transport = remote.Client().Transport.(*http.Transport).Clone()
+	}
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, remoteURL.Host)
+	}
+	target := &url.URL{Scheme: remoteURL.Scheme, Host: "app.example.com:" + port}
+	proxy := httptest.NewServer(newRemoteProxy(target, transport))
+	t.Cleanup(proxy.Close)
+	return proxy
+}
+
 func localAppPort(t *testing.T, localAppURL string) (int, string) {
 	t.Helper()
 	_, portText, err := net.SplitHostPort(strings.TrimPrefix(localAppURL, "http://"))
@@ -386,14 +729,18 @@ func TestLoopbackDestinationCannotContainHostSchemePathOrURL(t *testing.T) {
 	}
 }
 
-func TestProxyCloseCanRetryAfterUnconfirmedListenerClose(t *testing.T) {
+func TestRemoteProxyCloseCanRetryAfterUnconfirmedListenerClose(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	flaky := &flakyCloseListener{Listener: listener}
 	flaky.failuresRemaining.Store(2)
-	proxy := startProxyServer(context.Background(), flaky, http.NotFoundHandler())
+	proxy := startProxyServer(
+		context.Background(),
+		flaky,
+		newRemoteProxy(&url.URL{Scheme: "https", Host: "app.example.com:443"}, &http.Transport{}),
+	)
 
 	if err := proxy.close(); err == nil {
 		t.Fatal("first close succeeded, want unconfirmed close failure")
@@ -410,9 +757,69 @@ func TestProxyCloseCanRetryAfterUnconfirmedListenerClose(t *testing.T) {
 	}
 }
 
+func TestProxyCloseClosesRemoteTransportIdleConnections(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "ok")
+	}))
+	defer remote.Close()
+	remoteURL, err := url.Parse(remote.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(remoteURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &closeTrackingTransport{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, remoteURL.Host)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := startProxyServer(context.Background(), listener, newRemoteProxy(
+		&url.URL{Scheme: "http", Host: "app.example.com:" + port}, transport,
+	))
+	response, err := http.Get("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+
+	if err := proxy.close(); err != nil {
+		t.Fatal(err)
+	}
+	if !transport.closed.Load() {
+		t.Fatal("Remote App transport idle connections were not closed")
+	}
+}
+
 type flakyCloseListener struct {
 	net.Listener
 	failuresRemaining atomic.Int32
+}
+
+type responseFailureRoundTripper struct {
+	err error
+}
+
+func (r responseFailureRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("response-body-do-not-log")),
+	}, r.err
+}
+
+type closeTrackingTransport struct {
+	*http.Transport
+	closed atomic.Bool
+}
+
+func (t *closeTrackingTransport) CloseIdleConnections() {
+	t.closed.Store(true)
+	t.Transport.CloseIdleConnections()
 }
 
 func (l *flakyCloseListener) Close() error {
