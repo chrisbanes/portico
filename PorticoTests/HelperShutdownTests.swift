@@ -15,7 +15,7 @@ final class HelperShutdownTests: XCTestCase {
             shutdownGraceInterval: 1
         )
         supervisor.start()
-        launcher.receive(line: #"{"version":2,"requestId":"handshake-1","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         var completionCount = 0
 
         supervisor.shutdown { completionCount += 1 }
@@ -28,7 +28,7 @@ final class HelperShutdownTests: XCTestCase {
         XCTAssertEqual(request.requestId, "shutdown-1")
         XCTAssertEqual(request.command, .shutdown)
 
-        launcher.receive(line: #"{"version":2,"requestId":"shutdown-1","result":{"accepted":true}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"shutdown-1","result":{"accepted":true}}"#)
         XCTAssertEqual(completionCount, 0)
         launcher.exit(status: 0)
 
@@ -47,7 +47,7 @@ final class HelperShutdownTests: XCTestCase {
             shutdownGraceInterval: 0.01
         )
         supervisor.start()
-        launcher.receive(line: #"{"version":2,"requestId":"handshake-1","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         var completionCount = 0
 
         supervisor.shutdown { completionCount += 1 }
@@ -84,7 +84,7 @@ final class HelperShutdownTests: XCTestCase {
             shutdownGraceInterval: 1
         )
         supervisor.start()
-        launcher.receive(line: #"{"version":2,"requestId":"handshake-1","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         var completionCount = 0
 
         supervisor.shutdown { completionCount += 1 }

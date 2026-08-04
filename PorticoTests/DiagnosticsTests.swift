@@ -41,14 +41,14 @@ final class DiagnosticsTests: XCTestCase {
             isStale: true
         )
         let report = DiagnosticReportRenderer.render(
-            versions: DiagnosticVersions(porticoShort: "1.2", porticoBuild: "34", helperProtocol: 2),
+            versions: DiagnosticVersions(porticoShort: "1.2", porticoBuild: "34", helperProtocol: 3),
             helper: .failed,
             portals: [facts],
             history: history.entries
         )
 
         for value in [
-            "Portico 1.2 (34)", "Helper protocol 2", "hermes", "hermes-1",
+            "Portico 1.2 (34)", "Helper protocol 3", "hermes", "hermes-1",
             "https://hermes-1.example.ts.net/", "100.64.0.1", "example.ts.net",
             "Desired: enabled", "Tailscale: online", "Reachability: reachable", "Facts: stale",
             "Helper: unavailable",

@@ -7,6 +7,7 @@ struct PortalConfiguration: Codable, Equatable {
     let createdAt: Date
     var desiredState: PortalDesiredState = .enabled
     var lifecycle: PortalLifecycle = .active
+    var removalAssignedName: String?
 }
 
 enum PortalDesiredState: String, Codable, Equatable {
@@ -22,6 +23,7 @@ extension PortalConfiguration {
         case createdAt
         case desiredState
         case lifecycle
+        case removalAssignedName
     }
 
     init(from decoder: Decoder) throws {
@@ -34,6 +36,9 @@ extension PortalConfiguration {
             ? container.decode(PortalDesiredState.self, forKey: .desiredState)
             : .enabled
         lifecycle = try container.decode(PortalLifecycle.self, forKey: .lifecycle)
+        removalAssignedName = lifecycle == .pendingRemoval
+            ? try container.decodeIfPresent(String.self, forKey: .removalAssignedName)
+            : nil
     }
 
     func encode(to encoder: Encoder) throws {
@@ -44,12 +49,16 @@ extension PortalConfiguration {
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(desiredState, forKey: .desiredState)
         try container.encode(lifecycle, forKey: .lifecycle)
+        if lifecycle == .pendingRemoval {
+            try container.encodeIfPresent(removalAssignedName, forKey: .removalAssignedName)
+        }
     }
 }
 
 enum PortalLifecycle: String, Codable, Equatable {
     case active
     case pendingTailnetRejection
+    case pendingRemoval
 }
 
 struct TailnetBinding: Codable, Equatable {

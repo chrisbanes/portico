@@ -408,6 +408,179 @@ func TestCleanupRejectedPortalClosesAndDeletesOnlyAddressedPortal(t *testing.T) 
 	}
 }
 
+func TestRemovePortalClosesAndDeletesOnlyAddressedPortal(t *testing.T) {
+	root := t.TempDir()
+	nodes := make(map[string]*fakeNode)
+	runtime := NewRuntime(root, func(dir, _ string) Node {
+		node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+		nodes[filepath.Base(dir)] = node
+		return node
+	})
+	configs := []Config{
+		{ID: testPortalID, Name: "hermes", Port: 8787, DesiredState: DesiredStateEnabled},
+		{ID: secondPortalID, Name: "atlas", Port: 8788, DesiredState: DesiredStateEnabled},
+	}
+	if _, err := runtime.Reconcile(context.Background(), configs, func(Event) {}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	for _, config := range configs {
+		if err := os.MkdirAll(filepath.Join(root, config.ID), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	if err := runtime.RemovePortal(strings.ToUpper(testPortalID)); err != nil {
+		t.Fatalf("RemovePortal: %v", err)
+	}
+	if !nodes[testPortalID].closed {
+		t.Fatal("removed Portal node was not closed")
+	}
+	if _, err := os.Stat(filepath.Join(root, testPortalID)); !os.IsNotExist(err) {
+		t.Fatalf("removed Portal state still exists: %v", err)
+	}
+	if nodes[secondPortalID].closed {
+		t.Fatal("unrelated Portal node was closed")
+	}
+	if _, err := os.Stat(filepath.Join(root, secondPortalID)); err != nil {
+		t.Fatalf("unrelated Portal state was affected: %v", err)
+	}
+	if err := runtime.RemovePortal(testPortalID); err != nil {
+		t.Fatalf("repeated removal should be idempotent: %v", err)
+	}
+}
+
+func TestRemovePortalDeletesStateCreatedWhileRuntimeCloses(t *testing.T) {
+	root := t.TempDir()
+	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+	node.observeClose = func() {
+		if err := os.MkdirAll(filepath.Join(root, testPortalID), 0o700); err != nil {
+			t.Errorf("create close-time state: %v", err)
+		}
+	}
+	runtime := NewRuntime(root, func(_, _ string) Node { return node })
+	if _, err := runtime.Reconcile(context.Background(), []Config{{
+		ID: testPortalID, Name: "hermes", Port: 8787, DesiredState: DesiredStateEnabled,
+	}}, func(Event) {}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if err := runtime.RemovePortal(testPortalID); err != nil {
+		t.Fatalf("RemovePortal: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, testPortalID)); !os.IsNotExist(err) {
+		t.Fatalf("close-time Portal state still exists: %v", err)
+	}
+}
+
+func TestRemovePortalRejectsUntrustedTargetsWithoutClosingRuntime(t *testing.T) {
+	outside := t.TempDir()
+	protected := filepath.Join(outside, "protected")
+	if err := os.WriteFile(protected, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+	runtime := NewRuntime(root, func(_, _ string) Node { return node })
+	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Port: 8787}, func(Event) {}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	if err := os.Symlink(outside, filepath.Join(root, testPortalID)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runtime.RemovePortal(testPortalID); err == nil {
+		t.Fatal("RemovePortal = nil, want symlink rejection")
+	}
+	if node.closeCalls != 0 {
+		t.Fatalf("close calls = %d, want zero before target validation", node.closeCalls)
+	}
+	if got, err := os.ReadFile(protected); err != nil || string(got) != "keep" {
+		t.Fatalf("protected state = %q, %v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, testPortalID)); err != nil {
+		t.Fatalf("rejected symlink was changed: %v", err)
+	}
+	if err := runtime.Authenticate(context.Background(), testPortalID); err != nil {
+		t.Fatalf("runtime ownership was lost: %v", err)
+	}
+}
+
+func TestRemovePortalPreservesStateAndOwnershipWhenCloseFails(t *testing.T) {
+	root := t.TempDir()
+	node := &fakeNode{
+		watcher:      newFakeWatcher(),
+		status:       Status{BackendState: "Starting"},
+		closeResults: []error{errors.New("close failed"), nil},
+	}
+	runtime := NewRuntime(root, func(_, _ string) Node { return node })
+	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Port: 8787}, func(Event) {}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	stateDirectory := filepath.Join(root, testPortalID)
+	if err := os.MkdirAll(stateDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(stateDirectory, "identity")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	if err := runtime.RemovePortal(testPortalID); err == nil {
+		t.Fatal("RemovePortal = nil, want close failure")
+	}
+	if got, err := os.ReadFile(sentinel); err != nil || string(got) != "keep" {
+		t.Fatalf("identity state = %q, %v", got, err)
+	}
+	if err := runtime.Authenticate(context.Background(), testPortalID); err != nil {
+		t.Fatalf("runtime ownership was lost: %v", err)
+	}
+	if err := runtime.RemovePortal(testPortalID); err != nil {
+		t.Fatalf("RemovePortal retry: %v", err)
+	}
+	if _, err := os.Stat(stateDirectory); !os.IsNotExist(err) {
+		t.Fatalf("state directory remains after confirmed close: %v", err)
+	}
+}
+
+func TestRemovePortalTreatsMissingStateRootAsAbsentState(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "missing")
+	runtime := NewRuntime(root, func(_, _ string) Node { return &fakeNode{watcher: newFakeWatcher()} })
+
+	if err := runtime.RemovePortal(testPortalID); err != nil {
+		t.Fatalf("RemovePortal: %v", err)
+	}
+}
+
+func TestRemovePortalCanonicalizesSymlinkedTrustedRoot(t *testing.T) {
+	parent := t.TempDir()
+	canonicalRoot := filepath.Join(parent, "canonical")
+	if err := os.Mkdir(canonicalRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateDirectory := filepath.Join(canonicalRoot, testPortalID)
+	if err := os.Mkdir(stateDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(parent, "root-link")
+	if err := os.Symlink(canonicalRoot, root); err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewRuntime(root, func(_, _ string) Node { return &fakeNode{watcher: newFakeWatcher()} })
+
+	if err := runtime.RemovePortal(testPortalID); err != nil {
+		t.Fatalf("RemovePortal: %v", err)
+	}
+	if _, err := os.Stat(stateDirectory); !os.IsNotExist(err) {
+		t.Fatalf("state directory remains: %v", err)
+	}
+	if info, err := os.Lstat(root); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("trusted root spelling changed: %v, %v", info, err)
+	}
+}
+
 func TestCleanupRejectedPortalRejectsUntrustedDeletionTargets(t *testing.T) {
 	root := t.TempDir()
 	protected := filepath.Join(root, secondPortalID)

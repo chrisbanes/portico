@@ -185,19 +185,21 @@ The protocol is versioned JSON Lines over standard input and output:
   diagnostics-only.
 
 The macOS app and bundled helper require an exact protocol-version match. Full
-desired-set reconciliation establishes protocol version 2; there is no
-protocol-v1 fallback. A new required command, field, outcome, or semantic
-change requires another version bump, while an optional field may remain in a
-version only when older peers can safely ignore its presence or absence. The
-app and helper ship together.
+desired-set reconciliation established protocol version 2. Guarded Portal
+removal establishes protocol version 3 because it adds the required
+`removePortal` command; version 3 retains the version-2 reconciliation
+semantics and accepts neither version 1 nor version 2 peers. A new required
+command, field, outcome, or semantic change requires another version bump,
+while an optional field may remain in a version only when older peers can
+safely ignore its presence or absence. The app and helper ship together.
 
-Protocol version 2 uses `reconcilePortals` as the only command that starts or
+Protocol version 3 uses `reconcilePortals` as the only command that starts or
 stops a Portal or changes its Local App port. The command carries the complete
 set of Portal records whose cleanup lifecycle is `active`:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "requestId": "request-42",
   "command": "reconcilePortals",
   "payload": {
@@ -226,7 +228,7 @@ union, in the same order:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "requestId": "request-42",
   "result": {
     "entries": [
@@ -278,10 +280,41 @@ for a superseded generation cannot update current UI state; after that request
 completes, Swift immediately sends the latest snapshot. Desired state is never
 rolled back after a failed outcome.
 
-Handshake, authentication, guarded identity cleanup, listener discovery, and
-graceful shutdown remain separate commands. Authentication remains transient.
-Imperative protocol-v1 `startPortal` is not accepted as a lifecycle fallback
-by a protocol-v2 helper.
+After a Portal's durable lifecycle becomes `pendingRemoval`, Swift omits it
+from active reconciliation and sends one automatic cleanup cycle during that
+controller session. A cycle first awaits the newest active-only reconciliation
+result. A missing or `converged` entry permits the UUID-only removal request;
+`closeFailed`, another non-converged outcome, an envelope failure, or helper
+loss retains the pending record and requires an explicit Retry. Helper
+reconnection does not replenish the automatic attempt.
+
+```json
+{
+  "version": 3,
+  "requestId": "request-43",
+  "command": "removePortal",
+  "payload": {
+    "portalId": "9f55ca93-d7b3-4eab-a871-310ea576005a"
+  }
+}
+```
+
+The removal payload contains no path or hostname. The helper normalizes and
+validates the UUID, opens the canonical trusted state root with rooted
+filesystem operations, rejects a symlink or non-directory target, closes the
+addressed runtime, and removes only that direct UUID child. An absent child is
+idempotent success. Runtime ownership is released only after close and deletion
+both succeed; fixed protocol errors never expose underlying paths or errors.
+Swift removes the pending record only after helper success and a successful
+atomic configuration save. A save failure retains the pending record for an
+explicit idempotent retry. Completion is a session-only notice and always
+explains that the remote Tailscale device may require manual removal; the
+installation tailnet binding is unchanged.
+
+Handshake, authentication, cross-tailnet rejected-identity cleanup, listener
+discovery, and graceful shutdown remain separate commands. Authentication
+remains transient. Imperative protocol-v1 `startPortal` is not accepted as a
+lifecycle fallback by a protocol-v3 helper.
 
 If the helper exits unexpectedly, Swift restarts it with bounded exponential
 backoff and restores Enabled Portals. After the retry budget is exhausted,

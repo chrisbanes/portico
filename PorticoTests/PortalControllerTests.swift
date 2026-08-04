@@ -363,6 +363,182 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(controller.message, "Some Portals could not be reconciled.")
     }
 
+    func testRemovalCommitsBeforePublishingAndOmitsPortalBeforeDeletingState() throws {
+        let otherID = UUID(uuidString: "5ea74329-3144-4ba2-925f-138d14d61fcc")!
+        let removedPortal = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date()
+        )
+        let otherPortal = PortalConfiguration(
+            id: otherID,
+            name: "atlas",
+            localAppPort: 8788,
+            createdAt: Date()
+        )
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(portals: [removedPortal, otherPortal]))
+        let client = FakePortalHelperClient(availability: .connecting)
+        client.completeReconciliationImmediately = false
+        client.completeRemovalImmediately = false
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .connecting,
+            stableNodeId: "secret-node",
+            assignedName: "hermes-1",
+            portalURL: nil,
+            addresses: []
+        )))
+
+        XCTAssertEqual(
+            controller.removalWarningText(for: removedPortal),
+            "Remove Portal “hermes” from this Mac? This permanently deletes its local configuration and local Tailscale identity state. The Tailscale device “hermes-1” may remain in the tailnet and may require manual removal."
+        )
+        controller.removePortal(id: portalID)
+
+        let persisted = try XCTUnwrap(store.loadInstallation().portals.first(where: { $0.id == portalID }))
+        XCTAssertEqual(persisted.lifecycle, .pendingRemoval)
+        XCTAssertEqual(persisted.removalAssignedName, "hermes-1")
+        XCTAssertEqual(controller.pendingRemovalPortals.map(\.id), [portalID])
+        XCTAssertEqual(
+            controller.pendingRemovalWarningText(for: persisted),
+            "Removing Portal “hermes” from this Mac permanently deletes its local configuration and local Tailscale identity state. The Tailscale device “hermes-1” may remain in the tailnet and may require manual removal."
+        )
+        XCTAssertNil(controller.statuses[portalID])
+        XCTAssertTrue(client.removed.isEmpty)
+
+        client.connect()
+
+        XCTAssertEqual(client.reconciliations, [[otherPortal]])
+        XCTAssertTrue(client.removed.isEmpty)
+        client.completeReconciliation(.success(ReconcilePortalsResult(entries: [])))
+        XCTAssertEqual(client.removed, [portalID])
+        XCTAssertEqual(controller.removalStates[portalID], .removing)
+
+        controller.startPortal(id: portalID)
+        controller.updateLocalAppPort(id: portalID, port: "9999")
+        controller.authenticate(id: portalID)
+        XCTAssertEqual(client.authenticated, [])
+        XCTAssertEqual(try store.loadInstallation().portals.first(where: { $0.id == portalID }), persisted)
+    }
+
+    func testPendingRemovalGetsOneAutomaticCycleAcrossReconnectsAndExplicitRetryAddsOne() throws {
+        let pending = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date(),
+            lifecycle: .pendingRemoval,
+            removalAssignedName: "hermes-1"
+        )
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(portals: [pending]))
+        let client = FakePortalHelperClient(availability: .connecting)
+        client.completeRemovalImmediately = false
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        client.connect()
+        XCTAssertEqual(client.reconciliations, [[]])
+        XCTAssertEqual(client.removed, [portalID])
+        client.completeRemoval(.failure(NSError(domain: "secret", code: 1)))
+        XCTAssertEqual(controller.removalStates[portalID], .failed)
+
+        client.disconnect(as: .retrying(attempt: 1, delay: 1))
+        client.connect()
+        XCTAssertEqual(client.reconciliations, [[], []])
+        XCTAssertEqual(client.removed, [portalID])
+
+        controller.retryRemoval(id: portalID)
+        XCTAssertEqual(client.reconciliations, [[], [], []])
+        XCTAssertEqual(client.removed, [portalID, portalID])
+    }
+
+    func testRemovalWaitsForNewestActiveOnlyReconciliationAndSuppressesStaleEvents() throws {
+        let pending = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date(),
+            lifecycle: .pendingRemoval,
+            removalAssignedName: "hermes-1"
+        )
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(portals: [pending]))
+        let client = FakePortalHelperClient(availability: .connecting)
+        client.completeReconciliationImmediately = false
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        client.connect()
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .online,
+            stableNodeId: "stale-node",
+            assignedName: "stale-name",
+            portalURL: URL(string: "https://stale.example.ts.net/"),
+            addresses: ["100.64.0.1"]
+        )))
+        client.send(.authenticationURL(portalID, URL(string: "https://login.tailscale.com/a/stale")!))
+
+        XCTAssertNil(controller.statuses[portalID])
+        client.completeReconciliation(.success(ReconcilePortalsResult(entries: [
+            ReconcilePortalEntry(portalId: portalID, outcome: .closeFailed)
+        ])))
+        XCTAssertTrue(client.removed.isEmpty)
+        XCTAssertEqual(controller.removalStates[portalID], .failed)
+
+        controller.retryRemoval(id: portalID)
+        client.completeReconciliation(.success(ReconcilePortalsResult(entries: [])), at: 1)
+        XCTAssertEqual(client.removed, [portalID])
+    }
+
+    func testRemovalCompletionRetainsPendingRecordUntilAtomicSaveSucceeds() throws {
+        let root = temporaryRoot()
+        let seedStore = PortalStore(rootURL: root)
+        let pending = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date(),
+            lifecycle: .pendingRemoval,
+            removalAssignedName: "hermes-1"
+        )
+        try seedStore.save(InstallationRecord(
+            tailnetBinding: TailnetBinding(name: "opaque-tailnet", magicDNSSuffix: "example.ts.net"),
+            portals: [pending]
+        ))
+        var failNextWrite = true
+        let store = PortalStore(rootURL: root, writeData: { data, url in
+            if failNextWrite {
+                failNextWrite = false
+                throw NSError(domain: "secret", code: 1)
+            }
+            try data.write(to: url, options: .atomic)
+        })
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        XCTAssertEqual(client.removed, [portalID])
+        XCTAssertEqual(try store.loadInstallation().portals, [pending])
+        XCTAssertEqual(controller.pendingRemovalPortals, [pending])
+        XCTAssertEqual(controller.removalStates[portalID], .failed)
+        XCTAssertTrue(controller.removalNotices.isEmpty)
+
+        controller.retryRemoval(id: portalID)
+
+        XCTAssertEqual(client.removed, [portalID, portalID])
+        XCTAssertTrue(try store.loadInstallation().portals.isEmpty)
+        XCTAssertTrue(controller.portals.isEmpty)
+        XCTAssertEqual(controller.tailnetDisplaySuffix, "example.ts.net")
+        XCTAssertEqual(
+            controller.removalNotices,
+            [PortalRemovalNotice(id: portalID, portalName: "hermes", assignedName: "hermes-1")]
+        )
+        XCTAssertEqual(
+            controller.removalNoticeText(for: controller.removalNotices[0]),
+            "Removed Portal “hermes” from this Mac. The Tailscale device “hermes-1” may remain in the tailnet and may require manual removal."
+        )
+    }
+
     func testPresentsOnlyMatchingStructuredStatus() throws {
         let store = PortalStore(rootURL: temporaryRoot())
         let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
@@ -702,12 +878,12 @@ final class PortalControllerTests: XCTestCase {
         )
         let controller = PortalController(store: store, helper: supervisor, openURL: { _ in })
         supervisor.start()
-        launcher.receive(line: #"{"version":2,"requestId":"handshake-1","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-1","result":{"protocolVersion":3}}"#)
         controller.stopPortal(id: portalID)
 
         launcher.exit(status: 1)
         scheduler.run(delay: 1)
-        launcher.receive(line: #"{"version":2,"requestId":"handshake-2","result":{"protocolVersion":2}}"#)
+        launcher.receive(line: #"{"version":3,"requestId":"handshake-2","result":{"protocolVersion":3}}"#)
 
         let request = try JSONDecoder().decode(
             HelperRequest<ReconcilePortalsPayload>.self,
@@ -817,10 +993,13 @@ final class FakePortalHelperClient: PortalHelperClient {
     var started: [PortalConfiguration] { reconciliations.flatMap { $0 } }
     private(set) var authenticated: [UUID] = []
     private(set) var cleaned: [UUID] = []
+    private(set) var removed: [UUID] = []
     private(set) var discoveryCompletions: [(Result<[LocalAppCandidatePayload], Error>) -> Void] = []
     private(set) var cleanupCompletions: [(Result<Void, Error>) -> Void] = []
+    private(set) var removalCompletions: [(Result<Void, Error>) -> Void] = []
     private(set) var reconciliationCompletions: [(Result<ReconcilePortalsResult, Error>) -> Void] = []
     var completeCleanupImmediately = true
+    var completeRemovalImmediately = true
     var completeReconciliationImmediately = true
     var onCleanup: ((UUID) -> Void)?
     var onReconcile: (([PortalConfiguration]) -> Void)?
@@ -862,6 +1041,15 @@ final class FakePortalHelperClient: PortalHelperClient {
         }
     }
 
+    func removePortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void) {
+        removed.append(id)
+        if completeRemovalImmediately {
+            completion(.success(()))
+        } else {
+            removalCompletions.append(completion)
+        }
+    }
+
     func discoverLocalApps(completion: @escaping (Result<[LocalAppCandidatePayload], Error>) -> Void) {
         discoveryCompletions.append(completion)
     }
@@ -885,6 +1073,10 @@ final class FakePortalHelperClient: PortalHelperClient {
 
     func completeCleanup(_ result: Result<Void, Error>, at index: Int = 0) {
         cleanupCompletions[index](result)
+    }
+
+    func completeRemoval(_ result: Result<Void, Error>, at index: Int = 0) {
+        removalCompletions[index](result)
     }
 
     func completeReconciliation(

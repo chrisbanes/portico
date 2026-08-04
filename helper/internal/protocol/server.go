@@ -16,7 +16,7 @@ import (
 	"github.com/chrisbanes/portico/helper/internal/portal"
 )
 
-const Version = 2
+const Version = 3
 
 const invalidRequestDiagnostic = "portico-helper: invalid request\n"
 
@@ -24,6 +24,7 @@ type PortalRuntime interface {
 	Reconcile(context.Context, []portal.Config, func(portal.Event)) ([]portal.ReconcileEntry, error)
 	Authenticate(context.Context, string) error
 	CleanupRejectedPortal(string) error
+	RemovePortal(string) error
 	Close() error
 }
 
@@ -87,6 +88,10 @@ type authenticatePortalPayload struct {
 }
 
 type cleanupRejectedPortalPayload struct {
+	PortalID string `json:"portalId"`
+}
+
+type removePortalPayload struct {
 	PortalID string `json:"portalId"`
 }
 
@@ -303,6 +308,30 @@ func ServeWithServices(input io.Reader, output, diagnostics io.Writer, services 
 				continue
 			}
 			if err := runtime.CleanupRejectedPortal(portalID); err != nil {
+				if writer.write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed")) != nil {
+					return 1
+				}
+				continue
+			}
+			if writer.write(response{Version: Version, RequestID: request.RequestID, Result: acceptedResult{Accepted: true}}) != nil {
+				return 1
+			}
+		case "removePortal":
+			var payload removePortalPayload
+			if runtime == nil || decodePayload(request.Payload, &payload) != nil {
+				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
+					return 1
+				}
+				continue
+			}
+			portalID, valid := validatedPortalID(payload.PortalID)
+			if !valid {
+				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
+					return 1
+				}
+				continue
+			}
+			if err := runtime.RemovePortal(portalID); err != nil {
 				if writer.write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed")) != nil {
 					return 1
 				}

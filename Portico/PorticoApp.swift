@@ -22,6 +22,7 @@ private struct PortalView: View {
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
     @State private var showingResetConfirmation = false
+    @State private var removalCandidate: PortalConfiguration?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -38,11 +39,21 @@ private struct PortalView: View {
             ForEach(controller.pendingPortals, id: \.id) { portal in
                 pendingWarning(portal)
             }
+            ForEach(controller.pendingRemovalPortals, id: \.id) { portal in
+                pendingRemoval(portal)
+            }
+            ForEach(controller.removalNotices) { notice in
+                removalNotice(notice)
+            }
             ForEach(controller.alerts) { alert in
                 completedWarning(alert)
             }
             ForEach(controller.portals.filter { $0.lifecycle == .active }, id: \.id) { portal in
-                PortalStatusView(controller: controller, portal: portal)
+                PortalStatusView(
+                    controller: controller,
+                    portal: portal,
+                    onRemove: { removalCandidate = portal }
+                )
                 Divider()
             }
             addPortalForm
@@ -69,6 +80,31 @@ private struct PortalView: View {
                 controller.resetTailnet(confirmed: true)
             }
             Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: Binding(
+            get: { removalCandidate != nil },
+            set: { if !$0 { removalCandidate = nil } }
+        )) {
+            if let portal = removalCandidate {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Remove Portal?").font(.headline)
+                    Text(controller.removalWarningText(for: portal))
+                    Link(
+                        "How to remove a Tailscale device",
+                        destination: PortalController.manualRemovalURL
+                    )
+                    HStack {
+                        Spacer()
+                        Button("Cancel") { removalCandidate = nil }
+                        Button("Remove Portal", role: .destructive) {
+                            controller.removePortal(id: portal.id)
+                            removalCandidate = nil
+                        }
+                    }
+                }
+                .padding()
+                .frame(width: 420)
+            }
         }
         Divider()
         Button("Quit Portico") {
@@ -138,17 +174,52 @@ private struct PortalView: View {
                 .controlSize(.small)
         }
     }
+
+    private func pendingRemoval(_ portal: PortalConfiguration) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Removing Portal", systemImage: "trash")
+                .font(.headline)
+            Text(controller.pendingRemovalWarningText(for: portal))
+                .font(.caption)
+            Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
+                .font(.caption)
+            if controller.removalStates[portal.id] == .failed {
+                Button("Retry Removal") { controller.retryRemoval(id: portal.id) }
+                    .controlSize(.small)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Button("Diagnostics") { openWindow(id: "diagnostics") }
+                .controlSize(.small)
+        }
+    }
+
+    private func removalNotice(_ notice: PortalRemovalNotice) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Portal removed from this Mac", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+            Text(controller.removalNoticeText(for: notice))
+                .font(.caption)
+            Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
+                .font(.caption)
+            Button("Dismiss") { controller.dismissRemovalNotice(id: notice.id) }
+                .controlSize(.small)
+        }
+    }
 }
 
 private struct PortalStatusView: View {
     @Environment(\.openWindow) private var openWindow
     @ObservedObject var controller: PortalController
     let portal: PortalConfiguration
+    let onRemove: () -> Void
     @State private var localAppPort: String
 
-    init(controller: PortalController, portal: PortalConfiguration) {
+    init(controller: PortalController, portal: PortalConfiguration, onRemove: @escaping () -> Void) {
         self.controller = controller
         self.portal = portal
+        self.onRemove = onRemove
         _localAppPort = State(initialValue: String(portal.localAppPort))
     }
 
@@ -201,6 +272,8 @@ private struct PortalStatusView: View {
             value: (controller.reachabilityStates[portal.id] ?? .unknown).title
         )
         Button("Diagnostics") { openWindow(id: "diagnostics") }
+            .controlSize(.small)
+        Button("Remove Portal", role: .destructive, action: onRemove)
             .controlSize(.small)
     }
 
