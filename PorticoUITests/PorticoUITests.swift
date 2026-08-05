@@ -13,29 +13,31 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(app.buttons["overview-logging-enabled"].exists)
         XCTAssertTrue(app.buttons["overview-logging-disabled"].exists)
 
-        openMenuBarExtra(app)
+        app.buttons["overview-logging-enabled"].click()
+        XCTAssertTrue(app.staticTexts["No Portals"].waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(app.buttons["overview-add-portal"].isEnabled)
+        let emptyStateAddPortal = app.buttons["overview-empty-add-portal"]
+        XCTAssertTrue(emptyStateAddPortal.waitForExistence(timeout: 3), app.debugDescription)
+        emptyStateAddPortal.click()
+        XCTAssertTrue(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["add-portal"].isEnabled)
 
-        XCTAssertTrue(
-            app.descendants(matching: .any)["add-guidance"].waitForExistence(timeout: 3),
-            app.debugDescription
-        )
-        XCTAssertEqual(app.staticTexts["helper-state"].value as? String, "Awaiting logging choice")
-        let addPortal = app.buttons["add-portal"]
-        XCTAssertTrue(addPortal.exists)
-        XCTAssertFalse(addPortal.isEnabled)
-        XCTAssertTrue(app.buttons["logging-enabled"].exists)
-        XCTAssertTrue(app.buttons["logging-disabled"].exists)
+        app.buttons["add-portal-cancel"].click()
+        XCTAssertFalse(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 1))
+        openMenuBarExtra(app)
+        XCTAssertFalse(app.descendants(matching: .any)["add-portal-sheet"].exists)
+        XCTAssertFalse(app.buttons["add-portal"].exists)
     }
 
-    func testOverviewAddPortalRemainsDisabledAfterLoggingChoice() {
+    func testOverviewToolbarOpensTheSameAddPortalSheet() {
         let app = launch(scenario: "first-run")
 
         let overview = app.descendants(matching: .any)["management-overview"]
         XCTAssertTrue(overview.waitForExistence(timeout: 3), app.debugDescription)
         app.buttons["overview-logging-enabled"].click()
-        XCTAssertTrue(app.staticTexts["Operational-support logging is allowed."].waitForExistence(timeout: 3))
-
-        openMenuBarExtra(app)
+        XCTAssertTrue(app.staticTexts["No Portals"].waitForExistence(timeout: 3))
+        app.buttons["overview-add-portal"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 3))
         let portalName = app.textFields["portal-name-field"]
         XCTAssertTrue(portalName.waitForExistence(timeout: 3), app.debugDescription)
         portalName.click()
@@ -45,7 +47,67 @@ final class PorticoUITests: XCTestCase {
         localAppPort.typeKey("a", modifierFlags: .command)
         localAppPort.typeText("8080")
         XCTAssertTrue(app.buttons["add-portal"].isEnabled)
-        XCTAssertFalse(app.buttons["overview-add-portal"].isEnabled)
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertFalse(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 1))
+        app.buttons["overview-add-portal"].click()
+        XCTAssertTrue(app.textFields["portal-name-field"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.textFields["portal-name-field"].value as? String, "")
+        XCTAssertEqual(app.textFields["local-app-port-field"].value as? String, "")
+    }
+
+    func testAddPortalSheetPreservesDiscoveryAndDiscardsOnlyUncommittedDrafts() {
+        let root = makeRoot()
+        let app = launch(scenario: "creation", root: root)
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        XCTAssertTrue(app.staticTexts["No Portals"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["overview-add-portal"].waitForExistence(timeout: 3))
+        app.buttons["overview-add-portal"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 3))
+
+        app.buttons["refresh-local-apps"].click()
+        let candidate = app.buttons["local-app-3000"]
+        XCTAssertTrue(candidate.waitForExistence(timeout: 3), app.debugDescription)
+        candidate.click()
+        XCTAssertTrue(waitForValue("detected-portal", element: app.textFields["portal-name-field"], timeout: 3))
+        XCTAssertTrue(waitForValue("3000", element: app.textFields["local-app-port-field"], timeout: 3))
+
+        let portalName = app.textFields["portal-name-field"]
+        portalName.click()
+        portalName.typeKey("a", modifierFlags: .command)
+        portalName.typeText("Invalid Name")
+        portalName.typeKey(.return, modifierFlags: [])
+        XCTAssertEqual(portalName.value(forKey: "hasKeyboardFocus") as? Bool, true)
+        let localPort = app.textFields["local-app-port-field"]
+        portalName.typeKey("a", modifierFlags: .command)
+        portalName.typeText("manual-portal")
+        localPort.click()
+        localPort.typeKey("a", modifierFlags: .command)
+        localPort.typeText("0")
+        localPort.typeKey(.return, modifierFlags: [])
+        XCTAssertEqual(localPort.value(forKey: "hasKeyboardFocus") as? Bool, true)
+
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertFalse(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 1))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: "\(root)/helper-enrollment.txt"))
+
+        app.buttons["overview-add-portal"].click()
+        XCTAssertTrue(app.textFields["portal-name-field"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.textFields["portal-name-field"].value as? String, "")
+        XCTAssertEqual(app.textFields["local-app-port-field"].value as? String, "")
+        app.buttons["refresh-local-apps"].click()
+        XCTAssertTrue(candidate.waitForExistence(timeout: 3))
+        candidate.click()
+        portalName.click()
+        portalName.typeKey("a", modifierFlags: .command)
+        portalName.typeText("manual-portal")
+        localPort.click()
+        localPort.typeKey("a", modifierFlags: .command)
+        localPort.typeText("4321")
+        app.buttons["add-portal"].click()
+
+        XCTAssertFalse(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["overview-portal-manual-portal"].waitForExistence(timeout: 3))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: "\(root)/helper-enrollment.txt"))
     }
 
     func testOpenPorticoRaisesTheManagementWindowAndClosingItKeepsTheMenuBarAppRunning() {

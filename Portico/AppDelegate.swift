@@ -31,7 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             supervisorScheduler = scheduler
         }
         let launcher: HelperLaunching = testConfiguration.map {
-            UITestHelperLauncher(scenario: $0.scenario)
+            UITestHelperLauncher(configuration: $0)
         } ?? ProcessHelperLauncher()
         let reachabilityProbe: LocalAppProbing = testConfiguration.map {
             UITestLocalAppProbe(result: $0.reachabilityResult)
