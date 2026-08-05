@@ -114,4 +114,13 @@ schemes:
       config: Debug
       targets:
         - PorticoTests
+
+  Portico UI Tests:
+    build:
+      targets:
+        Portico: all
+        PorticoUITests: [test]
+    test:
+      config: Debug
+      targets:
         - PorticoUITests
