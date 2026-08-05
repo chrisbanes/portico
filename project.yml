@@ -14,12 +14,21 @@ settings:
       SWIFT_COMPILATION_MODE: wholemodule
 
 targets:
+  PorticoApplication:
+    type: library.static
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Portico
+
   Portico:
     type: application
     platform: macOS
     deploymentTarget: "14.0"
     sources:
-      - path: Portico
+      - path: PorticoLauncher
+    dependencies:
+      - target: PorticoApplication
     settings:
       base:
         ARCHS: arm64
@@ -61,11 +70,10 @@ targets:
     sources:
       - path: PorticoTests
     dependencies:
-      - target: Portico
+      - target: PorticoApplication
     settings:
       base:
         ARCHS: arm64
-        BUNDLE_LOADER: "$(TEST_HOST)"
         CODE_SIGNING_ALLOWED: "NO"
         GENERATE_INFOPLIST_FILE: "YES"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
@@ -73,7 +81,6 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.chrisbanes.PorticoTests
         PRODUCT_NAME: "$(TARGET_NAME)"
         SWIFT_VERSION: "5.0"
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Portico.app/Contents/MacOS/Portico"
 
   PorticoUITests:
     type: bundle.ui-testing

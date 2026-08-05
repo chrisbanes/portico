@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import Portico
+@testable import PorticoApplication
 
 @MainActor
 final class HelperSupervisorTests: XCTestCase {

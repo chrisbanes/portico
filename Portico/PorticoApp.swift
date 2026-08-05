@@ -1,7 +1,6 @@
 import AppKit
 import SwiftUI
 
-@main
 struct PorticoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.openWindow) private var openWindow
@@ -47,6 +46,12 @@ struct PorticoApp: App {
         DispatchQueue.main.async {
             openWindow(id: "management")
         }
+    }
+}
+
+public enum PorticoApplication {
+    public static func launch() {
+        PorticoApp.main()
     }
 }
 

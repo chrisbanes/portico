@@ -1,5 +1,5 @@
 import XCTest
-@testable import Portico
+@testable import PorticoApplication
 
 @MainActor
 final class LaunchAtLoginTests: XCTestCase {
