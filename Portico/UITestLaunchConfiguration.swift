@@ -5,9 +5,11 @@ import Foundation
 enum UITestScenario: String {
     case firstRun = "first-run"
     case creation
+    case management
     case online
     case remoteOnline = "remote-online"
     case authenticating
+    case awaitingApproval = "awaiting-approval"
     case stale
     case restarting
     case terminalFailure = "terminal-failure"
@@ -84,7 +86,25 @@ struct UITestLaunchConfiguration {
                 operationalLogging: .enabled,
                 launchAtLoginOffer: .declined
             ))
-        case .online, .authenticating, .stale, .restarting, .terminalFailure:
+        case .management:
+            try store.save(InstallationRecord(
+                tailnetBinding: Self.tailnetBinding,
+                portals: [
+                    Self.portal(
+                        id: Self.firstPortalID,
+                        name: "first-portal",
+                        createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+                    ),
+                    Self.portal(
+                        id: Self.secondPortalID,
+                        name: "second-portal",
+                        createdAt: Date(timeIntervalSince1970: 1_700_000_001)
+                    ),
+                ],
+                operationalLogging: .enabled,
+                launchAtLoginOffer: .declined
+            ))
+        case .online, .authenticating, .awaitingApproval, .stale, .restarting, .terminalFailure:
             try store.save(InstallationRecord(
                 tailnetBinding: Self.tailnetBinding,
                 portals: [Self.portal()],
@@ -113,16 +133,22 @@ struct UITestLaunchConfiguration {
         magicDNSSuffix: "example.ts.net"
     )
 
+    private static let firstPortalID = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
+    private static let secondPortalID = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
+
     private static func portal(
+        id: UUID = portalID,
+        name: String = "portal-one",
         destination: PortalDestination = .localApp(port: 8080),
+        createdAt: Date = Date(timeIntervalSince1970: 1_700_000_000),
         lifecycle: PortalLifecycle = .active,
         removalAssignedName: String? = nil
     ) -> PortalConfiguration {
         PortalConfiguration(
-            id: portalID,
-            name: "portal-one",
+            id: id,
+            name: name,
             destination: destination,
-            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            createdAt: createdAt,
             desiredState: .enabled,
             lifecycle: lifecycle,
             removalAssignedName: removalAssignedName
@@ -304,19 +330,28 @@ private final class UITestHelperProcess: HelperProcess {
     }
 
     private func emitStatuses(for portals: [ReconcilePortalPayload]) {
-        guard [.online, .remoteOnline, .authenticating, .stale, .restarting, .loginOffer].contains(scenario) else { return }
+        guard [.online, .remoteOnline, .authenticating, .awaitingApproval, .stale, .restarting, .loginOffer, .management].contains(scenario) else { return }
         for portal in portals {
-            let state: PortalTailscaleState = scenario == .authenticating ? .authenticating : .online
+            let state: PortalTailscaleState
+            if scenario == .authenticating {
+                state = .authenticating
+            } else if scenario == .awaitingApproval {
+                state = .awaitingApproval
+            } else if scenario == .management, portal.portalName == "second-portal" {
+                state = .connecting
+            } else {
+                state = .online
+            }
             deliver(HelperEvent(
                 version: helperProtocolVersion,
                 event: .portalStatus,
                 portalId: portal.portalId,
                 payload: PortalStatusPayload(
                     state: state,
-                    stableNodeId: "node-1",
-                    assignedName: "portal-one-1",
-                    portalURL: URL(string: "https://portal-one-1.example.ts.net"),
-                    addresses: ["100.64.0.10"],
+                    stableNodeId: "node-\(portal.portalName)",
+                    assignedName: "\(portal.portalName)-1",
+                    portalURL: URL(string: "https://\(portal.portalName)-1.example.ts.net"),
+                    addresses: portal.portalName == "second-portal" ? ["100.64.0.11"] : ["100.64.0.10"],
                     tailnetName: "test-tailnet",
                     magicDNSSuffix: "example.ts.net"
                 )

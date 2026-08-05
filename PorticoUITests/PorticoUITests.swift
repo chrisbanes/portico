@@ -55,6 +55,160 @@ final class PorticoUITests: XCTestCase {
         XCTAssertEqual(app.textFields["local-app-port-field"].value as? String, "")
     }
 
+    func testManagementSidebarOrdersAndSelectsActivePortals() {
+        let app = launch(scenario: "management")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+
+        XCTAssertTrue(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
+        let firstPortal = app.buttons["management-sidebar-portal-first-portal"]
+        let secondPortal = app.buttons["management-sidebar-portal-second-portal"]
+        XCTAssertTrue(firstPortal.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(secondPortal.waitForExistence(timeout: 3), app.debugDescription)
+        let overview = app.descendants(matching: .any)["management-sidebar-overview"]
+        XCTAssertTrue(overview.exists)
+        XCTAssertLessThan(overview.frame.minY, firstPortal.frame.minY)
+        XCTAssertLessThan(firstPortal.frame.minY, secondPortal.frame.minY)
+        XCTAssertTrue(firstPortal.label.contains("Online"))
+        XCTAssertTrue(secondPortal.label.contains("Connecting"))
+
+        firstPortal.click()
+        XCTAssertTrue(waitForValue("first-portal", element: app.staticTexts["selected-portal-name"], timeout: 3))
+        secondPortal.click()
+        XCTAssertTrue(waitForValue("second-portal", element: app.staticTexts["selected-portal-name"], timeout: 3))
+
+        app.buttons["overview-add-portal"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 3))
+        app.buttons["add-portal-cancel"].click()
+        XCTAssertFalse(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 1))
+    }
+
+    func testSelectedPortalDetailShowsFactsAndSafeURLActions() {
+        var app = launch(scenario: "online")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-portal-one"].click()
+        XCTAssertTrue(waitForValue("portal-one", element: app.staticTexts["selected-portal-name"], timeout: 3))
+        XCTAssertTrue(app.staticTexts["selected-assigned-name"].exists)
+        XCTAssertTrue(app.staticTexts["selected-desired-state"].exists)
+        XCTAssertTrue(app.staticTexts["selected-tailscale-state"].exists)
+        XCTAssertTrue(app.staticTexts["selected-local-app-state"].exists)
+        let currentURL = app.staticTexts["selected-portal-url"]
+        XCTAssertTrue(waitForText("https://portal-one-1.example.ts.net", element: currentURL, timeout: 3))
+        XCTAssertTrue(app.staticTexts["selected-addresses"].exists)
+        XCTAssertTrue(app.buttons["selected-copy-portal-url"].isEnabled)
+        XCTAssertTrue(app.buttons["selected-open-portal-url"].isEnabled)
+
+        app = launch(scenario: "stale")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-portal-one"].click()
+        let staleURL = app.staticTexts["selected-portal-url"]
+        XCTAssertTrue(staleURL.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Portal URL — Last Known"].exists)
+        XCTAssertTrue(app.buttons["selected-copy-portal-url"].isEnabled)
+        XCTAssertFalse(app.buttons["selected-open-portal-url"].isEnabled)
+
+        app = launch(scenario: "authenticating")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-portal-one"].click()
+        XCTAssertTrue(app.buttons["selected-authenticate"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["selected-authenticate"].isEnabled)
+        XCTAssertFalse(app.buttons["selected-open-portal-url"].isEnabled)
+
+        app = launch(scenario: "awaiting-approval")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-portal-one"].click()
+        XCTAssertTrue(waitForValue("Awaiting approval", element: app.staticTexts["selected-tailscale-state"], timeout: 3))
+        XCTAssertFalse(app.buttons["selected-authenticate"].exists)
+        XCTAssertFalse(app.buttons["selected-open-portal-url"].isEnabled)
+
+        app = launch(scenario: "terminal-failure")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        let unavailablePortal = app.buttons["management-sidebar-portal-portal-one"]
+        XCTAssertTrue(unavailablePortal.waitForExistence(timeout: 3))
+        unavailablePortal.click()
+        XCTAssertFalse(app.buttons["selected-authenticate"].exists)
+        XCTAssertFalse(app.buttons["selected-open-portal-url"].exists)
+    }
+
+    func testSelectedPortalDetailDailyActionsAndIsolation() {
+        let app = launch(scenario: "management")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+
+        app.buttons["management-sidebar-portal-first-portal"].click()
+        XCTAssertTrue(waitForValue("Enabled", element: app.staticTexts["selected-desired-state"], timeout: 3))
+        app.buttons["selected-edit-destination-remote"].click()
+        XCTAssertTrue(app.textFields["selected-edit-remote-app-host"].waitForExistence(timeout: 3))
+        let startStop = app.buttons["selected-start-stop"]
+        startStop.click()
+        XCTAssertTrue(waitForValue("Stopped", element: app.staticTexts["selected-desired-state"], timeout: 3))
+        let focusedStartStop = app.buttons.matching(
+            NSPredicate(format: "identifier == %@ AND hasKeyboardFocus == true", "selected-start-stop")
+        ).firstMatch
+        XCTAssertTrue(focusedStartStop.waitForExistence(timeout: 3), app.debugDescription)
+        app.typeKey(.space, modifierFlags: [])
+        XCTAssertTrue(waitForValue("Enabled", element: app.staticTexts["selected-desired-state"], timeout: 3))
+
+        app.buttons["management-sidebar-portal-second-portal"].click()
+        XCTAssertTrue(waitForValue("Enabled", element: app.staticTexts["selected-desired-state"], timeout: 3))
+        XCTAssertTrue(app.textFields["selected-edit-local-app-port"].waitForExistence(timeout: 3))
+        XCTAssertTrue(waitForValue("Connecting", element: app.staticTexts["selected-tailscale-state"], timeout: 3))
+        XCTAssertFalse(app.buttons["selected-authenticate"].exists)
+        XCTAssertFalse(app.buttons["selected-open-portal-url"].isEnabled)
+
+        app.buttons["management-sidebar-portal-first-portal"].click()
+        let port = app.textFields["selected-edit-local-app-port"]
+        XCTAssertTrue(port.waitForExistence(timeout: 3))
+        port.click()
+        port.typeKey("a", modifierFlags: .command)
+        port.typeText("8081")
+        XCTAssertTrue(app.buttons["selected-update-destination"].isEnabled)
+        app.buttons["selected-update-destination"].click()
+        XCTAssertTrue(app.buttons["selected-portal-diagnostics"].isEnabled)
+        app.buttons["selected-portal-diagnostics"].click()
+        XCTAssertTrue(app.staticTexts["diagnostics-heading"].waitForExistence(timeout: 3))
+    }
+
+    func testSelectedPortalDetailShowsDestinationValidationErrors() {
+        let app = launch(scenario: "management")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-first-portal"].click()
+
+        let port = app.textFields["selected-edit-local-app-port"]
+        XCTAssertTrue(port.waitForExistence(timeout: 3), app.debugDescription)
+        port.click()
+        port.typeKey("a", modifierFlags: .command)
+        port.typeText("0")
+        port.typeKey(.return, modifierFlags: [])
+
+        XCTAssertTrue(
+            waitForText(
+                "Enter valid destination details.",
+                element: app.staticTexts["selected-portal-message"],
+                timeout: 3
+            ),
+            app.debugDescription
+        )
+    }
+
+    func testSelectedPortalDetailTracksDestinationChangesFromMenuBar() {
+        let app = launch(scenario: "management")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-first-portal"].click()
+
+        let selectedPort = app.textFields["selected-edit-local-app-port"]
+        XCTAssertTrue(waitForValue("8080", element: selectedPort, timeout: 3), app.debugDescription)
+
+        openMenuBarExtra(app)
+        let menuBarPort = app.textFields.matching(identifier: "edit-local-app-port").firstMatch
+        XCTAssertTrue(menuBarPort.waitForExistence(timeout: 3), app.debugDescription)
+        menuBarPort.click()
+        menuBarPort.typeKey("a", modifierFlags: .command)
+        menuBarPort.typeText("8081")
+        app.buttons.matching(identifier: "update-destination").firstMatch.click()
+
+        XCTAssertTrue(waitForValue("8081", element: selectedPort, timeout: 3), app.debugDescription)
+        XCTAssertFalse(app.buttons["selected-update-destination"].isEnabled)
+    }
+
     func testAddPortalSheetPreservesDiscoveryAndDiscardsOnlyUncommittedDrafts() {
         let root = makeRoot()
         let app = launch(scenario: "creation", root: root)
@@ -343,6 +497,12 @@ final class PorticoUITests: XCTestCase {
 
     private func waitForValue(_ value: String, element: XCUIElement, timeout: TimeInterval) -> Bool {
         let predicate = NSPredicate(format: "value == %@", value)
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func waitForText(_ text: String, element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let predicate = NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text)
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
     }

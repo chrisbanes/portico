@@ -72,6 +72,7 @@ private struct PorticoCommands: Commands {
 private struct OverviewView: View {
     private enum Destination: Hashable {
         case overview
+        case portal(UUID)
     }
 
     @ObservedObject var controller: PortalController
@@ -83,73 +84,35 @@ private struct OverviewView: View {
         NavigationSplitView {
             List(selection: $selection) {
                 Label("Overview", systemImage: "door.left.hand.open")
+                    .accessibilityIdentifier("management-sidebar-overview")
                     .tag(Destination.overview)
+                ForEach(controller.portals.filter { $0.lifecycle == .active }, id: \.id) { portal in
+                    let presentation = PortalPresentation(
+                        portal: portal,
+                        status: controller.statuses[portal.id],
+                        reachability: controller.reachabilityStates[portal.id] ?? .unknown,
+                        isStale: controller.staleStatusIDs.contains(portal.id)
+                    )
+                    Button {
+                        selection = .portal(portal.id)
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(presentation.portalName)
+                            Text(presentation.tailscaleState)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("management-sidebar-portal-\(portal.name)")
+                    .tag(Destination.portal(portal.id))
+                }
             }
             .navigationTitle("Portico")
         } detail: {
-            Group {
-                if controller.portals.isEmpty, controller.operationalLogging != .undecided {
-                    VStack(spacing: 16) {
-                        ContentUnavailableView {
-                            Label("No Portals", systemImage: "door.left.hand.open")
-                        } description: {
-                            Text("Add a Portal to give a Local App a private tailnet doorway.")
-                        }
-                        Button("Add Portal") { showingAddPortal = true }
-                            .buttonStyle(.borderedProminent)
-                            .accessibilityIdentifier("overview-empty-add-portal")
-                    }
-                    .accessibilityElement(children: .contain)
-                } else {
-                    Form {
-                        Section("Overview") {
-                            LabeledContent("Helper", value: supervisor.availability.title)
-                                .accessibilityIdentifier("overview-helper-state")
-                            LabeledContent("Tailnet", value: controller.tailnetDisplaySuffix ?? "Not connected")
-                                .accessibilityIdentifier("overview-tailnet")
-                        }
-                        if PortalPresentation.showsPrerequisiteGuidance(portalCount: controller.portals.count) {
-                            Section("Before creating your first Portal") {
-                                ForEach(PortalPresentation.prerequisiteGuidance, id: \.self) { guidance in
-                                    Label(guidance, systemImage: "info.circle")
-                                }
-                            }
-                            .accessibilityIdentifier("overview-first-portal-guidance")
-                        }
-                        Section("Operational-support logging") {
-                            if controller.operationalLogging == .undecided {
-                                Button("Allow Operational-support Logging") {
-                                    controller.setOperationalLogging(.enabled)
-                                }
-                                .accessibilityIdentifier("overview-logging-enabled")
-                                Button("Disable Operational-support Logging") {
-                                    controller.setOperationalLogging(.disabled)
-                                }
-                                .accessibilityIdentifier("overview-logging-disabled")
-                            } else {
-                                Text(controller.operationalLogging == .enabled
-                                    ? "Operational-support logging is allowed."
-                                    : "Operational-support logging is disabled.")
-                            }
-                        }
-                        if !controller.portals.isEmpty {
-                            Section("Portals") {
-                                ForEach(controller.portals.filter { $0.lifecycle == .active }, id: \.id) { portal in
-                                    Text(portal.name)
-                                        .accessibilityIdentifier("overview-portal-\(portal.name)")
-                                }
-                            }
-                        }
-                        if let message = controller.message {
-                            Text(message)
-                                .foregroundStyle(.secondary)
-                                .accessibilityIdentifier("overview-message")
-                        }
-                    }
-                    .formStyle(.grouped)
-                }
-            }
-            .navigationTitle("Overview")
+            managementContent
+            .navigationTitle(selectedPortal?.name ?? "Overview")
             .accessibilityIdentifier("management-overview")
             .toolbar {
                 Button("Add Portal") { showingAddPortal = true }
@@ -172,6 +135,270 @@ private struct OverviewView: View {
                     dismissAfterPersistence: { showingAddPortal = false }
                 )
             }
+            .onChange(of: controller.portals) { _, portals in
+                guard let currentSelection = selection,
+                      case let .portal(id) = currentSelection,
+                      !portals.contains(where: { $0.id == id && $0.lifecycle == .active })
+                else { return }
+                selection = .overview
+            }
+        }
+    }
+
+    private var selectedPortal: PortalConfiguration? {
+        guard let selection, case let .portal(id) = selection else { return nil }
+        return controller.portals.first(where: { $0.id == id && $0.lifecycle == .active })
+    }
+
+    @ViewBuilder
+    private var managementContent: some View {
+        if let selectedPortal {
+            SelectedPortalView(controller: controller, portal: selectedPortal)
+                .id(selectedPortal.id)
+        } else if controller.portals.isEmpty, controller.operationalLogging != .undecided {
+            VStack(spacing: 16) {
+                ContentUnavailableView {
+                    Label("No Portals", systemImage: "door.left.hand.open")
+                } description: {
+                    Text("Add a Portal to give a Local App a private tailnet doorway.")
+                }
+                Button("Add Portal") { showingAddPortal = true }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("overview-empty-add-portal")
+            }
+            .accessibilityElement(children: .contain)
+        } else {
+            Form {
+                Section("Overview") {
+                    LabeledContent("Helper", value: supervisor.availability.title)
+                        .accessibilityIdentifier("overview-helper-state")
+                    LabeledContent("Tailnet", value: controller.tailnetDisplaySuffix ?? "Not connected")
+                        .accessibilityIdentifier("overview-tailnet")
+                }
+                if PortalPresentation.showsPrerequisiteGuidance(portalCount: controller.portals.count) {
+                    Section("Before creating your first Portal") {
+                        ForEach(PortalPresentation.prerequisiteGuidance, id: \.self) { guidance in
+                            Label(guidance, systemImage: "info.circle")
+                        }
+                    }
+                    .accessibilityIdentifier("overview-first-portal-guidance")
+                }
+                Section("Operational-support logging") {
+                    if controller.operationalLogging == .undecided {
+                        Button("Allow Operational-support Logging") {
+                            controller.setOperationalLogging(.enabled)
+                        }
+                        .accessibilityIdentifier("overview-logging-enabled")
+                        Button("Disable Operational-support Logging") {
+                            controller.setOperationalLogging(.disabled)
+                        }
+                        .accessibilityIdentifier("overview-logging-disabled")
+                    } else {
+                        Text(controller.operationalLogging == .enabled
+                            ? "Operational-support logging is allowed."
+                            : "Operational-support logging is disabled.")
+                    }
+                }
+                if !controller.portals.isEmpty {
+                    Section("Portals") {
+                        ForEach(controller.portals.filter { $0.lifecycle == .active }, id: \.id) { portal in
+                            Text(portal.name)
+                                .accessibilityIdentifier("overview-portal-\(portal.name)")
+                        }
+                    }
+                }
+                if let message = controller.message {
+                    Text(message)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("overview-message")
+                }
+            }
+            .formStyle(.grouped)
+        }
+    }
+}
+
+private struct SelectedPortalView: View {
+    @Environment(\.openWindow) private var openWindow
+    @ObservedObject var controller: PortalController
+    let portal: PortalConfiguration
+    @State private var destinationEdit: PortalDestinationEdit
+
+    init(controller: PortalController, portal: PortalConfiguration) {
+        self.controller = controller
+        self.portal = portal
+        _destinationEdit = State(initialValue: PortalDestinationEdit(destination: portal.destination))
+    }
+
+    var body: some View {
+        let isStale = controller.staleStatusIDs.contains(portal.id)
+        let status = controller.statuses[portal.id]
+        let presentation = PortalPresentation(
+            portal: portal,
+            status: status,
+            reachability: controller.reachabilityStates[portal.id] ?? .unknown,
+            isStale: isStale
+        )
+        let portalActions = controller.actionAvailability(for: portal)
+        let destinationActions = controller.actionAvailability(
+            for: portal,
+            editedDestination: destinationEdit
+        )
+        Form {
+            Section("Identity") {
+                LabeledContent("Portal Name", value: presentation.portalName)
+                    .accessibilityIdentifier("selected-portal-name")
+                LabeledContent("Assigned Name", value: presentation.assignedName ?? "Not assigned")
+                    .accessibilityIdentifier("selected-assigned-name")
+                if let explanation = presentation.collisionExplanation {
+                    Text(explanation)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Section("Portal State") {
+                LabeledContent("Desired State", value: presentation.desiredState)
+                    .accessibilityIdentifier("selected-desired-state")
+                LabeledContent("Tailscale", value: presentation.tailscaleState)
+                    .accessibilityIdentifier("selected-tailscale-state")
+                if portal.localAppPort != nil {
+                    LabeledContent("Local App", value: presentation.localAppReachability)
+                        .accessibilityIdentifier("selected-local-app-state")
+                }
+            }
+            Section("Portal URL and addresses") {
+                if let portalURL = status?.portalURL {
+                    LabeledContent(presentation.portalURLLabel, value: portalURL.absoluteString)
+                        .accessibilityIdentifier("selected-portal-url")
+                    HStack {
+                        Button("Copy Portal URL") { controller.copyPortalURL(id: portal.id) }
+                            .disabled(!portalActions.copyPortalURL)
+                            .accessibilityIdentifier("selected-copy-portal-url")
+                        Button("Open Portal URL") { controller.openPortalURL(id: portal.id) }
+                            .disabled(!portalActions.openPortalURL)
+                            .accessibilityIdentifier("selected-open-portal-url")
+                    }
+                } else {
+                    LabeledContent("Portal URL", value: "Unavailable")
+                        .accessibilityIdentifier("selected-portal-url")
+                }
+                LabeledContent("Addresses", value: status?.addresses.joined(separator: ", ") ?? "Unavailable")
+                    .accessibilityIdentifier("selected-addresses")
+            }
+            Section("Portal Destination") {
+                HStack {
+                    Button("Local App") { destinationEdit.kind = .localApp }
+                        .disabled(destinationEdit.kind == .localApp)
+                        .accessibilityIdentifier("selected-edit-destination-local")
+                    Button("Remote App") { destinationEdit.kind = .remoteApp }
+                        .disabled(destinationEdit.kind == .remoteApp)
+                        .accessibilityIdentifier("selected-edit-destination-remote")
+                }
+                .buttonStyle(.bordered)
+                if destinationEdit.kind == .localApp {
+                    HStack {
+                        TextField("Local App Port", text: $destinationEdit.localAppPort)
+                            .onSubmit { updateDestination() }
+                            .accessibilityIdentifier("selected-edit-local-app-port")
+                        Button("Update Destination") { updateDestination() }
+                            .disabled(!destinationActions.editDestination)
+                            .accessibilityIdentifier("selected-update-destination")
+                    }
+                } else {
+                    Picker("Scheme", selection: $destinationEdit.remoteAppScheme) {
+                        Text("HTTP").tag(RemoteAppScheme.http)
+                        Text("HTTPS").tag(RemoteAppScheme.https)
+                    }
+                    .accessibilityIdentifier("selected-edit-remote-app-scheme")
+                    TextField("Remote App Host", text: $destinationEdit.remoteAppHost)
+                        .accessibilityIdentifier("selected-edit-remote-app-host")
+                    HStack {
+                        TextField("Remote App Port", text: $destinationEdit.remoteAppPort)
+                            .onSubmit { updateDestination() }
+                            .accessibilityIdentifier("selected-edit-remote-app-port")
+                        Button("Update Destination") { updateDestination() }
+                            .disabled(!destinationActions.editDestination)
+                            .accessibilityIdentifier("selected-update-destination")
+                    }
+                }
+            }
+            Section("Actions") {
+                if status?.state == .authenticating {
+                    Button("Authenticate") { controller.authenticate(id: portal.id) }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!portalActions.authenticate)
+                        .accessibilityIdentifier("selected-authenticate")
+                }
+                HStack {
+                    FocusRestoringButton(
+                        title: portal.desiredState == .enabled ? "Stop" : "Start",
+                        isEnabled: portal.desiredState == .enabled ? portalActions.stop : portalActions.start
+                    ) {
+                        if portal.desiredState == .enabled {
+                            controller.stopPortal(id: portal.id)
+                        } else {
+                            controller.startPortal(id: portal.id)
+                        }
+                    }
+                    .accessibilityIdentifier("selected-start-stop")
+                }
+                Button("Diagnostics") { openWindow(id: "diagnostics") }
+                    .accessibilityIdentifier("selected-portal-diagnostics")
+            }
+            if let message = controller.message {
+                Text(message)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("selected-portal-message")
+            }
+        }
+        .formStyle(.grouped)
+        .accessibilityIdentifier("selected-portal-\(portal.name)")
+        .navigationTitle(portal.name)
+        .onChange(of: portal.destination) { _, destination in
+            destinationEdit = PortalDestinationEdit(destination: destination)
+        }
+    }
+
+    private func updateDestination() {
+        controller.updateDestination(id: portal.id, edit: destinationEdit)
+    }
+}
+
+private struct FocusRestoringButton: NSViewRepresentable {
+    let title: String
+    let isEnabled: Bool
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.performAction))
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        let titleChanged = button.title != title
+        context.coordinator.action = action
+        button.title = title
+        button.isEnabled = isEnabled
+        guard titleChanged else { return }
+        DispatchQueue.main.async {
+            button.window?.makeFirstResponder(button)
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        @objc func performAction() {
+            action()
         }
     }
 }
