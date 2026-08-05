@@ -44,6 +44,23 @@ func remoteAppDestination(t *testing.T, remote *httptest.Server) Destination {
 	return Destination{Kind: DestinationRemoteApp, Scheme: remoteURL.Scheme, Host: "app.example.com", Port: uint16(port)}
 }
 
+func trustedRemoteProxy(t *testing.T, destination Destination, remote *httptest.Server) (http.Handler, error) {
+	t.Helper()
+	remoteURL, err := url.Parse(remote.URL)
+	if err != nil {
+		return nil, err
+	}
+	transport := remote.Client().Transport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, remoteURL.Host)
+	}
+	target := &url.URL{
+		Scheme: destination.Scheme,
+		Host:   net.JoinHostPort(destination.Host, strconv.Itoa(int(destination.Port))),
+	}
+	return newRemoteProxy(target, transport), nil
+}
+
 func TestDestinationRejectsIPv4MappedLoopback(t *testing.T) {
 	destination := Destination{
 		Kind: DestinationRemoteApp, Scheme: "https", Host: "::ffff:127.0.0.1", Port: 443,
@@ -216,6 +233,140 @@ func TestRuntimePortEditPreservesIdentityAndDrainsAcceptedHTTPAndWebSocketTraffi
 	remainder, err := io.ReadAll(response.Body)
 	if err != nil || string(remainder) != "old-end\n" {
 		t.Fatalf("old HTTP remainder = (%q, %v), want drained old Local App", remainder, err)
+	}
+}
+
+func TestRuntimeDestinationReplacementFailureRetainsServingPortalAndCanRetry(t *testing.T) {
+	oldLocalApp := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "old")
+	}))
+	t.Cleanup(oldLocalApp.Close)
+	newLocalApp := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "new")
+	}))
+	t.Cleanup(newLocalApp.Close)
+	oldPort, _ := localAppPort(t, oldLocalApp.URL)
+	newPort, _ := localAppPort(t, newLocalApp.URL)
+	tailnetListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := newFakeFactory()
+	factory.status = Status{
+		BackendState: "Running",
+		DNSName:      "hermes.example.ts.net.",
+		CertDomains:  []string{"hermes.example.ts.net"},
+	}
+	factory.node.realListener = tailnetListener
+	runtime := NewRuntime(t.TempDir(), factory.New)
+	shouldFail := true
+	runtime.proxyForDestination = func(destination Destination) (http.Handler, error) {
+		if destination.Port == uint16(newPort) && shouldFail {
+			return nil, errors.New("replacement failed")
+		}
+		return newDestinationProxy(destination)
+	}
+	desired := []Config{{
+		ID: testPortalID, Name: "hermes", Destination: localAppDestination(uint16(oldPort)), DesiredState: DesiredStateEnabled,
+	}}
+	if entries, reconcileErr := runtime.Reconcile(context.Background(), desired, func(Event) {}); reconcileErr != nil || entries[0].Outcome != OutcomeConverged {
+		t.Fatalf("initial Reconcile = (%+v, %v), want converged", entries, reconcileErr)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	proxyURL := "http://" + tailnetListener.Addr().String()
+
+	desired[0].Destination = localAppDestination(uint16(newPort))
+	entries, err := runtime.Reconcile(context.Background(), desired, func(Event) {})
+	if err != nil || entries[0].Outcome != OutcomeStartFailed {
+		t.Fatalf("failed replacement = (%+v, %v), want startFailed", entries, err)
+	}
+	response, err := http.Get(proxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if string(body) != "old" {
+		t.Fatalf("old destination response = %q, want old", body)
+	}
+	if len(factory.created) != 1 || factory.node.realListener != tailnetListener {
+		t.Fatal("failed replacement changed Portal node or listener")
+	}
+
+	shouldFail = false
+	entries, err = runtime.Reconcile(context.Background(), desired, func(Event) {})
+	if err != nil || entries[0].Outcome != OutcomeConverged {
+		t.Fatalf("replacement retry = (%+v, %v), want converged", entries, err)
+	}
+	response, err = http.Get(proxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if string(body) != "new" {
+		t.Fatalf("replacement retry response = %q, want new", body)
+	}
+}
+
+func TestRuntimeDestinationReplacementReroutesNewRequestsToRemoteTLSOrigin(t *testing.T) {
+	oldRemote := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "old TLS")
+	}))
+	t.Cleanup(oldRemote.Close)
+	newRemote := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "new TLS")
+	}))
+	t.Cleanup(newRemote.Close)
+	oldDestination := remoteAppDestination(t, oldRemote)
+	newDestination := remoteAppDestination(t, newRemote)
+	tailnetListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := newFakeFactory()
+	factory.status = Status{
+		BackendState: "Running",
+		DNSName:      "hermes.example.ts.net.",
+		CertDomains:  []string{"hermes.example.ts.net"},
+	}
+	factory.node.realListener = tailnetListener
+	runtime := NewRuntime(t.TempDir(), factory.New)
+	runtime.proxyForDestination = func(destination Destination) (http.Handler, error) {
+		switch destination.Port {
+		case oldDestination.Port:
+			return trustedRemoteProxy(t, destination, oldRemote)
+		case newDestination.Port:
+			return trustedRemoteProxy(t, destination, newRemote)
+		default:
+			return nil, errors.New("unexpected Remote App destination")
+		}
+	}
+	desired := []Config{{
+		ID: testPortalID, Name: "hermes", Destination: oldDestination, DesiredState: DesiredStateEnabled,
+	}}
+	if entries, reconcileErr := runtime.Reconcile(context.Background(), desired, func(Event) {}); reconcileErr != nil || entries[0].Outcome != OutcomeConverged {
+		t.Fatalf("initial Reconcile = (%+v, %v), want converged", entries, reconcileErr)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	proxyURL := "http://" + tailnetListener.Addr().String()
+
+	desired[0].Destination = newDestination
+	entries, err := runtime.Reconcile(context.Background(), desired, func(Event) {})
+	if err != nil || entries[0].Outcome != OutcomeConverged {
+		t.Fatalf("TLS replacement = (%+v, %v), want converged", entries, err)
+	}
+	response, err := http.Get(proxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if string(body) != "new TLS" {
+		t.Fatalf("TLS replacement response = %q, want new TLS", body)
+	}
+	if len(factory.created) != 1 || factory.node.realListener != tailnetListener {
+		t.Fatal("TLS replacement changed Portal node or listener")
 	}
 }
 

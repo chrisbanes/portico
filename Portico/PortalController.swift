@@ -14,6 +14,63 @@ enum PortalCreationKind: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+struct PortalDestinationEdit: Equatable {
+    var kind: PortalCreationKind
+    var localAppPort: String
+    var remoteAppScheme: RemoteAppScheme
+    var remoteAppHost: String
+    var remoteAppPort: String
+
+    init(
+        kind: PortalCreationKind,
+        localAppPort: String = "",
+        remoteAppScheme: RemoteAppScheme = .https,
+        remoteAppHost: String = "",
+        remoteAppPort: String = ""
+    ) {
+        self.kind = kind
+        self.localAppPort = localAppPort
+        self.remoteAppScheme = remoteAppScheme
+        self.remoteAppHost = remoteAppHost
+        self.remoteAppPort = remoteAppPort
+    }
+
+    init(destination: PortalDestination) {
+        switch destination {
+        case let .localApp(port):
+            self.init(kind: .localApp, localAppPort: String(port))
+        case let .remoteApp(scheme, host, port):
+            self.init(
+                kind: .remoteApp,
+                remoteAppScheme: scheme,
+                remoteAppHost: host,
+                remoteAppPort: String(port)
+            )
+        }
+    }
+
+    func validated(name: String) throws -> PortalDestination {
+        switch kind {
+        case .localApp:
+            let port = try PortalInputValidator.validate(name: name, port: localAppPort)
+            guard let destination = PortalDestination(localAppPort: port) else {
+                throw PortalValidationError.invalidPort
+            }
+            return destination
+        case .remoteApp:
+            let port = try PortalInputValidator.validate(name: name, port: remoteAppPort)
+            guard let destination = PortalDestination(
+                remoteAppScheme: remoteAppScheme,
+                host: remoteAppHost,
+                port: port
+            ) else {
+                throw PortalValidationError.invalidRemoteHost
+            }
+            return destination
+        }
+    }
+}
+
 struct PortalRemovalNotice: Equatable, Identifiable {
     let id: UUID
     let portalName: String
@@ -341,24 +398,18 @@ final class PortalController: ObservableObject {
         removalNotices.removeAll { $0.id == id }
     }
 
-    func updateLocalAppPort(id: UUID, port: String) {
+    func updateDestination(id: UUID, edit: PortalDestinationEdit) {
         guard let index = installation.portals.firstIndex(where: {
             $0.id == id && $0.lifecycle == .active
         }) else { return }
-        let localAppPort: UInt16
+        let destination: PortalDestination
         do {
-            localAppPort = try PortalInputValidator.validate(
-                name: installation.portals[index].name,
-                port: port
-            )
+            destination = try edit.validated(name: installation.portals[index].name)
         } catch {
-            message = "Enter a port from 1 through 65535."
+            message = "Enter valid destination details."
             return
         }
-        guard installation.portals[index].destination.localAppPort != nil,
-              installation.portals[index].destination.localAppPort != localAppPort,
-              let destination = PortalDestination(localAppPort: localAppPort)
-        else { return }
+        guard installation.portals[index].destination != destination else { return }
         var updated = installation
         updated.portals[index].destination = destination
         _ = savePortalOperation(updated)
@@ -416,15 +467,15 @@ final class PortalController: ObservableObject {
 
     func actionAvailability(
         for portal: PortalConfiguration? = nil,
-        editedPort: String? = nil
+        editedDestination: PortalDestinationEdit? = nil
     ) -> PortalActionAvailability {
         let addInputsValid = portal == nil && (try? newPortalDestination()) != nil
-        let editedPortValid: Bool
-        if let portal, let localPort = portal.localAppPort, let editedPort, editedPort != String(localPort),
-           let parsed = try? PortalInputValidator.validate(name: portal.name, port: editedPort) {
-            editedPortValid = parsed > 0
+        let editedDestinationValid: Bool
+        if let portal, let editedDestination,
+           let destination = try? editedDestination.validated(name: portal.name) {
+            editedDestinationValid = destination != portal.destination
         } else {
-            editedPortValid = false
+            editedDestinationValid = false
         }
         let status = portal.flatMap { statuses[$0.id] }
         return PortalActionAvailability(context: PortalActionContext(
@@ -440,26 +491,19 @@ final class PortalController: ObservableObject {
             removalState: portal.flatMap { removalStates[$0.id] },
             hasTailnetBinding: installation.tailnetBinding != nil,
             portalCount: installation.portals.count,
-            isEditedPortValid: editedPortValid,
+            isEditedDestinationValid: editedDestinationValid,
             isRefreshingLocalApps: isRefreshingLocalApps
         ))
     }
 
     private func newPortalDestination() throws -> PortalDestination {
-        switch creationKind {
-        case .localApp:
-            let port = try PortalInputValidator.validate(name: portalName, port: localAppPort)
-            guard let destination = PortalDestination(localAppPort: port) else { throw PortalValidationError.invalidPort }
-            return destination
-        case .remoteApp:
-            let port = try PortalInputValidator.validate(name: portalName, port: remoteAppPort)
-            guard let destination = PortalDestination(
-                remoteAppScheme: remoteAppScheme,
-                host: remoteAppHost,
-                port: port
-            ) else { throw PortalValidationError.invalidRemoteHost }
-            return destination
-        }
+        try PortalDestinationEdit(
+            kind: creationKind,
+            localAppPort: localAppPort,
+            remoteAppScheme: remoteAppScheme,
+            remoteAppHost: remoteAppHost,
+            remoteAppPort: remoteAppPort
+        ).validated(name: portalName)
     }
 
     func copyPortalURL(id: UUID) {

@@ -47,6 +47,36 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
     }
 
+    func testLocalAndRemoteDestinationEditorsSupportCrossKindChanges() {
+        var app = launch(scenario: "online")
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.textFields["edit-local-app-port"].waitForExistence(timeout: 3))
+        app.buttons["edit-destination-remote"].click()
+        XCTAssertTrue(app.textFields["edit-remote-app-host"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.textFields["edit-local-app-port"].exists)
+        app.textFields["edit-remote-app-host"].click()
+        app.textFields["edit-remote-app-host"].typeText("app.example.com")
+        app.textFields["edit-remote-app-port"].click()
+        app.textFields["edit-remote-app-port"].typeText("443")
+        XCTAssertTrue(app.buttons["update-destination"].isEnabled)
+        app.buttons["update-destination"].click()
+        XCTAssertTrue(app.buttons["start-stop"].isEnabled)
+
+        app = launch(scenario: "remote-online")
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.textFields["edit-remote-app-host"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.textFields["edit-local-app-port"].exists)
+        app.buttons["edit-destination-local"].click()
+        XCTAssertTrue(app.textFields["edit-local-app-port"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.textFields["edit-remote-app-host"].exists)
+        app.textFields["edit-local-app-port"].click()
+        app.textFields["edit-local-app-port"].typeKey("a", modifierFlags: .command)
+        app.textFields["edit-local-app-port"].typeText("8081")
+        XCTAssertTrue(app.buttons["update-destination"].isEnabled)
+        app.buttons["update-destination"].click()
+        XCTAssertTrue(app.buttons["start-stop"].isEnabled)
+    }
+
     func testStaleAndAuthenticatingActions() {
         var app = launch(scenario: "stale")
         openMenuBarExtra(app)

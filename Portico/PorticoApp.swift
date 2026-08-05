@@ -412,14 +412,14 @@ private struct PortalStatusView: View {
     @ObservedObject var controller: PortalController
     let portal: PortalConfiguration
     let onRemove: () -> Void
-    @State private var localAppPort: String
+    @State private var destinationEdit: PortalDestinationEdit
     @FocusState private var startStopFocused: Bool
 
     init(controller: PortalController, portal: PortalConfiguration, onRemove: @escaping () -> Void) {
         self.controller = controller
         self.portal = portal
         self.onRemove = onRemove
-        _localAppPort = State(initialValue: portal.localAppPort.map(String.init) ?? "")
+        _destinationEdit = State(initialValue: PortalDestinationEdit(destination: portal.destination))
     }
 
     var body: some View {
@@ -432,7 +432,10 @@ private struct PortalStatusView: View {
             isStale: isStale
         )
         let rowActions = controller.actionAvailability(for: portal)
-        let editedPortActions = controller.actionAvailability(for: portal, editedPort: localAppPort)
+        let editedDestinationActions = controller.actionAvailability(
+            for: portal,
+            editedDestination: destinationEdit
+        )
         Text(presentation.portalName).font(.headline)
             .accessibilityLabel("Portal Name, \(presentation.portalName)")
             .accessibilityIdentifier("portal-name")
@@ -477,39 +480,67 @@ private struct PortalStatusView: View {
                     .accessibilityIdentifier("authenticate")
             }
         }
-        HStack {
-            if portal.localAppPort != nil {
-                Text("Local App Port")
-                Spacer()
-                TextField("Local App Port", text: $localAppPort)
-                    .frame(width: 80)
-                    .onSubmit(updatePort)
-                    .accessibilityIdentifier("edit-local-app-port")
-                Button("Update") { updatePort() }
-                    .controlSize(.small)
-                    .disabled(!editedPortActions.editPort)
-                    .accessibilityIdentifier("update-local-app-port")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Button("Local App") { destinationEdit.kind = .localApp }
+                    .accessibilityIdentifier("edit-destination-local")
+                    .disabled(destinationEdit.kind == .localApp)
+                Button("Remote App") { destinationEdit.kind = .remoteApp }
+                    .accessibilityIdentifier("edit-destination-remote")
+                    .disabled(destinationEdit.kind == .remoteApp)
+            }
+            .buttonStyle(.bordered)
+            if destinationEdit.kind == .localApp {
+                HStack {
+                    TextField("Local App Port", text: $destinationEdit.localAppPort)
+                        .frame(width: 80)
+                        .onSubmit { updateDestination() }
+                        .accessibilityIdentifier("edit-local-app-port")
+                    Button("Update Destination") { updateDestination() }
+                        .controlSize(.small)
+                        .disabled(!editedDestinationActions.editDestination)
+                        .accessibilityIdentifier("update-destination")
+                }
             } else {
-                Text("Remote App")
-                Spacer()
-            }
-            Button(portal.desiredState == .enabled ? "Stop" : "Start") {
-                if portal.desiredState == .enabled {
-                    controller.stopPortal(id: portal.id)
-                } else {
-                    controller.startPortal(id: portal.id)
+                HStack {
+                    Picker("Scheme", selection: $destinationEdit.remoteAppScheme) {
+                        Text("HTTP").tag(RemoteAppScheme.http)
+                        Text("HTTPS").tag(RemoteAppScheme.https)
+                    }
+                    .accessibilityIdentifier("edit-remote-app-scheme")
+                    TextField("Remote App Host", text: $destinationEdit.remoteAppHost)
+                        .accessibilityIdentifier("edit-remote-app-host")
                 }
-                DispatchQueue.main.async {
-                    startStopFocused = true
+                HStack {
+                    TextField("Remote App Port", text: $destinationEdit.remoteAppPort)
+                        .frame(width: 80)
+                        .onSubmit { updateDestination() }
+                        .accessibilityIdentifier("edit-remote-app-port")
+                    Button("Update Destination") { updateDestination() }
+                        .controlSize(.small)
+                        .disabled(!editedDestinationActions.editDestination)
+                        .accessibilityIdentifier("update-destination")
                 }
             }
-            .controlSize(.small)
-            .focusable()
-            .focused($startStopFocused)
-            .accessibilityIdentifier("start-stop")
-            .disabled(portal.desiredState == .enabled
-                ? !rowActions.stop
-                : !rowActions.start)
+            HStack {
+                Button(portal.desiredState == .enabled ? "Stop" : "Start") {
+                    if portal.desiredState == .enabled {
+                        controller.stopPortal(id: portal.id)
+                    } else {
+                        controller.startPortal(id: portal.id)
+                    }
+                    DispatchQueue.main.async {
+                        startStopFocused = true
+                    }
+                }
+                .controlSize(.small)
+                .focusable()
+                .focused($startStopFocused)
+                .accessibilityIdentifier("start-stop")
+                .disabled(portal.desiredState == .enabled
+                    ? !rowActions.stop
+                    : !rowActions.start)
+            }
         }
         Button("Diagnostics") { openWindow(id: "diagnostics") }
             .controlSize(.small)
@@ -519,8 +550,8 @@ private struct PortalStatusView: View {
             .accessibilityIdentifier("remove-portal")
     }
 
-    private func updatePort() {
-        controller.updateLocalAppPort(id: portal.id, port: localAppPort)
+    private func updateDestination() {
+        controller.updateDestination(id: portal.id, edit: destinationEdit)
     }
 }
 

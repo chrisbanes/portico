@@ -5,6 +5,7 @@ import Foundation
 enum UITestScenario: String {
     case firstRun = "first-run"
     case online
+    case remoteOnline = "remote-online"
     case authenticating
     case stale
     case restarting
@@ -62,6 +63,17 @@ struct UITestLaunchConfiguration {
                 operationalLogging: .enabled,
                 launchAtLoginOffer: .notOffered
             ))
+        case .remoteOnline:
+            try store.save(InstallationRecord(
+                tailnetBinding: Self.tailnetBinding,
+                portals: [Self.portal(destination: .remoteApp(
+                    scheme: .https,
+                    host: "app.example.com",
+                    port: 443
+                ))],
+                operationalLogging: .enabled,
+                launchAtLoginOffer: .declined
+            ))
         case .online, .authenticating, .stale, .restarting, .terminalFailure:
             try store.save(InstallationRecord(
                 tailnetBinding: Self.tailnetBinding,
@@ -92,13 +104,14 @@ struct UITestLaunchConfiguration {
     )
 
     private static func portal(
+        destination: PortalDestination = .localApp(port: 8080),
         lifecycle: PortalLifecycle = .active,
         removalAssignedName: String? = nil
     ) -> PortalConfiguration {
         PortalConfiguration(
             id: portalID,
             name: "portal-one",
-            localAppPort: 8080,
+            destination: destination,
             createdAt: Date(timeIntervalSince1970: 1_700_000_000),
             desiredState: .enabled,
             lifecycle: lifecycle,
@@ -259,7 +272,7 @@ private final class UITestHelperProcess: HelperProcess {
     }
 
     private func emitStatuses(for portals: [ReconcilePortalPayload]) {
-        guard [.online, .authenticating, .stale, .restarting, .loginOffer].contains(scenario) else { return }
+        guard [.online, .remoteOnline, .authenticating, .stale, .restarting, .loginOffer].contains(scenario) else { return }
         for portal in portals {
             let state: PortalTailscaleState = scenario == .authenticating ? .authenticating : .online
             deliver(HelperEvent(
