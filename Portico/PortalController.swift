@@ -14,6 +14,12 @@ enum PortalCreationKind: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+enum PortalCreationOutcome: Equatable {
+    case validationError(PortalValidationError)
+    case persistenceFailure
+    case persisted(PortalConfiguration)
+}
+
 struct PortalDestinationEdit: Equatable {
     var kind: PortalCreationKind
     var localAppPort: String
@@ -94,6 +100,7 @@ final class PortalController: ObservableObject {
     @Published private(set) var alerts: [InstallationAlert] = []
     @Published private(set) var tailnetDisplaySuffix: String?
     @Published private(set) var message: String?
+    @Published private(set) var portalCreationError: String?
     @Published private(set) var localApps: [LocalAppCandidatePayload] = []
     @Published private(set) var isRefreshingLocalApps = false
     @Published private(set) var localAppsMessage: String?
@@ -300,7 +307,7 @@ final class PortalController: ObservableObject {
     }
 
     @discardableResult
-    func addPortal() -> PortalValidationError? {
+    func addPortal() -> PortalCreationOutcome? {
         guard operationalLogging != .undecided else {
             message = "Choose an operational-support logging setting before adding a Portal."
             return nil
@@ -309,8 +316,8 @@ final class PortalController: ObservableObject {
         do {
             destination = try newPortalDestination()
         } catch let error as PortalValidationError {
-            message = "Enter a lower-case DNS label and valid destination details."
-            return error
+            portalCreationError = "Enter a lower-case DNS label and valid destination details."
+            return .validationError(error)
         } catch {
             return nil
         }
@@ -326,20 +333,28 @@ final class PortalController: ObservableObject {
             try store.save(updated)
             installation = updated
             publishInstallation()
-            message = nil
-            portalName = ""
-            localAppPort = ""
-            remoteAppHost = ""
-            remoteAppPort = ""
-            discoveryGeneration += 1
-            localApps = []
-            isRefreshingLocalApps = false
-            localAppsMessage = nil
+            portalCreationError = nil
+            discardPortalDraft()
             scheduleReconciliation()
+            return .persisted(configuration)
         } catch {
-            message = "The Portal could not be saved."
+            portalCreationError = "The Portal could not be saved."
+            return .persistenceFailure
         }
-        return nil
+    }
+
+    func discardPortalDraft() {
+        portalName = ""
+        localAppPort = ""
+        creationKind = .localApp
+        remoteAppScheme = .https
+        remoteAppHost = ""
+        remoteAppPort = ""
+        discoveryGeneration += 1
+        localApps = []
+        isRefreshingLocalApps = false
+        localAppsMessage = nil
+        portalCreationError = nil
     }
 
     func startPortal(id: UUID) {

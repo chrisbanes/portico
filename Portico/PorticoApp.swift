@@ -77,6 +77,7 @@ private struct OverviewView: View {
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
     @State private var selection: Destination? = .overview
+    @State private var showingAddPortal = false
 
     var body: some View {
         NavigationSplitView {
@@ -86,61 +87,97 @@ private struct OverviewView: View {
             }
             .navigationTitle("Portico")
         } detail: {
-            Form {
-                Section("Overview") {
-                    LabeledContent("Helper", value: supervisor.availability.title)
-                        .accessibilityIdentifier("overview-helper-state")
-                    LabeledContent("Tailnet", value: controller.tailnetDisplaySuffix ?? "Not connected")
-                        .accessibilityIdentifier("overview-tailnet")
-                }
-                if PortalPresentation.showsPrerequisiteGuidance(portalCount: controller.portals.count) {
-                    Section("Before creating your first Portal") {
-                        ForEach(PortalPresentation.prerequisiteGuidance, id: \.self) { guidance in
-                            Label(guidance, systemImage: "info.circle")
+            Group {
+                if controller.portals.isEmpty, controller.operationalLogging != .undecided {
+                    VStack(spacing: 16) {
+                        ContentUnavailableView {
+                            Label("No Portals", systemImage: "door.left.hand.open")
+                        } description: {
+                            Text("Add a Portal to give a Local App a private tailnet doorway.")
+                        }
+                        Button("Add Portal") { showingAddPortal = true }
+                            .buttonStyle(.borderedProminent)
+                            .accessibilityIdentifier("overview-empty-add-portal")
+                    }
+                    .accessibilityElement(children: .contain)
+                } else {
+                    Form {
+                        Section("Overview") {
+                            LabeledContent("Helper", value: supervisor.availability.title)
+                                .accessibilityIdentifier("overview-helper-state")
+                            LabeledContent("Tailnet", value: controller.tailnetDisplaySuffix ?? "Not connected")
+                                .accessibilityIdentifier("overview-tailnet")
+                        }
+                        if PortalPresentation.showsPrerequisiteGuidance(portalCount: controller.portals.count) {
+                            Section("Before creating your first Portal") {
+                                ForEach(PortalPresentation.prerequisiteGuidance, id: \.self) { guidance in
+                                    Label(guidance, systemImage: "info.circle")
+                                }
+                            }
+                            .accessibilityIdentifier("overview-first-portal-guidance")
+                        }
+                        Section("Operational-support logging") {
+                            if controller.operationalLogging == .undecided {
+                                Button("Allow Operational-support Logging") {
+                                    controller.setOperationalLogging(.enabled)
+                                }
+                                .accessibilityIdentifier("overview-logging-enabled")
+                                Button("Disable Operational-support Logging") {
+                                    controller.setOperationalLogging(.disabled)
+                                }
+                                .accessibilityIdentifier("overview-logging-disabled")
+                            } else {
+                                Text(controller.operationalLogging == .enabled
+                                    ? "Operational-support logging is allowed."
+                                    : "Operational-support logging is disabled.")
+                            }
+                        }
+                        if !controller.portals.isEmpty {
+                            Section("Portals") {
+                                ForEach(controller.portals.filter { $0.lifecycle == .active }, id: \.id) { portal in
+                                    Text(portal.name)
+                                        .accessibilityIdentifier("overview-portal-\(portal.name)")
+                                }
+                            }
+                        }
+                        if let message = controller.message {
+                            Text(message)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("overview-message")
                         }
                     }
-                    .accessibilityIdentifier("overview-first-portal-guidance")
-                }
-                Section("Operational-support logging") {
-                    if controller.operationalLogging == .undecided {
-                        Button("Allow Operational-support Logging") {
-                            controller.setOperationalLogging(.enabled)
-                        }
-                        .accessibilityIdentifier("overview-logging-enabled")
-                        Button("Disable Operational-support Logging") {
-                            controller.setOperationalLogging(.disabled)
-                        }
-                        .accessibilityIdentifier("overview-logging-disabled")
-                    } else {
-                        Text(controller.operationalLogging == .enabled
-                            ? "Operational-support logging is allowed."
-                            : "Operational-support logging is disabled.")
-                    }
-                }
-                Section {
-                    Button("Add Portal") {}
-                        .disabled(true)
-                        .accessibilityIdentifier("overview-add-portal")
-                }
-                if let message = controller.message {
-                    Text(message)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("overview-message")
+                    .formStyle(.grouped)
                 }
             }
-            .formStyle(.grouped)
             .navigationTitle("Overview")
             .accessibilityIdentifier("management-overview")
+            .toolbar {
+                Button("Add Portal") { showingAddPortal = true }
+                    .disabled(controller.operationalLogging == .undecided)
+                    .accessibilityIdentifier("overview-add-portal")
+            }
+            .sheet(isPresented: Binding(
+                get: { showingAddPortal },
+                set: { isPresented in
+                    if !isPresented { controller.discardPortalDraft() }
+                    showingAddPortal = isPresented
+                }
+            )) {
+                AddPortalSheet(
+                    controller: controller,
+                    cancel: {
+                        controller.discardPortalDraft()
+                        showingAddPortal = false
+                    },
+                    dismissAfterPersistence: { showingAddPortal = false }
+                )
+            }
         }
     }
 }
 
 private struct PortalView: View {
     private enum AccessibilityFocusTarget: Hashable {
-        case portalNameField
-        case localAppPortField
-        case remoteAppHostField
-        case remoteAppPortField
         case portal(UUID)
         case removalNotice(UUID)
     }
@@ -153,7 +190,6 @@ private struct PortalView: View {
     @State private var showingResetConfirmation = false
     @State private var removalCandidate: PortalConfiguration?
     @State private var removalCompletionFocusID: UUID?
-    @FocusState private var inputFocus: AccessibilityFocusTarget?
     @AccessibilityFocusState private var accessibilityFocus: AccessibilityFocusTarget?
 
     var body: some View {
@@ -206,7 +242,6 @@ private struct PortalView: View {
                 .accessibilityFocused($accessibilityFocus, equals: .portal(portal.id))
                 Divider()
             }
-            addPortalForm
             if controller.canResetTailnet {
                 Divider()
                 Button("Reset Tailnet", role: .destructive) {
@@ -295,11 +330,26 @@ private struct PortalView: View {
         .keyboardShortcut("q")
         .accessibilityIdentifier("quit")
     }
+}
 
-    private var addPortalForm: some View {
+private struct AddPortalSheet: View {
+    private enum FocusTarget: Hashable {
+        case portalName
+        case localAppPort
+        case remoteAppHost
+        case remoteAppPort
+    }
+
+    @ObservedObject var controller: PortalController
+    let cancel: () -> Void
+    let dismissAfterPersistence: () -> Void
+    @FocusState private var inputFocus: FocusTarget?
+    @AccessibilityFocusState private var accessibilityFocus: FocusTarget?
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Add Portal").font(.headline)
-                .accessibilityIdentifier("add-form")
+                .accessibilityIdentifier("add-portal-sheet")
             if PortalPresentation.showsPrerequisiteGuidance(portalCount: controller.portals.count) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Before creating your first Portal").font(.subheadline)
@@ -311,56 +361,38 @@ private struct PortalView: View {
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("add-guidance")
             }
-            if controller.operationalLogging == .undecided {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Choose operational-support logging before adding a Portal.")
-                        .font(.caption)
-                    HStack {
-                        Button("Allow Operational-support Logging") {
-                            controller.setOperationalLogging(.enabled)
-                        }
-                        .accessibilityIdentifier("logging-enabled")
-                        Button("Disable Operational-support Logging") {
-                            controller.setOperationalLogging(.disabled)
-                        }
-                        .accessibilityIdentifier("logging-disabled")
-                    }
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("logging-choice")
-            }
             HStack {
                 Text("Detected Local Apps").font(.subheadline)
                 Spacer()
                 Button("Refresh") { controller.refreshLocalApps() }
                     .disabled(!controller.actionAvailability().refreshLocalApps)
+                    .accessibilityIdentifier("refresh-local-apps")
             }
             if controller.isRefreshingLocalApps {
                 ProgressView()
                     .controlSize(.small)
             }
             ForEach(controller.localApps, id: \.localAppPort) { candidate in
-                Button {
+                Button("Use \(candidate.processLabel) on port \(candidate.localAppPort)") {
                     controller.selectLocalApp(candidate)
-                } label: {
-                    HStack {
-                        Text(candidate.processLabel)
-                        Spacer()
-                        Text(String(candidate.localAppPort))
-                            .foregroundStyle(.secondary)
-                    }
                 }
-                .buttonStyle(.plain)
+                .accessibilityIdentifier("local-app-\(candidate.localAppPort)")
             }
             if let message = controller.localAppsMessage {
                 Text(message)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            if let error = controller.portalCreationError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("add-portal-error")
+            }
             TextField("Portal Name", text: $controller.portalName)
                 .accessibilityIdentifier("portal-name-field")
-                .focused($inputFocus, equals: .portalNameField)
-                .accessibilityFocused($accessibilityFocus, equals: .portalNameField)
+                .focused($inputFocus, equals: .portalName)
+                .accessibilityFocused($accessibilityFocus, equals: .portalName)
                 .onSubmit { validateNameAndAdvance() }
             Picker("Destination", selection: $controller.creationKind) {
                 Text("Local App").tag(PortalCreationKind.localApp)
@@ -371,8 +403,8 @@ private struct PortalView: View {
             if controller.creationKind == .localApp {
                 TextField("Local App Port", text: $controller.localAppPort)
                     .accessibilityIdentifier("local-app-port-field")
-                    .focused($inputFocus, equals: .localAppPortField)
-                    .accessibilityFocused($accessibilityFocus, equals: .localAppPortField)
+                    .focused($inputFocus, equals: .localAppPort)
+                    .accessibilityFocused($accessibilityFocus, equals: .localAppPort)
                     .onSubmit { submitPortal() }
             } else {
                 Picker("Scheme", selection: $controller.remoteAppScheme) {
@@ -382,55 +414,70 @@ private struct PortalView: View {
                 .accessibilityIdentifier("remote-app-scheme")
                 TextField("Remote App Host", text: $controller.remoteAppHost)
                     .accessibilityIdentifier("remote-app-host-field")
-                    .focused($inputFocus, equals: .remoteAppHostField)
-                    .accessibilityFocused($accessibilityFocus, equals: .remoteAppHostField)
+                    .focused($inputFocus, equals: .remoteAppHost)
+                    .accessibilityFocused($accessibilityFocus, equals: .remoteAppHost)
                 TextField("Remote App Port", text: $controller.remoteAppPort)
                     .accessibilityIdentifier("remote-app-port-field")
-                    .focused($inputFocus, equals: .remoteAppPortField)
-                    .accessibilityFocused($accessibilityFocus, equals: .remoteAppPortField)
+                    .focused($inputFocus, equals: .remoteAppPort)
+                    .accessibilityFocused($accessibilityFocus, equals: .remoteAppPort)
                     .onSubmit { submitPortal() }
             }
-            Button("Add Portal") { submitPortal() }
-                .buttonStyle(.borderedProminent)
-                .disabled(!controller.actionAvailability().addPortal)
-                .accessibilityIdentifier("add-portal")
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("add-portal-cancel")
+                Button("Add Portal") { submitPortal() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!controller.actionAvailability().addPortal)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("add-portal")
+            }
         }
+        .padding()
+        .frame(width: 480)
+        .onAppear { inputFocus = .portalName }
     }
 
     private func validateNameAndAdvance() {
         do {
             _ = try PortalInputValidator.validate(name: controller.portalName, port: "1")
-            let target: AccessibilityFocusTarget = controller.creationKind == .localApp
-                ? .localAppPortField
-                : .remoteAppHostField
+            let target: FocusTarget = controller.creationKind == .localApp
+                ? .localAppPort
+                : .remoteAppHost
             inputFocus = target
             accessibilityFocus = target
         } catch {
-            inputFocus = .portalNameField
-            accessibilityFocus = .portalNameField
+            inputFocus = .portalName
+            accessibilityFocus = .portalName
         }
     }
 
     private func submitPortal() {
         switch controller.addPortal() {
-        case .invalidName:
-            inputFocus = .portalNameField
-            accessibilityFocus = .portalNameField
-        case .invalidPort:
-            let target: AccessibilityFocusTarget = controller.creationKind == .localApp
-                ? .localAppPortField
-                : .remoteAppPortField
+        case .validationError(.invalidName):
+            inputFocus = .portalName
+            accessibilityFocus = .portalName
+        case .validationError(.invalidPort):
+            let target: FocusTarget = controller.creationKind == .localApp
+                ? .localAppPort
+                : .remoteAppPort
             inputFocus = target
             accessibilityFocus = target
-        case .invalidRemoteHost:
-            inputFocus = .remoteAppHostField
-            accessibilityFocus = .remoteAppHostField
-        case nil:
+        case .validationError(.invalidRemoteHost):
+            inputFocus = .remoteAppHost
+            accessibilityFocus = .remoteAppHost
+        case .persisted:
+            dismissAfterPersistence()
+        case .persistenceFailure, nil:
             break
         }
     }
 
-    private func cancelRemoval() {
+}
+
+private extension PortalView {
+    func cancelRemoval() {
         guard let portal = removalCandidate else { return }
         removalCandidate = nil
         DispatchQueue.main.async {

@@ -4,6 +4,7 @@ import Foundation
 
 enum UITestScenario: String {
     case firstRun = "first-run"
+    case creation
     case online
     case remoteOnline = "remote-online"
     case authenticating
@@ -49,6 +50,8 @@ struct UITestLaunchConfiguration {
         switch scenario {
         case .firstRun:
             break
+        case .creation:
+            try store.save(InstallationRecord(operationalLogging: .enabled))
         case .migrated:
             try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
             try Data(#"{"version":2,"portals":[],"alerts":[]}"#.utf8).write(to: store.versionTwoInstallationURL)
@@ -150,10 +153,12 @@ final class UITestRestartGate {
 
 final class UITestHelperLauncher: HelperLaunching {
     private let scenario: UITestScenario
+    private let rootURL: URL
     private var launchCount = 0
 
-    init(scenario: UITestScenario) {
-        self.scenario = scenario
+    init(configuration: UITestLaunchConfiguration) {
+        scenario = configuration.scenario
+        rootURL = configuration.rootURL
     }
 
     func launch(
@@ -170,6 +175,7 @@ final class UITestHelperLauncher: HelperLaunching {
         launchCount += 1
         return UITestHelperProcess(
             scenario: scenario,
+            rootURL: rootURL,
             onLine: onLine,
             onEOF: onEOF,
             onExit: onExit
@@ -184,6 +190,7 @@ private final class UITestHelperProcess: HelperProcess {
     }
 
     private let scenario: UITestScenario
+    private let rootURL: URL
     private let onLine: (Data) -> Void
     private let onEOF: () -> Void
     private let onExit: (Int32) -> Void
@@ -193,11 +200,13 @@ private final class UITestHelperProcess: HelperProcess {
 
     init(
         scenario: UITestScenario,
+        rootURL: URL,
         onLine: @escaping (Data) -> Void,
         onEOF: @escaping () -> Void,
         onExit: @escaping (Int32) -> Void
     ) {
         self.scenario = scenario
+        self.rootURL = rootURL
         self.onLine = onLine
         self.onEOF = onEOF
         self.onExit = onExit
@@ -212,6 +221,7 @@ private final class UITestHelperProcess: HelperProcess {
             shutdownRequested = true
         case .reconcilePortals:
             let request = try JSONDecoder().decode(HelperRequest<ReconcilePortalsPayload>.self, from: data)
+            recordEnrollmentIfNeeded(for: request.payload.portals)
             respond(
                 ReconcilePortalsResult(entries: request.payload.portals.map {
                     ReconcilePortalEntry(portalId: $0.portalId, outcome: .converged)
@@ -231,7 +241,14 @@ private final class UITestHelperProcess: HelperProcess {
                 respond(RemovePortalResult(accepted: true), requestID: envelope.requestId)
             }
         case .discoverLocalApps:
-            respond(DiscoverLocalAppsResult(candidates: []), requestID: envelope.requestId)
+            let candidates: [LocalAppCandidatePayload] = scenario == .creation ? [
+                LocalAppCandidatePayload(
+                    localAppPort: 3000,
+                    processLabel: "node",
+                    suggestedPortalName: "detected-portal"
+                ),
+            ] : []
+            respond(DiscoverLocalAppsResult(candidates: candidates), requestID: envelope.requestId)
         }
     }
 
@@ -258,6 +275,14 @@ private final class UITestHelperProcess: HelperProcess {
             error: nil
         )
         deliver(response)
+    }
+
+    private func recordEnrollmentIfNeeded(for portals: [ReconcilePortalPayload]) {
+        guard !portals.isEmpty else { return }
+        try? Data("enrolled\n".utf8).write(
+            to: rootURL.appendingPathComponent("helper-enrollment.txt"),
+            options: .atomic
+        )
     }
 
     private func respondError(code: String, requestID: String) {

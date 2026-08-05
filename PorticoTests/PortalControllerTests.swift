@@ -120,19 +120,19 @@ final class PortalControllerTests: XCTestCase {
 
         controller.portalName = "Invalid Name"
         controller.localAppPort = "8787"
-        XCTAssertEqual(controller.addPortal(), .invalidName)
+        XCTAssertEqual(controller.addPortal(), .validationError(.invalidName))
         XCTAssertNil(controller.portal)
         XCTAssertEqual(UUIDCreationCount, 0)
         XCTAssertTrue(client.started.isEmpty)
 
         controller.portalName = "hermes"
         controller.localAppPort = "0"
-        XCTAssertEqual(controller.addPortal(), .invalidPort)
+        XCTAssertEqual(controller.addPortal(), .validationError(.invalidPort))
         XCTAssertNil(controller.portal)
         XCTAssertEqual(UUIDCreationCount, 0)
 
         controller.localAppPort = "8787"
-        XCTAssertNil(controller.addPortal())
+        XCTAssertNotNil(controller.addPortal())
         let portal = try XCTUnwrap(controller.portal)
         XCTAssertEqual(portal.id, portalID)
         XCTAssertEqual(UUIDCreationCount, 1)
@@ -142,6 +142,77 @@ final class PortalControllerTests: XCTestCase {
         controller.addPortal()
         XCTAssertEqual(UUIDCreationCount, 1)
         XCTAssertEqual(client.started.count, 1)
+    }
+
+    func testCreationOutcomesAndDiscardedDraftKeepPersistenceAndHelperWorkSeparate() throws {
+        let client = FakePortalHelperClient()
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(operationalLogging: .enabled))
+        let controller = PortalController(
+            store: store,
+            helper: client,
+            uuidProvider: { self.portalID },
+            dateProvider: { Date(timeIntervalSince1970: 1_786_000_000) },
+            openURL: { _ in }
+        )
+        let candidate = LocalAppCandidatePayload(
+            localAppPort: 3000,
+            processLabel: "node",
+            suggestedPortalName: "detected"
+        )
+
+        controller.portalName = "Invalid Name"
+        controller.localAppPort = "3000"
+        XCTAssertEqual(controller.addPortal(), .validationError(.invalidName))
+        XCTAssertEqual(controller.portalCreationError, "Enter a lower-case DNS label and valid destination details.")
+
+        client.completeDiscovery(.success([candidate]))
+        controller.selectLocalApp(candidate)
+        controller.remoteAppHost = "draft.example.com"
+        controller.remoteAppPort = "443"
+        controller.reportInitialPersistenceFailure()
+        controller.discardPortalDraft()
+
+        XCTAssertEqual(controller.portalName, "")
+        XCTAssertEqual(controller.localAppPort, "")
+        XCTAssertEqual(controller.remoteAppHost, "")
+        XCTAssertEqual(controller.remoteAppPort, "")
+        XCTAssertTrue(controller.localApps.isEmpty)
+        XCTAssertNil(controller.localAppsMessage)
+        XCTAssertNil(controller.portalCreationError)
+        XCTAssertEqual(controller.message, "Saved Portal configuration could not be loaded.")
+        XCTAssertNil(try store.load())
+        XCTAssertTrue(client.started.isEmpty)
+
+        controller.portalName = "hermes"
+        controller.localAppPort = "8787"
+        let portal = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date(timeIntervalSince1970: 1_786_000_000)
+        )
+        XCTAssertEqual(controller.addPortal(), .persisted(portal))
+        XCTAssertEqual(try store.load(), portal)
+        XCTAssertEqual(client.started, [portal])
+    }
+
+    func testCreationReportsPersistenceFailureWithoutDiscardingDraft() throws {
+        struct ExpectedFailure: Error {}
+        let root = temporaryRoot()
+        try PortalStore(rootURL: root).save(InstallationRecord(operationalLogging: .enabled))
+        let store = PortalStore(rootURL: root, writeData: { _, _ in throw ExpectedFailure() })
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+        controller.portalName = "hermes"
+        controller.localAppPort = "8787"
+
+        XCTAssertEqual(controller.addPortal(), .persistenceFailure)
+        XCTAssertEqual(controller.portalCreationError, "The Portal could not be saved.")
+        XCTAssertEqual(controller.portalName, "hermes")
+        XCTAssertEqual(controller.localAppPort, "8787")
+        XCTAssertNil(try store.load())
+        XCTAssertTrue(client.started.isEmpty)
     }
 
     func testRemoteAppCreationValidatesBeforePersistenceAndDoesNotStartLocalDiscovery() throws {
@@ -160,12 +231,12 @@ final class PortalControllerTests: XCTestCase {
         controller.remoteAppHost = "127.0.0.1"
         controller.remoteAppPort = "443"
 
-        XCTAssertEqual(controller.addPortal(), .invalidRemoteHost)
+        XCTAssertEqual(controller.addPortal(), .validationError(.invalidRemoteHost))
         XCTAssertEqual(ids, 0)
         XCTAssertTrue(client.started.isEmpty)
 
         controller.remoteAppHost = "App.Example.COM"
-        XCTAssertNil(controller.addPortal())
+        XCTAssertNotNil(controller.addPortal())
         XCTAssertEqual(ids, 1)
         XCTAssertEqual(controller.portal?.destination, .remoteApp(scheme: .https, host: "app.example.com", port: 443))
     }
