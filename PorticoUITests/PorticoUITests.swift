@@ -3,6 +3,16 @@ import XCTest
 final class PorticoUITests: XCTestCase {
     func testFirstRunGuidanceAndLoggingGate() {
         let app = launch(scenario: "first-run")
+
+        let overview = app.descendants(matching: .any)["management-overview"]
+        XCTAssertTrue(overview.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["overview-helper-state"].exists)
+        XCTAssertTrue(app.staticTexts["overview-tailnet"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["overview-first-portal-guidance"].exists)
+        XCTAssertFalse(app.buttons["overview-add-portal"].isEnabled)
+        XCTAssertTrue(app.buttons["overview-logging-enabled"].exists)
+        XCTAssertTrue(app.buttons["overview-logging-disabled"].exists)
+
         openMenuBarExtra(app)
 
         XCTAssertTrue(
@@ -10,9 +20,81 @@ final class PorticoUITests: XCTestCase {
             app.debugDescription
         )
         XCTAssertEqual(app.staticTexts["helper-state"].value as? String, "Awaiting logging choice")
-        XCTAssertFalse(app.buttons["Add Portal"].isEnabled)
+        let addPortal = app.buttons["add-portal"]
+        XCTAssertTrue(addPortal.exists)
+        XCTAssertFalse(addPortal.isEnabled)
         XCTAssertTrue(app.buttons["logging-enabled"].exists)
         XCTAssertTrue(app.buttons["logging-disabled"].exists)
+    }
+
+    func testOverviewAddPortalRemainsDisabledAfterLoggingChoice() {
+        let app = launch(scenario: "first-run")
+
+        let overview = app.descendants(matching: .any)["management-overview"]
+        XCTAssertTrue(overview.waitForExistence(timeout: 3), app.debugDescription)
+        app.buttons["overview-logging-enabled"].click()
+        XCTAssertTrue(app.staticTexts["Operational-support logging is allowed."].waitForExistence(timeout: 3))
+
+        openMenuBarExtra(app)
+        let portalName = app.textFields["portal-name-field"]
+        XCTAssertTrue(portalName.waitForExistence(timeout: 3), app.debugDescription)
+        portalName.click()
+        portalName.typeText("overview-test")
+        let localAppPort = app.textFields["local-app-port-field"]
+        localAppPort.click()
+        localAppPort.typeKey("a", modifierFlags: .command)
+        localAppPort.typeText("8080")
+        XCTAssertTrue(app.buttons["add-portal"].isEnabled)
+        XCTAssertFalse(app.buttons["overview-add-portal"].isEnabled)
+    }
+
+    func testOpenPorticoRaisesTheManagementWindowAndClosingItKeepsTheMenuBarAppRunning() {
+        let app = launch(scenario: "online")
+
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        let overview = app.descendants(matching: .any)["management-overview"]
+        XCTAssertTrue(overview.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["overview-first-portal-guidance"].exists)
+        let managementWindows = app.windows.matching(NSPredicate(format: "identifier == %@", "management"))
+        XCTAssertEqual(managementWindows.count, 1, app.debugDescription)
+        let focusedManagementWindow = app.windows.matching(
+            NSPredicate(format: "identifier == %@ AND hasKeyboardFocus == true", "management")
+        )
+        XCTAssertTrue(focusedManagementWindow.firstMatch.waitForExistence(timeout: 3), app.debugDescription)
+
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        XCTAssertTrue(overview.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertEqual(managementWindows.count, 1, app.debugDescription)
+        XCTAssertTrue(focusedManagementWindow.firstMatch.waitForExistence(timeout: 3), app.debugDescription)
+
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertFalse(overview.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertFalse(managementWindows.firstMatch.exists)
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.statusItems.firstMatch.exists)
+    }
+
+    func testOnlyFreshInstallationAutoOpensOverviewAndPersistenceFailureIsSanitized() {
+        let root = makeRoot()
+        var app = launch(scenario: "first-run", root: root)
+        XCTAssertTrue(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
+        app.terminate()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
+
+        app = launch(scenario: "first-run", root: root)
+        XCTAssertFalse(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 2))
+        app.terminate()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
+
+        app = launch(scenario: "migrated")
+        XCTAssertFalse(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 2))
+        app.terminate()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
+
+        app = launch(scenario: "initial-save-failure")
+        XCTAssertFalse(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 2))
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.staticTexts["Saved Portal configuration could not be loaded."].exists)
     }
 
     func testOnlinePortalActionsAndNativeWindows() {

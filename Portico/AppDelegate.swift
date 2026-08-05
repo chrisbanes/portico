@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let supervisor: HelperSupervisor
     let portalController: PortalController
     let launchAtLoginController: LaunchAtLoginController
+    private var requestsInitialManagementWindow = false
 
     override init() {
         let productionRoot = FileManager.default.urls(
@@ -60,6 +61,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let openURL: (URL) -> Void = Self.openWorkspaceURL
 #endif
 
+        let store = PortalStore(rootURL: applicationRoot)
+        let startupResult: PortalStoreStartupResult?
+        do {
+            startupResult = try store.prepareForStartup()
+        } catch {
+            startupResult = nil
+        }
+
         let helperURL = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Helpers/portico-helper", isDirectory: false)
         let history = DiagnosticHistory()
@@ -71,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             history: history
         )
         let portalController = PortalController(
-            store: PortalStore(rootURL: applicationRoot),
+            store: store,
             helper: supervisor,
             reachability: LocalAppReachability(probe: reachabilityProbe, scheduler: scheduler),
             history: history,
@@ -99,6 +108,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.supervisor = supervisor
         self.portalController = portalController
         self.launchAtLoginController = launchAtLoginController
+        self.requestsInitialManagementWindow = startupResult == .freshInstallation
+        if startupResult == nil {
+            portalController.reportInitialPersistenceFailure()
+        }
         super.init()
     }
 
@@ -124,5 +137,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         launchAtLoginController.refreshStatus()
+    }
+
+    func takeInitialManagementWindowRequest() -> Bool {
+        defer { requestsInitialManagementWindow = false }
+        return requestsInitialManagementWindow
     }
 }

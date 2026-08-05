@@ -15,6 +15,8 @@ enum UITestScenario: String {
     case loginApproval = "login-approval"
     case loginError = "login-error"
     case loginOffer = "login-offer"
+    case migrated
+    case initialSaveFailure = "initial-save-failure"
 }
 
 struct UITestLaunchConfiguration {
@@ -47,6 +49,11 @@ struct UITestLaunchConfiguration {
         switch scenario {
         case .firstRun:
             break
+        case .migrated:
+            try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+            try Data(#"{"version":2,"portals":[],"alerts":[]}"#.utf8).write(to: store.versionTwoInstallationURL)
+        case .initialSaveFailure:
+            try Data("fixture".utf8).write(to: rootURL)
         case .loginApproval, .loginError:
             try store.save(InstallationRecord(operationalLogging: .enabled))
         case .removing, .removingFailure:

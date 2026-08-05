@@ -213,6 +213,10 @@ final class PortalController: ObservableObject {
         helper.retry()
     }
 
+    func reportInitialPersistenceFailure() {
+        message = "Saved Portal configuration could not be loaded."
+    }
+
     func setOperationalLogging(_ preference: OperationalLoggingPreference) {
         guard preference != .undecided,
               preference != installation.operationalLogging

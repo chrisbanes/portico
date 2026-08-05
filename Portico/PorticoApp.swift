@@ -4,13 +4,16 @@ import SwiftUI
 @main
 struct PorticoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
+        let _ = scheduleInitialManagementWindowIfNeeded()
         MenuBarExtra("Portico", systemImage: "door.left.hand.open") {
             PortalView(
                 controller: appDelegate.portalController,
                 supervisor: appDelegate.supervisor,
-                launchAtLogin: appDelegate.launchAtLoginController
+                launchAtLogin: appDelegate.launchAtLoginController,
+                takeInitialManagementWindowRequest: appDelegate.takeInitialManagementWindowRequest
             )
             .environment(\.openURL, OpenURLAction { url in
                 appDelegate.portalController.openExternalURL(url)
@@ -19,6 +22,13 @@ struct PorticoApp: App {
         }
         .menuBarExtraStyle(.window)
         .commands { PorticoCommands() }
+        Window("Portico", id: "management") {
+            OverviewView(
+                controller: appDelegate.portalController,
+                supervisor: appDelegate.supervisor
+            )
+        }
+        .defaultSize(width: 720, height: 520)
         Window("Portico Diagnostics", id: "diagnostics") {
             DiagnosticsView(controller: appDelegate.portalController)
         }
@@ -31,6 +41,13 @@ struct PorticoApp: App {
             )
         }
     }
+
+    private func scheduleInitialManagementWindowIfNeeded() {
+        guard appDelegate.takeInitialManagementWindowRequest() else { return }
+        DispatchQueue.main.async {
+            openWindow(id: "management")
+        }
+    }
 }
 
 private struct PorticoCommands: Commands {
@@ -38,6 +55,8 @@ private struct PorticoCommands: Commands {
 
     var body: some Commands {
         CommandGroup(after: .appSettings) {
+            Button("Open Portico") { openWindow(id: "management") }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
             Button("Diagnostics") { openWindow(id: "diagnostics") }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
 #if DEBUG
@@ -46,6 +65,72 @@ private struct PorticoCommands: Commands {
                     .keyboardShortcut("r", modifiers: [.command, .shift])
             }
 #endif
+        }
+    }
+}
+
+private struct OverviewView: View {
+    private enum Destination: Hashable {
+        case overview
+    }
+
+    @ObservedObject var controller: PortalController
+    @ObservedObject var supervisor: HelperSupervisor
+    @State private var selection: Destination? = .overview
+
+    var body: some View {
+        NavigationSplitView {
+            List(selection: $selection) {
+                Label("Overview", systemImage: "door.left.hand.open")
+                    .tag(Destination.overview)
+            }
+            .navigationTitle("Portico")
+        } detail: {
+            Form {
+                Section("Overview") {
+                    LabeledContent("Helper", value: supervisor.availability.title)
+                        .accessibilityIdentifier("overview-helper-state")
+                    LabeledContent("Tailnet", value: controller.tailnetDisplaySuffix ?? "Not connected")
+                        .accessibilityIdentifier("overview-tailnet")
+                }
+                if PortalPresentation.showsPrerequisiteGuidance(portalCount: controller.portals.count) {
+                    Section("Before creating your first Portal") {
+                        ForEach(PortalPresentation.prerequisiteGuidance, id: \.self) { guidance in
+                            Label(guidance, systemImage: "info.circle")
+                        }
+                    }
+                    .accessibilityIdentifier("overview-first-portal-guidance")
+                }
+                Section("Operational-support logging") {
+                    if controller.operationalLogging == .undecided {
+                        Button("Allow Operational-support Logging") {
+                            controller.setOperationalLogging(.enabled)
+                        }
+                        .accessibilityIdentifier("overview-logging-enabled")
+                        Button("Disable Operational-support Logging") {
+                            controller.setOperationalLogging(.disabled)
+                        }
+                        .accessibilityIdentifier("overview-logging-disabled")
+                    } else {
+                        Text(controller.operationalLogging == .enabled
+                            ? "Operational-support logging is allowed."
+                            : "Operational-support logging is disabled.")
+                    }
+                }
+                Section {
+                    Button("Add Portal") {}
+                        .disabled(true)
+                        .accessibilityIdentifier("overview-add-portal")
+                }
+                if let message = controller.message {
+                    Text(message)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("overview-message")
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("Overview")
+            .accessibilityIdentifier("management-overview")
         }
     }
 }
@@ -64,6 +149,7 @@ private struct PortalView: View {
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
     @ObservedObject var launchAtLogin: LaunchAtLoginController
+    let takeInitialManagementWindowRequest: () -> Bool
     @State private var showingResetConfirmation = false
     @State private var removalCandidate: PortalConfiguration?
     @State private var removalCompletionFocusID: UUID?
@@ -139,9 +225,16 @@ private struct PortalView: View {
             Button("Diagnostics") { openWindow(id: "diagnostics") }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
                 .accessibilityIdentifier("diagnostics")
+            Button("Open Portico") { openWindow(id: "management") }
+                .accessibilityIdentifier("open-portico")
         }
         .padding()
         .frame(width: 380)
+        .task {
+            if takeInitialManagementWindowRequest() {
+                openWindow(id: "management")
+            }
+        }
         .onDisappear {
             if launchAtLogin.isOffering {
                 launchAtLogin.declineOffer()
@@ -300,6 +393,7 @@ private struct PortalView: View {
             Button("Add Portal") { submitPortal() }
                 .buttonStyle(.borderedProminent)
                 .disabled(!controller.actionAvailability().addPortal)
+                .accessibilityIdentifier("add-portal")
         }
     }
 

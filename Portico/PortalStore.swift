@@ -6,6 +6,11 @@ enum PortalStoreError: Error {
     case unsupportedVersion(Int)
 }
 
+enum PortalStoreStartupResult: Equatable {
+    case freshInstallation
+    case existingInstallation
+}
+
 struct PortalStore {
     let rootURL: URL
     private let writeData: (Data, URL) throws -> Void
@@ -40,6 +45,22 @@ struct PortalStore {
 
     func load() throws -> PortalConfiguration? {
         try loadInstallation().portals.first
+    }
+
+    func prepareForStartup() throws -> PortalStoreStartupResult {
+        let hasExistingInstallation = [
+            installationURL,
+            versionThreeInstallationURL,
+            versionTwoInstallationURL,
+            legacyConfigurationURL,
+        ].contains { FileManager.default.fileExists(atPath: $0.path) }
+        guard !hasExistingInstallation else {
+            _ = try loadInstallation()
+            return .existingInstallation
+        }
+
+        try save(InstallationRecord())
+        return .freshInstallation
     }
 
     func save(_ portal: PortalConfiguration) throws {
