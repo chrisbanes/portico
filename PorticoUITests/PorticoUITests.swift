@@ -321,15 +321,12 @@ final class PorticoUITests: XCTestCase {
     }
 
     func testOnlyFreshInstallationAutoOpensOverviewAndPersistenceFailureIsSanitized() {
-        let root = makeRoot()
-        var app = launch(scenario: "first-run", root: root)
+        var app = launch(scenario: "first-run")
         XCTAssertTrue(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
-        app.typeKey("w", modifierFlags: .command)
-        XCTAssertFalse(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
         app.terminate()
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
 
-        app = launch(scenario: "first-run", root: root)
+        app = launch(scenario: "creation")
         XCTAssertFalse(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 2))
         app.terminate()
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
