@@ -140,6 +140,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         supervisor.start(loggingPreference: portalController.operationalLogging)
     }
 
+    func applicationShouldRestoreApplicationState(_ app: NSApplication) -> Bool {
+        false
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         supervisor.shutdown {
             sender.reply(toApplicationShouldTerminate: true)

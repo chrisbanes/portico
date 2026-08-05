@@ -753,6 +753,7 @@ private struct FocusRestoringButton: NSViewRepresentable {
 }
 
 private struct PortalView: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.openWindow) private var openWindow
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
@@ -772,6 +773,7 @@ private struct PortalView: View {
                     Button("Set Up Launch at Login") {
                         managementRouting.requestOverview()
                         openWindow(id: "management")
+                        dismiss()
                     }
                     .accessibilityIdentifier("login-offer-reminder")
                 }
