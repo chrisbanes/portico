@@ -1070,14 +1070,19 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(try store.loadInstallation().tailnetBinding?.name, "opaque-expected")
 
         try store.save(InstallationRecord(
-            tailnetBinding: TailnetBinding(name: "opaque-expected", magicDNSSuffix: "expected.ts.net")
+            tailnetBinding: TailnetBinding(name: "opaque-expected", magicDNSSuffix: "expected.ts.net"),
+            operationalLogging: .disabled,
+            launchAtLoginOffer: .declined
         ))
         controller = PortalController(store: store, helper: FakePortalHelperClient(), openURL: { _ in })
         XCTAssertTrue(controller.canResetTailnet)
         controller.resetTailnet(confirmed: false)
         XCTAssertNotNil(try store.loadInstallation().tailnetBinding)
         controller.resetTailnet(confirmed: true)
-        XCTAssertNil(try store.loadInstallation().tailnetBinding)
+        let reset = try store.loadInstallation()
+        XCTAssertNil(reset.tailnetBinding)
+        XCTAssertEqual(reset.operationalLogging, .disabled)
+        XCTAssertEqual(reset.launchAtLoginOffer, .declined)
     }
 
     func testRecoveryMarksFactsStaleAndReconcilesNewestCommittedSnapshot() throws {
