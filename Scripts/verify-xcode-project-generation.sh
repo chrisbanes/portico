@@ -38,8 +38,44 @@ diff -ru "$snapshot_dir/Portico.xcodeproj" "$project_path"
 project_listing="$(xcodebuild -list -project "$project_path")"
 printf '%s\n' "$project_listing"
 
-if ! awk '/^[[:space:]]*Targets:/ { in_targets = 1; next } in_targets && /^[[:space:]]*Schemes:/ { exit } in_targets && /^[[:space:]]*Portico[[:space:]]*$/ { found = 1 } END { exit !found }' <<<"$project_listing"; then
-  echo "Generated project is missing the Portico target" >&2
+for target in PorticoApplication Portico PorticoTests PorticoUITests; do
+  if ! awk -v target="$target" '/^[[:space:]]*Targets:/ { in_targets = 1; next } in_targets && /^[[:space:]]*Schemes:/ { exit } in_targets && $0 ~ "^[[:space:]]*" target "[[:space:]]*$" { found = 1 } END { exit !found }' <<<"$project_listing"; then
+    echo "Generated project is missing the $target target" >&2
+    exit 1
+  fi
+done
+
+application_settings="$(xcodebuild -showBuildSettings -project "$project_path" -target PorticoApplication -configuration Debug)"
+if ! awk '/^[[:space:]]*PRODUCT_TYPE[[:space:]]*=[[:space:]]*com\.apple\.product-type\.library\.static$/ { found = 1 } END { exit !found }' <<<"$application_settings"; then
+  echo "PorticoApplication must be a static library" >&2
+  exit 1
+fi
+
+project_metadata="$project_path/project.pbxproj"
+library_target_id="$(awk '
+  /\/\* PorticoApplication \*\/ = \{$/ { candidate = $1; in_target = 1; next }
+  in_target && /isa = PBXNativeTarget;/ { native_target = 1 }
+  in_target && native_target && /name = PorticoApplication;/ { print candidate; exit }
+  in_target && /^\t\t};$/ { in_target = 0; native_target = 0 }
+' "$project_metadata")"
+library_dependency_id="$(awk -v target="$library_target_id" '
+  /\/\* PBXTargetDependency \*\/ = \{$/ { candidate = $1; in_dependency = 1; next }
+  in_dependency && $0 ~ "target = " target " /\\* PorticoApplication \\*/;" { print candidate; exit }
+  in_dependency && /^\t\t};$/ { in_dependency = 0 }
+' "$project_metadata")"
+if [[ -z "$library_target_id" || -z "$library_dependency_id" ]] || ! awk -v dependency="$library_dependency_id" '
+  /\/\* PorticoTests \*\/ = \{$/ { in_target = 1; next }
+  in_target && $1 == dependency { found = 1; next }
+  in_target && /name = PorticoTests;/ { exit }
+  END { exit !found }
+' "$project_metadata"; then
+  echo "PorticoTests must directly depend on PorticoApplication" >&2
+  exit 1
+fi
+
+unit_test_settings="$(xcodebuild -showBuildSettings -project "$project_path" -target PorticoTests -configuration Debug)"
+if awk '/^[[:space:]]*(TEST_HOST|BUNDLE_LOADER)[[:space:]]*=/ { found = 1 } END { exit !found }' <<<"$unit_test_settings"; then
+  echo "PorticoTests must not use an application host or bundle loader" >&2
   exit 1
 fi
 

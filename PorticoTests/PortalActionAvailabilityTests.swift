@@ -1,5 +1,5 @@
 import XCTest
-@testable import Portico
+@testable import PorticoApplication
 
 final class PortalActionAvailabilityTests: XCTestCase {
     func testAuthoritativeActionMatrix() {
