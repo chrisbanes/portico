@@ -13,13 +13,13 @@ final class PortalActionAvailabilityTests: XCTestCase {
             hasPortalURL: true,
             hasTailnetBinding: true,
             portalCount: 1,
-            isEditedPortValid: true
+            isEditedDestinationValid: true
         )
         let available = PortalActionAvailability(context: activeEnabled)
         XCTAssertTrue(available.addPortal)
         XCTAssertTrue(available.refreshLocalApps)
         XCTAssertTrue(available.stop)
-        XCTAssertTrue(available.editPort)
+        XCTAssertTrue(available.editDestination)
         XCTAssertTrue(available.copyPortalURL)
         XCTAssertTrue(available.openPortalURL)
         XCTAssertTrue(available.diagnostics)
@@ -37,7 +37,7 @@ final class PortalActionAvailabilityTests: XCTestCase {
         let offline = PortalActionAvailability(context: stoppedOffline)
         XCTAssertTrue(offline.addPortal)
         XCTAssertTrue(offline.start)
-        XCTAssertTrue(offline.editPort)
+        XCTAssertTrue(offline.editDestination)
         XCTAssertTrue(offline.copyPortalURL)
         XCTAssertTrue(offline.remove)
         XCTAssertFalse(offline.refreshLocalApps)
@@ -74,5 +74,29 @@ final class PortalActionAvailabilityTests: XCTestCase {
         XCTAssertTrue(reset.resetTailnet)
         XCTAssertTrue(reset.settings)
         XCTAssertTrue(reset.diagnostics)
+    }
+
+    func testActiveAndStoppedPortalsAllowOnlyValidDestinationEdits() {
+        for desiredState in [PortalDesiredState.enabled, .stopped] {
+            let valid = PortalActionAvailability(context: PortalActionContext(
+                loggingPreference: .enabled,
+                inputsValid: true,
+                helperAvailability: .connected,
+                lifecycle: .active,
+                desiredState: desiredState,
+                isEditedDestinationValid: true
+            ))
+            XCTAssertTrue(valid.editDestination)
+
+            let invalid = PortalActionAvailability(context: PortalActionContext(
+                loggingPreference: .enabled,
+                inputsValid: true,
+                helperAvailability: .connected,
+                lifecycle: .active,
+                desiredState: desiredState,
+                isEditedDestinationValid: false
+            ))
+            XCTAssertFalse(invalid.editDestination)
+        }
     }
 }

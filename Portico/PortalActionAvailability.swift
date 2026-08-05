@@ -13,7 +13,7 @@ struct PortalActionContext {
     var removalState: PortalRemovalState?
     var hasTailnetBinding: Bool
     var portalCount: Int
-    var isEditedPortValid: Bool
+    var isEditedDestinationValid: Bool
     var isRefreshingLocalApps: Bool
 
     init(
@@ -29,7 +29,7 @@ struct PortalActionContext {
         removalState: PortalRemovalState? = nil,
         hasTailnetBinding: Bool = false,
         portalCount: Int = 0,
-        isEditedPortValid: Bool = false,
+        isEditedDestinationValid: Bool = false,
         isRefreshingLocalApps: Bool = false
     ) {
         self.loggingPreference = loggingPreference
@@ -44,7 +44,7 @@ struct PortalActionContext {
         self.removalState = removalState
         self.hasTailnetBinding = hasTailnetBinding
         self.portalCount = portalCount
-        self.isEditedPortValid = isEditedPortValid
+        self.isEditedDestinationValid = isEditedDestinationValid
         self.isRefreshingLocalApps = isRefreshingLocalApps
     }
 }
@@ -54,7 +54,7 @@ struct PortalActionAvailability: Equatable {
     let refreshLocalApps: Bool
     let start: Bool
     let stop: Bool
-    let editPort: Bool
+    let editDestination: Bool
     let authenticate: Bool
     let copyPortalURL: Bool
     let openPortalURL: Bool
@@ -71,7 +71,7 @@ struct PortalActionAvailability: Equatable {
         refreshLocalApps = helperConnected && !context.isRefreshingLocalApps
         start = isActive && context.desiredState == .stopped
         stop = isActive && context.desiredState == .enabled
-        editPort = isActive && context.isEditedPortValid
+        editDestination = isActive && context.isEditedDestinationValid
         authenticate = isActive
             && context.desiredState == .enabled
             && helperConnected

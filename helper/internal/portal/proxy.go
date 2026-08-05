@@ -129,7 +129,7 @@ type proxyServer struct {
 
 func startProxyServer(ctx context.Context, listener net.Listener, handler http.Handler) *proxyServer {
 	serveContext, cancel := context.WithCancel(ctx)
-	tracked := &trackedHandler{handler: handler, isAccepting: true}
+	tracked := newTrackedHandler(handler)
 	server := &http.Server{
 		Handler: tracked,
 		BaseContext: func(net.Listener) context.Context {
@@ -162,8 +162,8 @@ func (p *proxyServer) close() error {
 	cancel()
 	closeErr := p.server.Close()
 	listenerErr := p.listener.Close()
-	p.handler.closeIdleConnections()
 	p.handler.wait()
+	p.handler.closeIdleConnections()
 	p.doneOnce.Do(func() { p.serveErr = <-p.done })
 	serveErr := p.serveErr
 	p.serveErr = nil
@@ -185,9 +185,24 @@ func (p *proxyServer) replaceHandler(handler http.Handler) {
 
 type trackedHandler struct {
 	mu          sync.Mutex
-	handler     http.Handler
+	current     *handlerGeneration
+	generations []*handlerGeneration
 	isAccepting bool
-	active      sync.WaitGroup
+}
+
+type handlerGeneration struct {
+	handler    http.Handler
+	active     sync.WaitGroup
+	retireOnce sync.Once
+}
+
+func newTrackedHandler(handler http.Handler) *trackedHandler {
+	generation := &handlerGeneration{handler: handler}
+	return &trackedHandler{
+		current:     generation,
+		generations: []*handlerGeneration{generation},
+		isAccepting: true,
+	}
 }
 
 func (h *trackedHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -197,34 +212,64 @@ func (h *trackedHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 		return
 	}
-	handler := h.handler
-	h.active.Add(1)
+	generation := h.current
+	generation.active.Add(1)
 	h.mu.Unlock()
-	defer h.active.Done()
-	handler.ServeHTTP(writer, request)
+	defer generation.active.Done()
+	generation.handler.ServeHTTP(writer, request)
 }
 
 func (h *trackedHandler) replace(handler http.Handler) {
 	h.mu.Lock()
-	h.handler = handler
+	previous := h.current
+	replacement := &handlerGeneration{handler: handler}
+	h.current = replacement
+	h.generations = append(h.generations, replacement)
 	h.mu.Unlock()
+	previous.retire()
 }
 
 func (h *trackedHandler) stopAccepting() {
 	h.mu.Lock()
 	h.isAccepting = false
+	generations := append([]*handlerGeneration(nil), h.generations...)
 	h.mu.Unlock()
-}
-
-func (h *trackedHandler) closeIdleConnections() {
-	h.mu.Lock()
-	handler := h.handler
-	h.mu.Unlock()
-	if closer, ok := handler.(interface{ CloseIdleConnections() }); ok {
-		closer.CloseIdleConnections()
+	for _, generation := range generations {
+		generation.retire()
 	}
 }
 
 func (h *trackedHandler) wait() {
-	h.active.Wait()
+	h.mu.Lock()
+	generations := append([]*handlerGeneration(nil), h.generations...)
+	h.mu.Unlock()
+	for _, generation := range generations {
+		generation.active.Wait()
+	}
+}
+
+func (h *trackedHandler) closeIdleConnections() {
+	h.mu.Lock()
+	generations := append([]*handlerGeneration(nil), h.generations...)
+	h.mu.Unlock()
+	for _, generation := range generations {
+		generation.closeIdleConnections()
+	}
+}
+
+func (g *handlerGeneration) retire() {
+	g.retireOnce.Do(func() {
+		go func() {
+			g.active.Wait()
+			if closer, ok := g.handler.(interface{ CloseIdleConnections() }); ok {
+				closer.CloseIdleConnections()
+			}
+		}()
+	})
+}
+
+func (g *handlerGeneration) closeIdleConnections() {
+	if closer, ok := g.handler.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }

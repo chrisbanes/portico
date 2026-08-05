@@ -322,7 +322,7 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(client.cleaned, [pendingID])
     }
 
-    func testDesiredStateAndPortPersistBeforeReconciliation() throws {
+    func testDesiredStateAndDestinationPersistBeforeReconciliation() throws {
         let saved = PortalConfiguration(
             id: portalID,
             name: "hermes",
@@ -338,12 +338,21 @@ final class PortalControllerTests: XCTestCase {
         }
 
         controller.stopPortal(id: portalID)
-        controller.updateLocalAppPort(id: portalID, port: "4321")
+        controller.updateDestination(id: portalID, edit: PortalDestinationEdit(
+            kind: .remoteApp,
+            remoteAppScheme: .https,
+            remoteAppHost: "app.example.com",
+            remoteAppPort: "443"
+        ))
 
         XCTAssertEqual(client.reconciliations.last?.first?.desiredState, .stopped)
-        XCTAssertEqual(client.reconciliations.last?.first?.localAppPort, 4321)
+        XCTAssertEqual(client.reconciliations.last?.first?.destination, .remoteApp(
+            scheme: .https, host: "app.example.com", port: 443
+        ))
         XCTAssertEqual(try store.loadInstallation().portals.first?.desiredState, .stopped)
-        XCTAssertEqual(try store.loadInstallation().portals.first?.localAppPort, 4321)
+        XCTAssertEqual(try store.loadInstallation().portals.first?.destination, .remoteApp(
+            scheme: .https, host: "app.example.com", port: 443
+        ))
     }
 
     func testSingleFlightCoalescesLatestSnapshotAndIgnoresStaleFailure() throws {
@@ -376,7 +385,7 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertNil(controller.message)
     }
 
-    func testInvalidPortEditDoesNotPersistOrReconcile() throws {
+    func testDestinationEditsValidateAndPreserveIdentityBeforeReconciliation() throws {
         let saved = PortalConfiguration(
             id: portalID,
             name: "hermes",
@@ -390,11 +399,46 @@ final class PortalControllerTests: XCTestCase {
         let controller = PortalController(store: store, helper: client, openURL: { _ in })
         let originalReconciliationCount = client.reconciliations.count
 
-        controller.updateLocalAppPort(id: portalID, port: "0")
+        controller.updateDestination(id: portalID, edit: PortalDestinationEdit(
+            kind: .remoteApp,
+            remoteAppScheme: .https,
+            remoteAppHost: "127.0.0.1",
+            remoteAppPort: "443"
+        ))
 
         XCTAssertEqual(try store.loadInstallation().portals, [saved])
         XCTAssertEqual(client.reconciliations.count, originalReconciliationCount)
-        XCTAssertEqual(controller.message, "Enter a port from 1 through 65535.")
+        XCTAssertEqual(controller.message, "Enter valid destination details.")
+
+        controller.updateDestination(id: portalID, edit: PortalDestinationEdit(
+            kind: .remoteApp,
+            remoteAppScheme: .http,
+            remoteAppHost: "app.example.com",
+            remoteAppPort: "8080"
+        ))
+
+        let changed = try XCTUnwrap(store.loadInstallation().portals.first)
+        XCTAssertEqual(changed.id, saved.id)
+        XCTAssertEqual(changed.name, saved.name)
+        XCTAssertEqual(changed.createdAt, saved.createdAt)
+        XCTAssertEqual(changed.desiredState, saved.desiredState)
+        XCTAssertEqual(changed.destination, .remoteApp(scheme: .http, host: "app.example.com", port: 8080))
+        XCTAssertEqual(client.reconciliations.count, originalReconciliationCount + 1)
+        XCTAssertEqual(client.reconciliations.last, [changed])
+
+        controller.updateDestination(id: portalID, edit: PortalDestinationEdit(
+            kind: .remoteApp,
+            remoteAppScheme: .http,
+            remoteAppHost: "app.example.com",
+            remoteAppPort: "8080"
+        ))
+        XCTAssertEqual(client.reconciliations.count, originalReconciliationCount + 1)
+
+        controller.updateDestination(id: portalID, edit: PortalDestinationEdit(
+            kind: .localApp,
+            localAppPort: "4321"
+        ))
+        XCTAssertEqual(try store.loadInstallation().portals.first?.destination, .localApp(port: 4321))
     }
 
     func testAlreadySatisfiedStartAndStopAreHarmless() throws {
@@ -549,7 +593,10 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(controller.removalStates[portalID], .removing)
 
         controller.startPortal(id: portalID)
-        controller.updateLocalAppPort(id: portalID, port: "9999")
+        controller.updateDestination(id: portalID, edit: PortalDestinationEdit(
+            kind: .localApp,
+            localAppPort: "9999"
+        ))
         controller.authenticate(id: portalID)
         XCTAssertEqual(client.authenticated, [])
         XCTAssertEqual(try store.loadInstallation().portals.first(where: { $0.id == portalID }), persisted)

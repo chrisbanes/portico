@@ -45,6 +45,69 @@ func TestLoopbackProxyPreservesPublicPathAndQuery(t *testing.T) {
 	}
 }
 
+func TestTrackedHandlerRetiresOnlyDrainedGeneration(t *testing.T) {
+	oldEntered := make(chan struct{})
+	releaseOld := make(chan struct{})
+	oldClosed := make(chan struct{}, 1)
+	old := &closeTrackingHandler{
+		serve: func(writer http.ResponseWriter, _ *http.Request) {
+			close(oldEntered)
+			<-releaseOld
+			_, _ = io.WriteString(writer, "old")
+		},
+		closed: oldClosed,
+	}
+	new := &closeTrackingHandler{serve: func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "new")
+	}}
+	handler := newTrackedHandler(old)
+
+	oldResponse := httptest.NewRecorder()
+	oldDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(oldResponse, httptest.NewRequest(http.MethodGet, "/", nil))
+		close(oldDone)
+	}()
+	<-oldEntered
+	handler.replace(new)
+	newResponse := httptest.NewRecorder()
+	handler.ServeHTTP(newResponse, httptest.NewRequest(http.MethodGet, "/", nil))
+	if body := newResponse.Body.String(); body != "new" {
+		t.Fatalf("new generation response = %q, want new", body)
+	}
+	select {
+	case <-oldClosed:
+		t.Fatal("old generation closed idle connections before accepted work drained")
+	default:
+	}
+
+	close(releaseOld)
+	<-oldDone
+	select {
+	case <-oldClosed:
+	case <-time.After(time.Second):
+		t.Fatal("old generation did not close idle connections after draining")
+	}
+	if body := oldResponse.Body.String(); body != "old" {
+		t.Fatalf("old generation response = %q, want old", body)
+	}
+}
+
+type closeTrackingHandler struct {
+	serve  func(http.ResponseWriter, *http.Request)
+	closed chan struct{}
+}
+
+func (h *closeTrackingHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	h.serve(writer, request)
+}
+
+func (h *closeTrackingHandler) CloseIdleConnections() {
+	if h.closed != nil {
+		h.closed <- struct{}{}
+	}
+}
+
 func TestRemoteAppHTTPProxyUsesConfiguredAuthority(t *testing.T) {
 	remote := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("X-Remote-Host", request.Host)
