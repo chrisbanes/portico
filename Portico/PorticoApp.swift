@@ -223,7 +223,6 @@ private struct SelectedPortalView: View {
     @ObservedObject var controller: PortalController
     let portal: PortalConfiguration
     @State private var destinationEdit: PortalDestinationEdit
-    @FocusState private var startStopFocused: Bool
 
     init(controller: PortalController, portal: PortalConfiguration) {
         self.controller = controller
@@ -329,17 +328,19 @@ private struct SelectedPortalView: View {
                         .disabled(!portalActions.authenticate)
                         .accessibilityIdentifier("selected-authenticate")
                 }
-                Button(portal.desiredState == .enabled ? "Stop" : "Start") {
-                    if portal.desiredState == .enabled {
-                        controller.stopPortal(id: portal.id)
-                    } else {
-                        controller.startPortal(id: portal.id)
+                HStack {
+                    FocusRestoringButton(
+                        title: portal.desiredState == .enabled ? "Stop" : "Start",
+                        isEnabled: portal.desiredState == .enabled ? portalActions.stop : portalActions.start
+                    ) {
+                        if portal.desiredState == .enabled {
+                            controller.stopPortal(id: portal.id)
+                        } else {
+                            controller.startPortal(id: portal.id)
+                        }
                     }
+                    .accessibilityIdentifier("selected-start-stop")
                 }
-                .focusable()
-                .focused($startStopFocused)
-                .disabled(portal.desiredState == .enabled ? !portalActions.stop : !portalActions.start)
-                .accessibilityIdentifier("selected-start-stop")
                 Button("Diagnostics") { openWindow(id: "diagnostics") }
                     .accessibilityIdentifier("selected-portal-diagnostics")
             }
@@ -347,15 +348,50 @@ private struct SelectedPortalView: View {
         .formStyle(.grouped)
         .accessibilityIdentifier("selected-portal-\(portal.name)")
         .navigationTitle(portal.name)
-        .onChange(of: portal.desiredState) { _, _ in
-            DispatchQueue.main.async {
-                startStopFocused = true
-            }
-        }
     }
 
     private func updateDestination() {
         controller.updateDestination(id: portal.id, edit: destinationEdit)
+    }
+}
+
+private struct FocusRestoringButton: NSViewRepresentable {
+    let title: String
+    let isEnabled: Bool
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.performAction))
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        let titleChanged = button.title != title
+        context.coordinator.action = action
+        button.title = title
+        button.isEnabled = isEnabled
+        guard titleChanged else { return }
+        DispatchQueue.main.async {
+            button.window?.makeFirstResponder(button)
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+
+        @objc func performAction() {
+            action()
+        }
     }
 }
 

@@ -102,7 +102,7 @@ final class PorticoUITests: XCTestCase {
         app.buttons["management-sidebar-portal-portal-one"].click()
         let staleURL = app.staticTexts["selected-portal-url"]
         XCTAssertTrue(staleURL.waitForExistence(timeout: 5))
-        XCTAssertTrue(waitForText("Last Known", element: staleURL, timeout: 5))
+        XCTAssertTrue(app.staticTexts["Portal URL — Last Known"].exists)
         XCTAssertTrue(app.buttons["selected-copy-portal-url"].isEnabled)
         XCTAssertFalse(app.buttons["selected-open-portal-url"].isEnabled)
 
@@ -140,7 +140,6 @@ final class PorticoUITests: XCTestCase {
         let startStop = app.buttons["selected-start-stop"]
         startStop.click()
         XCTAssertTrue(waitForValue("Stopped", element: app.staticTexts["selected-desired-state"], timeout: 3))
-        app.activate()
         let focusedStartStop = app.buttons.matching(
             NSPredicate(format: "identifier == %@ AND hasKeyboardFocus == true", "selected-start-stop")
         ).firstMatch
