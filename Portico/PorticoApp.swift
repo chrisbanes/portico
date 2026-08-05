@@ -344,10 +344,18 @@ private struct SelectedPortalView: View {
                 Button("Diagnostics") { openWindow(id: "diagnostics") }
                     .accessibilityIdentifier("selected-portal-diagnostics")
             }
+            if let message = controller.message {
+                Text(message)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("selected-portal-message")
+            }
         }
         .formStyle(.grouped)
         .accessibilityIdentifier("selected-portal-\(portal.name)")
         .navigationTitle(portal.name)
+        .onChange(of: portal.destination) { _, destination in
+            destinationEdit = PortalDestinationEdit(destination: destination)
+        }
     }
 
     private func updateDestination() {

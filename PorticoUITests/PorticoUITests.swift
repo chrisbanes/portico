@@ -167,6 +167,48 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["diagnostics-heading"].waitForExistence(timeout: 3))
     }
 
+    func testSelectedPortalDetailShowsDestinationValidationErrors() {
+        let app = launch(scenario: "management")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-first-portal"].click()
+
+        let port = app.textFields["selected-edit-local-app-port"]
+        XCTAssertTrue(port.waitForExistence(timeout: 3), app.debugDescription)
+        port.click()
+        port.typeKey("a", modifierFlags: .command)
+        port.typeText("0")
+        port.typeKey(.return, modifierFlags: [])
+
+        XCTAssertTrue(
+            waitForText(
+                "Enter valid destination details.",
+                element: app.staticTexts["selected-portal-message"],
+                timeout: 3
+            ),
+            app.debugDescription
+        )
+    }
+
+    func testSelectedPortalDetailTracksDestinationChangesFromMenuBar() {
+        let app = launch(scenario: "management")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-first-portal"].click()
+
+        let selectedPort = app.textFields["selected-edit-local-app-port"]
+        XCTAssertTrue(waitForValue("8080", element: selectedPort, timeout: 3), app.debugDescription)
+
+        openMenuBarExtra(app)
+        let menuBarPort = app.textFields.matching(identifier: "edit-local-app-port").firstMatch
+        XCTAssertTrue(menuBarPort.waitForExistence(timeout: 3), app.debugDescription)
+        menuBarPort.click()
+        menuBarPort.typeKey("a", modifierFlags: .command)
+        menuBarPort.typeText("8081")
+        app.buttons.matching(identifier: "update-destination").firstMatch.click()
+
+        XCTAssertTrue(waitForValue("8081", element: selectedPort, timeout: 3), app.debugDescription)
+        XCTAssertFalse(app.buttons["selected-update-destination"].isEnabled)
+    }
+
     func testAddPortalSheetPreservesDiscoveryAndDiscardsOnlyUncommittedDrafts() {
         let root = makeRoot()
         let app = launch(scenario: "creation", root: root)
