@@ -129,7 +129,11 @@ final class LaunchAtLoginController: ObservableObject {
     }
 
     func refreshStatusAfterApplicationActivation() {
+        let previousStatus = status
         refreshStatus(preservingError: true)
+        if status != previousStatus {
+            errorMessage = nil
+        }
     }
 
     private func register() {

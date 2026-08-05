@@ -23,6 +23,7 @@ enum UITestScenario: String {
     case loginOffer = "login-offer"
     case loginOfferApproval = "login-offer-approval"
     case loginOfferError = "login-offer-error"
+    case loginOfferEmpty = "login-offer-empty"
     case migrated
     case initialSaveFailure = "initial-save-failure"
 }
@@ -79,6 +80,11 @@ struct UITestLaunchConfiguration {
                 portals: [Self.portal()],
                 operationalLogging: .enabled,
                 launchAtLoginOffer: .notOffered
+            ))
+        case .loginOfferEmpty:
+            try store.save(InstallationRecord(
+                operationalLogging: .enabled,
+                launchAtLoginOffer: .presented
             ))
         case .remoteOnline:
             try store.save(InstallationRecord(

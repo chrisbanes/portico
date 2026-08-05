@@ -225,6 +225,9 @@ private struct OverviewView: View {
                 } description: {
                     Text("Add a Portal to give a Local App a private tailnet doorway.")
                 }
+                if launchAtLogin.isOffering {
+                    launchAtLoginOffer
+                }
                 Button("Add Portal") { showingAddPortal = true }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("overview-empty-add-portal")
@@ -240,19 +243,8 @@ private struct OverviewView: View {
                 }
                 if launchAtLogin.isOffering {
                     Section("Launch at Login") {
-                        Text("Open Portico at Login?")
-                        Text("You can change this later in Settings.")
-                            .foregroundStyle(.secondary)
-                        HStack {
-                            Button("Not Now") { launchAtLogin.declineOffer() }
-                                .accessibilityIdentifier("overview-login-offer-decline")
-                            Button("Enable") { launchAtLogin.acceptOffer() }
-                                .buttonStyle(.borderedProminent)
-                                .accessibilityIdentifier("overview-login-offer-enable")
-                        }
+                        launchAtLoginOffer
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("overview-launch-at-login-offer")
                 }
                 if PortalPresentation.showsPrerequisiteGuidance(portalCount: controller.portals.count) {
                     Section("Before creating your first Portal") {
@@ -295,6 +287,23 @@ private struct OverviewView: View {
             }
             .formStyle(.grouped)
         }
+    }
+
+    private var launchAtLoginOffer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Open Portico at Login?")
+            Text("You can change this later in Settings.")
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Not Now") { launchAtLogin.declineOffer() }
+                    .accessibilityIdentifier("overview-login-offer-decline")
+                Button("Enable") { launchAtLogin.acceptOffer() }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("overview-login-offer-enable")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("overview-launch-at-login-offer")
     }
 
     @ViewBuilder

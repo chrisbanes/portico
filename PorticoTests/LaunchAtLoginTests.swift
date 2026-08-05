@@ -130,6 +130,21 @@ final class LaunchAtLoginTests: XCTestCase {
         XCTAssertEqual(controller.errorMessage, "Launch at login could not be enabled.")
     }
 
+    func testApplicationActivationRefreshClearsRegistrationFailureAfterExternalStatusChange() {
+        struct ExpectedFailure: Error {}
+        let service = FakeLaunchAtLoginService(status: .notRegistered)
+        service.registerError = ExpectedFailure()
+        let controller = makeController(service: service, store: FakeLaunchAtLoginOfferStore())
+        controller.considerOfferAfterFreshOnline()
+        controller.acceptOffer()
+
+        service.status = .enabled
+        controller.refreshStatusAfterApplicationActivation()
+
+        XCTAssertEqual(controller.status, .enabled)
+        XCTAssertNil(controller.errorMessage)
+    }
+
     func testDisableFailureKeepsLiveStatusAndExternalRefreshDoesNotMutateOfferHistory() {
         struct ExpectedFailure: Error {}
         let service = FakeLaunchAtLoginService(status: .enabled)

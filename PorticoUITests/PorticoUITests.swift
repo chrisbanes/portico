@@ -579,6 +579,18 @@ final class PorticoUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 2))
     }
 
+    func testLaunchAtLoginOfferIsActionableInEmptyOverview() {
+        let app = launch(scenario: "login-offer-empty")
+        openMenuBarExtra(app)
+
+        app.buttons["login-offer-reminder"].click()
+
+        XCTAssertTrue(app.staticTexts["No Portals"].waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["overview-launch-at-login-offer"].exists)
+        app.buttons["overview-login-offer-decline"].click()
+        XCTAssertFalse(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 2))
+    }
+
     private func launch(scenario: String, root: String? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.terminate()
