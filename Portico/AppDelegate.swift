@@ -1,10 +1,21 @@
 import AppKit
+import Combine
+
+@MainActor
+final class ManagementRouting: ObservableObject {
+    @Published private(set) var overviewRequest = 0
+
+    func requestOverview() {
+        overviewRequest += 1
+    }
+}
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let supervisor: HelperSupervisor
     let portalController: PortalController
     let launchAtLoginController: LaunchAtLoginController
+    let managementRouting = ManagementRouting()
     private var requestsInitialManagementWindow = false
 
     override init() {
@@ -39,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let launchAtLoginService: LaunchAtLoginServicing = testConfiguration.map {
             UITestLaunchAtLoginService(
                 status: $0.launchAtLoginStatus,
-                registrationFails: $0.registrationFails
+                registrationOutcome: $0.registrationOutcome
             )
         } ?? ServiceManagementLaunchAtLoginService()
         let copyText: (String) -> Void
@@ -102,6 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             offerState: { portalController.launchAtLoginOffer },
             saveOfferState: { portalController.commitLaunchAtLoginOffer($0) }
         )
+        launchAtLoginController.restorePresentedOffer()
         portalController.onFreshPortalOnline = {
             launchAtLoginController.considerOfferAfterFreshOnline()
         }
@@ -136,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        launchAtLoginController.refreshStatus()
+        launchAtLoginController.refreshStatusAfterApplicationActivation()
     }
 
     func takeInitialManagementWindowRequest() -> Bool {

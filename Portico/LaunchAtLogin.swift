@@ -70,11 +70,15 @@ final class LaunchAtLoginController: ObservableObject {
     func considerOfferAfterFreshOnline() {
         guard offerState() == .notOffered else { return }
         refreshStatus()
-        if status == .enabled {
-            _ = commit(.accepted)
-            return
-        }
+        if acceptOfferIfAlreadyEnabled() { return }
         guard commit(.presented) else { return }
+        isOffering = true
+    }
+
+    func restorePresentedOffer() {
+        guard offerState() == .presented else { return }
+        refreshStatus()
+        if acceptOfferIfAlreadyEnabled() { return }
         isOffering = true
     }
 
@@ -87,6 +91,12 @@ final class LaunchAtLoginController: ObservableObject {
     func declineOffer() {
         guard isOffering, commit(.declined) else { return }
         isOffering = false
+    }
+
+    private func acceptOfferIfAlreadyEnabled() -> Bool {
+        guard status == .enabled else { return false }
+        _ = commit(.accepted)
+        return true
     }
 
     func retryRegistration() {
@@ -121,6 +131,14 @@ final class LaunchAtLoginController: ObservableObject {
 
     func refreshStatus() {
         refreshStatus(preservingError: false)
+    }
+
+    func refreshStatusAfterApplicationActivation() {
+        let previousStatus = status
+        refreshStatus(preservingError: true)
+        if status != previousStatus {
+            errorMessage = nil
+        }
     }
 
     private func register() {

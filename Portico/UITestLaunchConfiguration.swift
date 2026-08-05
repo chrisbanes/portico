@@ -21,6 +21,9 @@ enum UITestScenario: String {
     case loginApproval = "login-approval"
     case loginError = "login-error"
     case loginOffer = "login-offer"
+    case loginOfferApproval = "login-offer-approval"
+    case loginOfferError = "login-offer-error"
+    case loginOfferEmpty = "login-offer-empty"
     case migrated
     case initialSaveFailure = "initial-save-failure"
 }
@@ -71,12 +74,17 @@ struct UITestLaunchConfiguration {
                 operationalLogging: .enabled,
                 launchAtLoginOffer: .declined
             ))
-        case .loginOffer:
+        case .loginOffer, .loginOfferApproval, .loginOfferError:
             try store.save(InstallationRecord(
                 tailnetBinding: Self.tailnetBinding,
                 portals: [Self.portal()],
                 operationalLogging: .enabled,
                 launchAtLoginOffer: .notOffered
+            ))
+        case .loginOfferEmpty:
+            try store.save(InstallationRecord(
+                operationalLogging: .enabled,
+                launchAtLoginOffer: .presented
             ))
         case .remoteOnline:
             try store.save(InstallationRecord(
@@ -165,11 +173,14 @@ struct UITestLaunchConfiguration {
         }
     }
 
-    var launchAtLoginStatus: LaunchAtLoginStatus {
-        scenario == .loginApproval ? .requiresApproval : .notRegistered
+    var launchAtLoginStatus: LaunchAtLoginStatus { scenario == .loginApproval ? .requiresApproval : .notRegistered }
+    var registrationOutcome: UITestLaunchAtLoginRegistrationOutcome {
+        switch scenario {
+        case .loginOfferApproval: .requiresApproval
+        case .loginOfferError, .loginError: .failure
+        default: .enabled
+        }
     }
-
-    var registrationFails: Bool { scenario == .loginError }
     var reachabilityResult: Bool { scenario != .terminalFailure }
     var supervisorSchedulerScale: Double {
         switch scenario {
@@ -392,7 +403,7 @@ private final class UITestHelperProcess: HelperProcess {
     }
 
     private func emitStatuses(for portals: [ReconcilePortalPayload]) {
-        guard [.online, .remoteOnline, .authenticating, .awaitingApproval, .stale, .restarting, .loginOffer, .management, .durableManagement].contains(scenario) else { return }
+        guard [.online, .remoteOnline, .authenticating, .awaitingApproval, .stale, .restarting, .loginOffer, .loginOfferApproval, .loginOfferError, .management, .durableManagement].contains(scenario) else { return }
         for portal in portals {
             let state: PortalTailscaleState
             if scenario == .authenticating {
@@ -436,20 +447,29 @@ private final class UITestHelperProcess: HelperProcess {
 
 final class UITestLaunchAtLoginService: LaunchAtLoginServicing {
     private(set) var status: LaunchAtLoginStatus
-    private let registrationFails: Bool
+    private let registrationOutcome: UITestLaunchAtLoginRegistrationOutcome
 
-    init(status: LaunchAtLoginStatus, registrationFails: Bool) {
+    init(status: LaunchAtLoginStatus, registrationOutcome: UITestLaunchAtLoginRegistrationOutcome) {
         self.status = status
-        self.registrationFails = registrationFails
+        self.registrationOutcome = registrationOutcome
     }
 
     func register() throws {
-        if registrationFails { throw UITestServiceError() }
-        status = .enabled
+        switch registrationOutcome {
+        case .enabled: status = .enabled
+        case .requiresApproval: status = .requiresApproval
+        case .failure: throw UITestServiceError()
+        }
     }
 
     func unregister() throws { status = .notRegistered }
     func openSystemSettingsLoginItems() {}
+}
+
+enum UITestLaunchAtLoginRegistrationOutcome {
+    case enabled
+    case requiresApproval
+    case failure
 }
 
 final class UITestLocalAppProbe: LocalAppProbing {
