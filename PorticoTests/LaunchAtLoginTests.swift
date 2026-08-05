@@ -52,6 +52,15 @@ final class LaunchAtLoginTests: XCTestCase {
         XCTAssertTrue(presentedStore.saved.isEmpty)
         XCTAssertEqual(service.registerCount, 0)
 
+        let enabledService = FakeLaunchAtLoginService(status: .enabled)
+        let enabledStore = FakeLaunchAtLoginOfferStore(state: .presented)
+        let alreadyEnabled = makeController(service: enabledService, store: enabledStore)
+        alreadyEnabled.restorePresentedOffer()
+        XCTAssertFalse(alreadyEnabled.isOffering)
+        XCTAssertEqual(enabledStore.state, .accepted)
+        XCTAssertEqual(enabledStore.saved, [.accepted])
+        XCTAssertEqual(enabledService.registerCount, 0)
+
         let declined = makeController(
             service: service,
             store: FakeLaunchAtLoginOfferStore(state: .declined)
