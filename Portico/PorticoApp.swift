@@ -12,6 +12,7 @@ struct PorticoApp: App {
                 controller: appDelegate.portalController,
                 supervisor: appDelegate.supervisor,
                 launchAtLogin: appDelegate.launchAtLoginController,
+                managementRouting: appDelegate.managementRouting,
                 takeInitialManagementWindowRequest: appDelegate.takeInitialManagementWindowRequest
             )
             .environment(\.openURL, OpenURLAction { url in
@@ -24,7 +25,9 @@ struct PorticoApp: App {
         Window("Portico", id: "management") {
             OverviewView(
                 controller: appDelegate.portalController,
-                supervisor: appDelegate.supervisor
+                supervisor: appDelegate.supervisor,
+                launchAtLogin: appDelegate.launchAtLoginController,
+                managementRouting: appDelegate.managementRouting
             )
         }
         .defaultSize(width: 720, height: 520)
@@ -86,6 +89,8 @@ private struct OverviewView: View {
 
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
+    @ObservedObject var launchAtLogin: LaunchAtLoginController
+    @ObservedObject var managementRouting: ManagementRouting
     @State private var selection: Destination? = .overview
     @State private var showingAddPortal = false
     @State private var showingResetConfirmation = false
@@ -166,6 +171,9 @@ private struct OverviewView: View {
                     accessibilityFocus = .removalNotice(id)
                 }
             }
+            .onChange(of: managementRouting.overviewRequest) {
+                selection = .overview
+            }
             .confirmationDialog(
                 "Reset this installation's tailnet binding? This does not remove any remote Tailscale node.",
                 isPresented: $showingResetConfirmation,
@@ -229,6 +237,22 @@ private struct OverviewView: View {
                         .accessibilityIdentifier("overview-helper-state")
                     LabeledContent("Tailnet", value: controller.tailnetDisplaySuffix ?? "Not connected")
                         .accessibilityIdentifier("overview-tailnet")
+                }
+                if launchAtLogin.isOffering {
+                    Section("Launch at Login") {
+                        Text("Open Portico at Login?")
+                        Text("You can change this later in Settings.")
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("Not Now") { launchAtLogin.declineOffer() }
+                                .accessibilityIdentifier("overview-login-offer-decline")
+                            Button("Enable") { launchAtLogin.acceptOffer() }
+                                .buttonStyle(.borderedProminent)
+                                .accessibilityIdentifier("overview-login-offer-enable")
+                        }
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("overview-launch-at-login-offer")
                 }
                 if PortalPresentation.showsPrerequisiteGuidance(portalCount: controller.portals.count) {
                     Section("Before creating your first Portal") {
@@ -724,6 +748,7 @@ private struct PortalView: View {
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
     @ObservedObject var launchAtLogin: LaunchAtLoginController
+    @ObservedObject var managementRouting: ManagementRouting
     let takeInitialManagementWindowRequest: () -> Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -734,15 +759,12 @@ private struct PortalView: View {
             }
             if launchAtLogin.isOffering {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Open Portico at Login?").font(.headline)
-                    Text("You can change this later in Settings.")
-                    HStack {
-                        Button("Not Now") { launchAtLogin.declineOffer() }
-                            .accessibilityIdentifier("login-offer-decline")
-                        Button("Enable") { launchAtLogin.acceptOffer() }
-                            .buttonStyle(.borderedProminent)
-                            .accessibilityIdentifier("login-offer-enable")
+                    Text("Launch at login is ready to set up.")
+                    Button("Set Up Launch at Login") {
+                        managementRouting.requestOverview()
+                        openWindow(id: "management")
                     }
+                    .accessibilityIdentifier("login-offer-reminder")
                 }
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("launch-at-login-offer")
@@ -771,11 +793,6 @@ private struct PortalView: View {
         .task {
             if takeInitialManagementWindowRequest() {
                 openWindow(id: "management")
-            }
-        }
-        .onDisappear {
-            if launchAtLogin.isOffering {
-                launchAtLogin.declineOffer()
             }
         }
         Divider()
@@ -1133,7 +1150,7 @@ private struct SettingsView: View {
         .padding()
         .frame(width: 480)
         .onAppear {
-            launchAtLogin.refreshStatus()
+            launchAtLogin.refreshStatusAfterApplicationActivation()
             headingFocused = true
         }
     }

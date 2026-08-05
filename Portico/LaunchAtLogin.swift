@@ -78,6 +78,11 @@ final class LaunchAtLoginController: ObservableObject {
         isOffering = true
     }
 
+    func restorePresentedOffer() {
+        guard offerState() == .presented else { return }
+        isOffering = true
+    }
+
     func acceptOffer() {
         guard isOffering, commit(.accepted) else { return }
         isOffering = false
@@ -121,6 +126,10 @@ final class LaunchAtLoginController: ObservableObject {
 
     func refreshStatus() {
         refreshStatus(preservingError: false)
+    }
+
+    func refreshStatusAfterApplicationActivation() {
+        refreshStatus(preservingError: true)
     }
 
     private func register() {

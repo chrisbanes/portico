@@ -42,13 +42,29 @@ final class LaunchAtLoginTests: XCTestCase {
         XCTAssertEqual(controller.errorMessage, "The launch at login choice could not be saved.")
     }
 
-    func testPresentedStateDoesNotRepeatAfterRelaunchAndDeclineIsDurable() {
+    func testPresentedStateRestoresWithoutSavingOrRegisteringAndDeclineIsDurable() {
         let service = FakeLaunchAtLoginService(status: .notRegistered)
         let presentedStore = FakeLaunchAtLoginOfferStore(state: .presented)
         let relaunched = makeController(service: service, store: presentedStore)
 
-        relaunched.considerOfferAfterFreshOnline()
-        XCTAssertFalse(relaunched.isOffering)
+        relaunched.restorePresentedOffer()
+        XCTAssertTrue(relaunched.isOffering)
+        XCTAssertTrue(presentedStore.saved.isEmpty)
+        XCTAssertEqual(service.registerCount, 0)
+
+        let declined = makeController(
+            service: service,
+            store: FakeLaunchAtLoginOfferStore(state: .declined)
+        )
+        declined.restorePresentedOffer()
+        XCTAssertFalse(declined.isOffering)
+
+        let accepted = makeController(
+            service: service,
+            store: FakeLaunchAtLoginOfferStore(state: .accepted)
+        )
+        accepted.restorePresentedOffer()
+        XCTAssertFalse(accepted.isOffering)
 
         let offeredStore = FakeLaunchAtLoginOfferStore()
         let offered = makeController(service: service, store: offeredStore)
@@ -73,6 +89,8 @@ final class LaunchAtLoginTests: XCTestCase {
 
         XCTAssertEqual(events.suffix(2), ["saved-accepted", "register"])
         XCTAssertEqual(store.state, .accepted)
+        XCTAssertEqual(service.status, .notRegistered)
+        XCTAssertEqual(controller.status, .notRegistered)
         XCTAssertEqual(controller.errorMessage, "Launch at login could not be enabled.")
         service.registerError = nil
         controller.retryRegistration()
@@ -95,6 +113,21 @@ final class LaunchAtLoginTests: XCTestCase {
         controller.retryRegistration()
         XCTAssertEqual(controller.status, .notFound)
         XCTAssertEqual(service.registerCount, 0)
+    }
+
+    func testApplicationActivationRefreshPreservesRegistrationFailure() {
+        struct ExpectedFailure: Error {}
+        let service = FakeLaunchAtLoginService(status: .notRegistered)
+        service.registerError = ExpectedFailure()
+        let store = FakeLaunchAtLoginOfferStore()
+        let controller = makeController(service: service, store: store)
+        controller.considerOfferAfterFreshOnline()
+        controller.acceptOffer()
+
+        controller.refreshStatusAfterApplicationActivation()
+
+        XCTAssertEqual(controller.status, .notRegistered)
+        XCTAssertEqual(controller.errorMessage, "Launch at login could not be enabled.")
     }
 
     func testDisableFailureKeepsLiveStatusAndExternalRefreshDoesNotMutateOfferHistory() {

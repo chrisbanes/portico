@@ -324,6 +324,8 @@ final class PorticoUITests: XCTestCase {
         let root = makeRoot()
         var app = launch(scenario: "first-run", root: root)
         XCTAssertTrue(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertFalse(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
         app.terminate()
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
 
@@ -524,35 +526,57 @@ final class PorticoUITests: XCTestCase {
         XCTAssertFalse(app.buttons["overview-reset-tailnet"].exists)
     }
 
-    func testLaunchAtLoginApprovalAndRegistrationError() {
-        var app = launch(scenario: "login-approval")
+    func testLaunchAtLoginApprovalFromOverviewOffer() {
+        let app = launch(scenario: "login-offer-approval")
+        openMenuBarExtra(app)
+        app.buttons["login-offer-reminder"].click()
+        XCTAssertTrue(app.buttons["overview-login-offer-enable"].waitForExistence(timeout: 3))
+        app.buttons["overview-login-offer-enable"].click()
+        XCTAssertFalse(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 3))
         app.typeKey(",", modifierFlags: .command)
         XCTAssertTrue(app.staticTexts["settings-heading"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["open-login-items-settings"].isEnabled)
-
-        app = launch(scenario: "login-error")
-        app.typeKey(",", modifierFlags: .command)
-        XCTAssertTrue(app.buttons["enable-launch-at-login"].waitForExistence(timeout: 3))
-        app.buttons["enable-launch-at-login"].click()
-        XCTAssertTrue(app.staticTexts["launch-at-login-error"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["retry-launch-at-login"].isEnabled)
     }
 
-    func testLaunchAtLoginOfferDoesNotRepeatAfterRelaunch() {
+    func testLaunchAtLoginRegistrationFailureFromOverviewOffer() {
+        let app = launch(scenario: "login-offer-error")
+        openMenuBarExtra(app)
+        app.buttons["login-offer-reminder"].click()
+        XCTAssertTrue(app.buttons["overview-login-offer-enable"].waitForExistence(timeout: 3))
+        app.buttons["overview-login-offer-enable"].click()
+        XCTAssertFalse(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 3))
+        app.typeKey(",", modifierFlags: .command)
+        XCTAssertTrue(app.staticTexts["launch-at-login-error"].waitForExistence(timeout: 3))
+        XCTAssertTrue(waitForValue("Off", element: app.staticTexts["launch-at-login-status"], timeout: 3), app.debugDescription)
+        let retry = app.buttons["retry-launch-at-login"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 3))
+        XCTAssertTrue(retry.isEnabled)
+    }
+
+    func testLaunchAtLoginOfferRoutesFromMenuToOverviewAndStaysUntilExplicitChoice() {
         let root = makeRoot()
-        var app = launch(scenario: "login-offer", root: root)
+        let app = launch(scenario: "login-offer", root: root)
         openMenuBarExtra(app)
-        XCTAssertTrue(app.descendants(matching: .any)["launch-at-login-offer"].waitForExistence(timeout: 5))
+        let reminder = app.buttons["login-offer-reminder"]
+        XCTAssertTrue(reminder.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.buttons["login-offer-enable"].exists)
+        XCTAssertFalse(app.buttons["login-offer-decline"].exists)
 
-        app.statusItems.firstMatch.click()
-        openMenuBarExtra(app)
-        XCTAssertFalse(app.descendants(matching: .any)["launch-at-login-offer"].waitForExistence(timeout: 2))
+        reminder.click()
+        XCTAssertTrue(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.descendants(matching: .any)["overview-launch-at-login-offer"].exists)
 
-        app.terminate()
-        XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
-        app = launch(scenario: "login-offer", root: root)
+        app.buttons["management-sidebar-portal-portal-one"].click()
+        XCTAssertTrue(waitForValue("portal-one", element: app.staticTexts["selected-portal-name"], timeout: 3))
         openMenuBarExtra(app)
-        XCTAssertFalse(app.descendants(matching: .any)["launch-at-login-offer"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["login-offer-reminder"].waitForExistence(timeout: 3))
+        app.buttons["login-offer-reminder"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.staticTexts["selected-portal-name"].exists)
+
+        XCTAssertTrue(app.buttons["overview-login-offer-decline"].waitForExistence(timeout: 3))
+        app.buttons["overview-login-offer-decline"].click()
+        XCTAssertFalse(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 2))
     }
 
     private func launch(scenario: String, root: String? = nil) -> XCUIApplication {
