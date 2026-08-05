@@ -39,10 +39,15 @@ jobs:
       - name: Generate Xcode project
         run: ./Scripts/generate-xcode-project.sh
 
-      - name: Test Swift application
+      - name: Test headless Swift unit suite
         run: >
           xcodebuild -project Portico.xcodeproj -scheme Portico
-          -destination 'platform=macOS' -derivedDataPath .build/xcode test
+          -destination 'platform=macOS' -derivedDataPath .build/xcode-unit test
+
+      - name: Test native Swift UI suite
+        run: >
+          xcodebuild -project Portico.xcodeproj -scheme 'Portico UI Tests'
+          -destination 'platform=macOS' -derivedDataPath .build/xcode-ui test
 
   go:
     name: Go

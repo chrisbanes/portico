@@ -79,7 +79,35 @@ if awk '/^[[:space:]]*(TEST_HOST|BUNDLE_LOADER)[[:space:]]*=/ { found = 1 } END 
   exit 1
 fi
 
-if ! awk '/^[[:space:]]*Schemes:/ { in_schemes = 1; next } in_schemes && /^[[:space:]]*Portico[[:space:]]*$/ { found = 1 } END { exit !found }' <<<"$project_listing"; then
-  echo "Generated project is missing the Portico scheme" >&2
+ui_test_settings="$(xcodebuild -showBuildSettings -project "$project_path" -target PorticoUITests -configuration Debug)"
+if ! awk '/^[[:space:]]*TEST_TARGET_NAME[[:space:]]*=[[:space:]]*Portico$/ { found = 1 } END { exit !found }' <<<"$ui_test_settings"; then
+  echo "PorticoUITests must target the Portico application" >&2
+  exit 1
+fi
+
+for scheme in Portico "Portico UI Tests"; do
+  if ! awk -v scheme="$scheme" '/^[[:space:]]*Schemes:/ { in_schemes = 1; next } in_schemes && $0 ~ "^[[:space:]]*" scheme "[[:space:]]*$" { found = 1 } END { exit !found }' <<<"$project_listing"; then
+    echo "Generated project is missing the $scheme scheme" >&2
+    exit 1
+  fi
+done
+
+scheme_dir="$project_path/xcshareddata/xcschemes"
+scheme_test_action() {
+  awk 'index($0, "<TestAction") { in_test_action = 1 } in_test_action { print } index($0, "</TestAction>") { exit }' "$1"
+}
+
+headless_test_action="$(scheme_test_action "$scheme_dir/Portico.xcscheme")"
+ui_test_action="$(scheme_test_action "$scheme_dir/Portico UI Tests.xcscheme")"
+headless_testable_count="$(awk 'index($0, "<TestableReference") { count++ } END { print count + 0 }' <<<"$headless_test_action")"
+ui_testable_count="$(awk 'index($0, "<TestableReference") { count++ } END { print count + 0 }' <<<"$ui_test_action")"
+
+if [[ "$headless_testable_count" != 1 ]] || ! grep -Fq 'BlueprintName = "PorticoTests"' <<<"$headless_test_action"; then
+  echo "Portico scheme must select only PorticoTests" >&2
+  exit 1
+fi
+
+if [[ "$ui_testable_count" != 1 ]] || ! grep -Fq 'BlueprintName = "PorticoUITests"' <<<"$ui_test_action"; then
+  echo "Portico UI Tests scheme must select only PorticoUITests" >&2
   exit 1
 fi

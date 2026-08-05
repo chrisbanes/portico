@@ -40,15 +40,27 @@ Launch the result:
 open .build/xcode/Build/Products/Debug/Portico.app
 ```
 
-Run the unit tests:
+Run the routine headless Swift unit tests:
 
 ```shell
-(cd helper && go test ./...)
 xcodebuild \
   -project Portico.xcodeproj \
   -scheme Portico \
   -destination 'platform=macOS' \
-  -derivedDataPath .build/xcode \
+  -derivedDataPath .build/xcode-unit \
+  test
+```
+
+Run the native UI tests when changing menu-bar content, windows, commands,
+accessibility interactions, focus, or other native UI behavior. This command
+launches the real app, opens native windows, and takes the foreground:
+
+```shell
+xcodebuild \
+  -project Portico.xcodeproj \
+  -scheme 'Portico UI Tests' \
+  -destination 'platform=macOS' \
+  -derivedDataPath .build/xcode-ui \
   test
 ```
 
@@ -61,7 +73,13 @@ xcodebuild \
   -project Portico.xcodeproj \
   -scheme Portico \
   -destination 'platform=macOS' \
-  -derivedDataPath .build/xcode \
+  -derivedDataPath .build/xcode-unit \
+  test
+xcodebuild \
+  -project Portico.xcodeproj \
+  -scheme 'Portico UI Tests' \
+  -destination 'platform=macOS' \
+  -derivedDataPath .build/xcode-ui \
   test
 (cd helper && go build ./cmd/portico-helper && go test ./...)
 ```
@@ -79,6 +97,11 @@ bundled helper process, and confirms that both stop cleanly:
 ```shell
 ./Scripts/smoke-test-local-app.sh
 ```
+
+At the current baseline, this script can finish its build and helper checks,
+then report `Portico did not quit` even though neither the app nor its helper
+process remains. Treat only that exact final signature as the known limitation;
+any build, helper, launch, or residual-process failure needs investigation.
 
 ## Documentation
 
