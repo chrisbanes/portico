@@ -40,8 +40,9 @@ Mac's normal network. It may be on any non-loopback network the Mac can reach.
 _Avoid_: External App, Network App, remote target
 
 **Online Portal**:
-A Portal whose Tailscale node is connected and accepting tailnet requests. It
-does not imply that the Portal Destination is reachable or healthy.
+A Portal whose Tailscale node is connected to its tailnet. It does not imply
+that the Portal is accepting tailnet requests or that the Portal Destination
+is reachable or healthy.
 _Avoid_: Healthy Portal, available app
 
 **Enabled Portal**:
