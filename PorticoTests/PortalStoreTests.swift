@@ -3,6 +3,39 @@ import XCTest
 @testable import Portico
 
 final class PortalStoreTests: XCTestCase {
+    func testPrepareForStartupPersistsOnlyGenuinelyNewInstallations() throws {
+        let freshStore = PortalStore(rootURL: temporaryRoot())
+
+        XCTAssertEqual(try freshStore.prepareForStartup(), .freshInstallation)
+        XCTAssertEqual(try freshStore.loadInstallation(), InstallationRecord())
+        XCTAssertEqual(try freshStore.prepareForStartup(), .existingInstallation)
+
+        let migrations: [(KeyPath<PortalStore, URL>, Data)] = [
+            (\.legacyConfigurationURL, historicalVersionOneData()),
+            (\.versionTwoInstallationURL, Data(#"{"version":2,"portals":[],"alerts":[]}"#.utf8)),
+            (\.versionThreeInstallationURL, Data(
+                #"{"version":3,"portals":[],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#.utf8
+            )),
+        ]
+        for (path, data) in migrations {
+            let migratedStore = PortalStore(rootURL: temporaryRoot())
+            try FileManager.default.createDirectory(at: migratedStore.rootURL, withIntermediateDirectories: true)
+            try data.write(to: migratedStore[keyPath: path])
+
+            XCTAssertEqual(try migratedStore.prepareForStartup(), .existingInstallation)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: migratedStore.installationURL.path))
+        }
+
+        struct ExpectedFailure: Error {}
+        let failedStore = PortalStore(
+            rootURL: temporaryRoot(),
+            writeData: { _, _ in throw ExpectedFailure() }
+        )
+
+        XCTAssertThrowsError(try failedStore.prepareForStartup())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: failedStore.installationURL.path))
+    }
+
     func testNewInstallationUsesVersionFourDefaults() throws {
         let store = PortalStore(rootURL: temporaryRoot())
 
