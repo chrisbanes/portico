@@ -80,10 +80,19 @@ private struct OverviewView: View {
         case portal(UUID)
     }
 
+    private enum AccessibilityFocusTarget: Hashable {
+        case removalNotice(UUID)
+    }
+
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
     @State private var selection: Destination? = .overview
     @State private var showingAddPortal = false
+    @State private var showingResetConfirmation = false
+    @State private var removalCandidate: PortalConfiguration?
+    @State private var removalCompletionFocusID: UUID?
+    @State private var removalCancelFocusPortalID: UUID?
+    @AccessibilityFocusState private var accessibilityFocus: AccessibilityFocusTarget?
 
     var body: some View {
         NavigationSplitView {
@@ -91,7 +100,7 @@ private struct OverviewView: View {
                 Label("Overview", systemImage: "door.left.hand.open")
                     .accessibilityIdentifier("management-sidebar-overview")
                     .tag(Destination.overview)
-                ForEach(controller.portals.filter { $0.lifecycle == .active }, id: \.id) { portal in
+                ForEach(controller.portals, id: \.id) { portal in
                     let presentation = PortalPresentation(
                         portal: portal,
                         status: controller.statuses[portal.id],
@@ -103,7 +112,7 @@ private struct OverviewView: View {
                     } label: {
                         VStack(alignment: .leading) {
                             Text(presentation.portalName)
-                            Text(presentation.tailscaleState)
+                            Text(sidebarState(for: portal, presentation: presentation))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -143,24 +152,65 @@ private struct OverviewView: View {
             .onChange(of: controller.portals) { _, portals in
                 guard let currentSelection = selection,
                       case let .portal(id) = currentSelection,
-                      !portals.contains(where: { $0.id == id && $0.lifecycle == .active })
+                      !portals.contains(where: { $0.id == id })
                 else { return }
                 selection = .overview
+            }
+            .onChange(of: controller.removalNotices) { _, notices in
+                guard let id = removalCompletionFocusID,
+                      notices.contains(where: { $0.id == id })
+                else { return }
+                selection = .overview
+                removalCompletionFocusID = nil
+                DispatchQueue.main.async {
+                    accessibilityFocus = .removalNotice(id)
+                }
+            }
+            .confirmationDialog(
+                "Reset this installation's tailnet binding? This does not remove any remote Tailscale node.",
+                isPresented: $showingResetConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Reset Tailnet", role: .destructive) {
+                    controller.resetTailnet(confirmed: true)
+                }
+                .accessibilityIdentifier("overview-confirm-reset-tailnet")
+                Button("Cancel", role: .cancel) {}
+                    .accessibilityIdentifier("overview-cancel-reset-tailnet")
+            }
+            .sheet(isPresented: Binding(
+                get: { removalCandidate != nil },
+                set: { if !$0 { cancelRemoval() } }
+            )) {
+                if let portal = removalCandidate {
+                    RemovalConfirmationView(
+                        controller: controller,
+                        portal: portal,
+                        cancel: cancelRemoval,
+                        confirm: {
+                            removalCompletionFocusID = portal.id
+                            controller.removePortal(id: portal.id)
+                            removalCandidate = nil
+                        }
+                    )
+                }
             }
         }
     }
 
     private var selectedPortal: PortalConfiguration? {
         guard let selection, case let .portal(id) = selection else { return nil }
-        return controller.portals.first(where: { $0.id == id && $0.lifecycle == .active })
+        return controller.portals.first(where: { $0.id == id })
     }
 
     @ViewBuilder
     private var managementContent: some View {
         if let selectedPortal {
-            SelectedPortalView(controller: controller, portal: selectedPortal)
+            selectedDetail(for: selectedPortal)
                 .id(selectedPortal.id)
-        } else if controller.portals.isEmpty, controller.operationalLogging != .undecided {
+        } else if controller.portals.isEmpty,
+                  controller.operationalLogging != .undecided,
+                  !hasRecoveryContent {
             VStack(spacing: 16) {
                 ContentUnavailableView {
                     Label("No Portals", systemImage: "door.left.hand.open")
@@ -206,12 +256,13 @@ private struct OverviewView: View {
                 }
                 if !controller.portals.isEmpty {
                     Section("Portals") {
-                        ForEach(controller.portals.filter { $0.lifecycle == .active }, id: \.id) { portal in
+                        ForEach(controller.portals, id: \.id) { portal in
                             Text(portal.name)
                                 .accessibilityIdentifier("overview-portal-\(portal.name)")
                         }
                     }
                 }
+                recoverySections
                 if let message = controller.message {
                     Text(message)
                         .foregroundStyle(.secondary)
@@ -221,17 +272,96 @@ private struct OverviewView: View {
             .formStyle(.grouped)
         }
     }
+
+    @ViewBuilder
+    private func selectedDetail(for portal: PortalConfiguration) -> some View {
+        switch portal.lifecycle {
+        case .active:
+            SelectedPortalView(
+                controller: controller,
+                portal: portal,
+                removalFocusRequestID: removalCancelFocusPortalID == portal.id
+                    ? portal.id
+                    : nil
+            ) {
+                removalCancelFocusPortalID = nil
+                removalCandidate = portal
+            }
+        case .pendingRemoval:
+            RemovingPortalView(controller: controller, portal: portal)
+        case .pendingTailnetRejection:
+            PendingPortalDetailView(controller: controller, portal: portal)
+        }
+    }
+
+    @ViewBuilder
+    private var recoverySections: some View {
+        if supervisor.availability == .failed || !controller.pendingPortals.isEmpty ||
+            !controller.removalNotices.isEmpty || !controller.alerts.isEmpty || controller.canResetTailnet {
+            Section("Recovery") {
+                if supervisor.availability == .failed {
+                    Button("Retry Helper") { controller.retryHelper() }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("overview-retry-helper")
+                }
+                ForEach(controller.pendingPortals, id: \.id) { portal in
+                    PendingPortalWarningView(controller: controller, portal: portal)
+                }
+                ForEach(controller.removalNotices) { notice in
+                    RemovalNoticeView(controller: controller, notice: notice)
+                        .accessibilityFocused($accessibilityFocus, equals: .removalNotice(notice.id))
+                }
+                ForEach(controller.alerts) { alert in
+                    CompletedWarningView(controller: controller, alert: alert)
+                }
+                if controller.canResetTailnet {
+                    Button("Reset Tailnet", role: .destructive) {
+                        showingResetConfirmation = true
+                    }
+                    .accessibilityIdentifier("overview-reset-tailnet")
+                }
+            }
+        }
+    }
+
+    private var hasRecoveryContent: Bool {
+        supervisor.availability == .failed || !controller.pendingPortals.isEmpty ||
+            !controller.removalNotices.isEmpty || !controller.alerts.isEmpty || controller.canResetTailnet
+    }
+
+    private func sidebarState(for portal: PortalConfiguration, presentation: PortalPresentation) -> String {
+        switch portal.lifecycle {
+        case .active: presentation.tailscaleState
+        case .pendingRemoval: "Removing"
+        case .pendingTailnetRejection: "Cleanup in progress"
+        }
+    }
+
+    private func cancelRemoval() {
+        guard let portal = removalCandidate else { return }
+        removalCandidate = nil
+        removalCancelFocusPortalID = portal.id
+    }
 }
 
 private struct SelectedPortalView: View {
     @Environment(\.openWindow) private var openWindow
     @ObservedObject var controller: PortalController
     let portal: PortalConfiguration
+    let removalFocusRequestID: UUID?
+    let onRemove: () -> Void
     @State private var destinationEdit: PortalDestinationEdit
 
-    init(controller: PortalController, portal: PortalConfiguration) {
+    init(
+        controller: PortalController,
+        portal: PortalConfiguration,
+        removalFocusRequestID: UUID?,
+        onRemove: @escaping () -> Void
+    ) {
         self.controller = controller
         self.portal = portal
+        self.removalFocusRequestID = removalFocusRequestID
+        self.onRemove = onRemove
         _destinationEdit = State(initialValue: PortalDestinationEdit(destination: portal.destination))
     }
 
@@ -348,6 +478,14 @@ private struct SelectedPortalView: View {
                 }
                 Button("Diagnostics") { openWindow(id: "diagnostics") }
                     .accessibilityIdentifier("selected-portal-diagnostics")
+                FocusRestoringButton(
+                    title: "Remove Portal",
+                    isEnabled: portalActions.remove,
+                    isDestructive: true,
+                    focusRequestID: removalFocusRequestID,
+                    action: onRemove
+                )
+                    .accessibilityIdentifier("selected-remove-portal")
             }
             if let message = controller.message {
                 Text(message)
@@ -368,13 +506,147 @@ private struct SelectedPortalView: View {
     }
 }
 
+private struct RemovalConfirmationView: View {
+    @ObservedObject var controller: PortalController
+    let portal: PortalConfiguration
+    let cancel: () -> Void
+    let confirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Remove \(portal.name)?").font(.headline)
+                .accessibilityIdentifier("remove-confirmation-heading")
+            Text(controller.removalWarningText(for: portal))
+                .accessibilityIdentifier("remove-warning")
+            Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("remove-cancel")
+                Button("Remove Portal", role: .destructive, action: confirm)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("remove-confirm")
+            }
+        }
+        .padding()
+        .frame(width: 420)
+    }
+}
+
+private struct RemovingPortalView: View {
+    @Environment(\.openWindow) private var openWindow
+    @ObservedObject var controller: PortalController
+    let portal: PortalConfiguration
+
+    var body: some View {
+        Form {
+            Section("Removing Portal") {
+                Text("Removing Portal")
+                    .accessibilityIdentifier("removing-portal")
+                Text(controller.pendingRemovalWarningText(for: portal))
+                Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
+                if controller.removalStates[portal.id] == .failed {
+                    Button("Retry Removal") { controller.retryRemoval(id: portal.id) }
+                        .disabled(!controller.actionAvailability(for: portal).retryRemoval)
+                        .accessibilityIdentifier("removing-retry")
+                } else {
+                    ProgressView()
+                        .accessibilityIdentifier("removing-progress")
+                }
+                Button("Diagnostics") { openWindow(id: "diagnostics") }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private struct PendingPortalDetailView: View {
+    @ObservedObject var controller: PortalController
+    let portal: PortalConfiguration
+
+    var body: some View {
+        Form {
+            Section("Cleanup in progress") {
+                Text(controller.pendingWarningText(for: portal))
+                    .accessibilityIdentifier("pending-portal-detail")
+                Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
+            }
+        }
+        .formStyle(.grouped)
+        .accessibilityIdentifier("pending-portal")
+    }
+}
+
+private struct PendingPortalWarningView: View {
+    @ObservedObject var controller: PortalController
+    let portal: PortalConfiguration
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Cleanup in progress", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+            Text(controller.pendingWarningText(for: portal))
+                .font(.caption)
+            Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
+                .font(.caption)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("pending-portal-warning")
+    }
+}
+
+private struct CompletedWarningView: View {
+    @ObservedObject var controller: PortalController
+    let alert: InstallationAlert
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Portal removed from this Mac", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+            Text(controller.completedWarningText(for: alert))
+                .font(.caption)
+            Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
+                .font(.caption)
+            Button("Dismiss") { controller.dismissAlert(id: alert.id) }
+                .controlSize(.small)
+                .accessibilityIdentifier("completed-warning-dismiss")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("completed-warning")
+    }
+}
+
+private struct RemovalNoticeView: View {
+    @ObservedObject var controller: PortalController
+    let notice: PortalRemovalNotice
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Portal removed from this Mac", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+            Text(controller.removalNoticeText(for: notice))
+                .font(.caption)
+            Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
+                .font(.caption)
+            Button("Dismiss") { controller.dismissRemovalNotice(id: notice.id) }
+                .controlSize(.small)
+                .accessibilityIdentifier("removal-complete-dismiss")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("removal-complete")
+    }
+}
+
 private struct FocusRestoringButton: NSViewRepresentable {
     let title: String
     let isEnabled: Bool
+    var isDestructive = false
+    var focusRequestID: UUID?
     let action: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(action: action)
+        Coordinator(action: action, focusRequestID: focusRequestID)
     }
 
     func makeNSView(context: Context) -> NSButton {
@@ -389,18 +661,57 @@ private struct FocusRestoringButton: NSViewRepresentable {
         context.coordinator.action = action
         button.title = title
         button.isEnabled = isEnabled
-        guard titleChanged else { return }
-        DispatchQueue.main.async {
-            button.window?.makeFirstResponder(button)
-        }
+        button.contentTintColor = isDestructive ? .systemRed : nil
+        let focusRequested = context.coordinator.focusRequestID != focusRequestID
+        context.coordinator.focusRequestID = focusRequestID
+        guard titleChanged || (focusRequested && focusRequestID != nil) else { return }
+        context.coordinator.restoreFocus(afterSheetDismissal: button)
+    }
+
+    static func dismantleNSView(_ button: NSButton, coordinator: Coordinator) {
+        coordinator.removeSheetObserver()
     }
 
     final class Coordinator: NSObject {
         var action: () -> Void
+        var focusRequestID: UUID?
+        private var sheetObserver: NSObjectProtocol?
 
-        init(action: @escaping () -> Void) {
+        init(action: @escaping () -> Void, focusRequestID: UUID?) {
             self.action = action
+            self.focusRequestID = focusRequestID
         }
+
+        deinit {
+            removeSheetObserver()
+        }
+
+        func restoreFocus(afterSheetDismissal button: NSButton) {
+            DispatchQueue.main.async { [weak self, weak button] in
+                guard let self, let button, let window = button.window else { return }
+                self.removeSheetObserver()
+                guard window.attachedSheet != nil else {
+                    window.makeFirstResponder(button)
+                    return
+                }
+                self.sheetObserver = NotificationCenter.default.addObserver(
+                    forName: NSWindow.didEndSheetNotification,
+                    object: window,
+                    queue: .main
+                ) { [weak self, weak button, weak window] _ in
+                    self?.removeSheetObserver()
+                    guard let button, let window else { return }
+                    window.makeFirstResponder(button)
+                }
+            }
+        }
+
+        func removeSheetObserver() {
+            guard let sheetObserver else { return }
+            NotificationCenter.default.removeObserver(sheetObserver)
+            self.sheetObserver = nil
+        }
+
 
         @objc func performAction() {
             action()
@@ -409,30 +720,15 @@ private struct FocusRestoringButton: NSViewRepresentable {
 }
 
 private struct PortalView: View {
-    private enum AccessibilityFocusTarget: Hashable {
-        case portal(UUID)
-        case removalNotice(UUID)
-    }
-
     @Environment(\.openWindow) private var openWindow
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
     @ObservedObject var launchAtLogin: LaunchAtLoginController
     let takeInitialManagementWindowRequest: () -> Bool
-    @State private var showingResetConfirmation = false
-    @State private var removalCandidate: PortalConfiguration?
-    @State private var removalCompletionFocusID: UUID?
-    @AccessibilityFocusState private var accessibilityFocus: AccessibilityFocusTarget?
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(supervisor.availability.title, systemImage: supervisor.availability.symbolName)
                 .accessibilityIdentifier("helper-state")
-            if supervisor.availability == .failed {
-                Button("Retry Helper") { controller.retryHelper() }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("retry-helper")
-            }
             if let suffix = controller.tailnetDisplaySuffix {
                 LabeledContent("Tailnet", value: suffix)
             }
@@ -451,34 +747,9 @@ private struct PortalView: View {
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("launch-at-login-offer")
             }
-            Divider()
-            ForEach(controller.pendingPortals, id: \.id) { portal in
-                pendingWarning(portal)
-            }
-            ForEach(controller.pendingRemovalPortals, id: \.id) { portal in
-                pendingRemoval(portal)
-            }
-            ForEach(controller.removalNotices) { notice in
-                removalNotice(notice)
-                    .accessibilityFocused($accessibilityFocus, equals: .removalNotice(notice.id))
-            }
-            ForEach(controller.alerts) { alert in
-                completedWarning(alert)
-            }
             ForEach(controller.portals.filter { $0.lifecycle == .active }, id: \.id) { portal in
-                PortalStatusView(
-                    controller: controller,
-                    portal: portal,
-                    onRemove: { removalCandidate = portal }
-                )
-                .accessibilityFocused($accessibilityFocus, equals: .portal(portal.id))
+                PortalStatusView(controller: controller, portal: portal)
                 Divider()
-            }
-            if controller.canResetTailnet {
-                Divider()
-                Button("Reset Tailnet", role: .destructive) {
-                    showingResetConfirmation = true
-                }
             }
             if let message = controller.message {
                 Text(message)
@@ -505,54 +776,6 @@ private struct PortalView: View {
         .onDisappear {
             if launchAtLogin.isOffering {
                 launchAtLogin.declineOffer()
-            }
-        }
-        .onChange(of: controller.removalNotices) { _, notices in
-            guard let id = removalCompletionFocusID,
-                  notices.contains(where: { $0.id == id })
-            else { return }
-            removalCompletionFocusID = nil
-            accessibilityFocus = .removalNotice(id)
-        }
-        .confirmationDialog(
-            "Reset this installation's tailnet binding? This does not remove any remote Tailscale node.",
-            isPresented: $showingResetConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Reset Tailnet", role: .destructive) {
-                controller.resetTailnet(confirmed: true)
-            }
-            Button("Cancel", role: .cancel) {}
-        }
-        .sheet(isPresented: Binding(
-            get: { removalCandidate != nil },
-            set: { if !$0 { cancelRemoval() } }
-        )) {
-            if let portal = removalCandidate {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Remove Portal?").font(.headline)
-                        .accessibilityIdentifier("remove-confirmation-heading")
-                    Text(controller.removalWarningText(for: portal))
-                    Link(
-                        "How to remove a Tailscale device",
-                        destination: PortalController.manualRemovalURL
-                    )
-                    HStack {
-                        Spacer()
-                        Button("Cancel") { cancelRemoval() }
-                            .keyboardShortcut(.cancelAction)
-                            .accessibilityIdentifier("remove-cancel")
-                        Button("Remove Portal", role: .destructive) {
-                            removalCompletionFocusID = portal.id
-                            controller.removePortal(id: portal.id)
-                            removalCandidate = nil
-                        }
-                        .keyboardShortcut(.defaultAction)
-                        .accessibilityIdentifier("remove-confirm")
-                    }
-                }
-                .padding()
-                .frame(width: 420)
             }
         }
         Divider()
@@ -708,90 +931,16 @@ private struct AddPortalSheet: View {
 
 }
 
-private extension PortalView {
-    func cancelRemoval() {
-        guard let portal = removalCandidate else { return }
-        removalCandidate = nil
-        DispatchQueue.main.async {
-            accessibilityFocus = .portal(portal.id)
-        }
-    }
-
-    private func pendingWarning(_ portal: PortalConfiguration) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("Cleanup in progress", systemImage: "exclamationmark.triangle.fill")
-                .font(.headline)
-            Text(controller.pendingWarningText(for: portal))
-                .font(.caption)
-            Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
-                .font(.caption)
-        }
-    }
-
-    private func completedWarning(_ alert: InstallationAlert) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("Portal removed from this Mac", systemImage: "exclamationmark.triangle.fill")
-                .font(.headline)
-            Text(controller.completedWarningText(for: alert))
-                .font(.caption)
-            Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
-                .font(.caption)
-            Button("Dismiss") { controller.dismissAlert(id: alert.id) }
-                .controlSize(.small)
-        }
-    }
-
-    private func pendingRemoval(_ portal: PortalConfiguration) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("Removing Portal", systemImage: "trash")
-                .font(.headline)
-            Text(controller.pendingRemovalWarningText(for: portal))
-                .font(.caption)
-            Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
-                .font(.caption)
-            if controller.removalStates[portal.id] == .failed {
-                Button("Retry Removal") { controller.retryRemoval(id: portal.id) }
-                    .controlSize(.small)
-                    .disabled(!controller.actionAvailability(for: portal).retryRemoval)
-            } else {
-                ProgressView()
-                    .controlSize(.small)
-            }
-            Button("Diagnostics") { openWindow(id: "diagnostics") }
-                .controlSize(.small)
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("removing-portal")
-    }
-
-    private func removalNotice(_ notice: PortalRemovalNotice) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("Portal removed from this Mac", systemImage: "exclamationmark.triangle.fill")
-                .font(.headline)
-            Text(controller.removalNoticeText(for: notice))
-                .font(.caption)
-            Link("How to remove a Tailscale device", destination: PortalController.manualRemovalURL)
-                .font(.caption)
-            Button("Dismiss") { controller.dismissRemovalNotice(id: notice.id) }
-                .controlSize(.small)
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("removal-complete")
-    }
-}
-
 private struct PortalStatusView: View {
     @Environment(\.openWindow) private var openWindow
     @ObservedObject var controller: PortalController
     let portal: PortalConfiguration
-    let onRemove: () -> Void
     @State private var destinationEdit: PortalDestinationEdit
     @FocusState private var startStopFocused: Bool
 
-    init(controller: PortalController, portal: PortalConfiguration, onRemove: @escaping () -> Void) {
+    init(controller: PortalController, portal: PortalConfiguration) {
         self.controller = controller
         self.portal = portal
-        self.onRemove = onRemove
         _destinationEdit = State(initialValue: PortalDestinationEdit(destination: portal.destination))
     }
 
@@ -918,9 +1067,6 @@ private struct PortalStatusView: View {
         Button("Diagnostics") { openWindow(id: "diagnostics") }
             .controlSize(.small)
             .accessibilityIdentifier("portal-diagnostics")
-        Button("Remove Portal", role: .destructive, action: onRemove)
-            .controlSize(.small)
-            .accessibilityIdentifier("remove-portal")
     }
 
     private func updateDestination() {

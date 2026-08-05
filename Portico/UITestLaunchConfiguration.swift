@@ -6,6 +6,9 @@ enum UITestScenario: String {
     case firstRun = "first-run"
     case creation
     case management
+    case durableManagement = "durable-management"
+    case recovery
+    case resetEligible = "reset-eligible"
     case online
     case remoteOnline = "remote-online"
     case authenticating
@@ -104,6 +107,54 @@ struct UITestLaunchConfiguration {
                 operationalLogging: .enabled,
                 launchAtLoginOffer: .declined
             ))
+        case .durableManagement:
+            try store.save(InstallationRecord(
+                tailnetBinding: Self.tailnetBinding,
+                portals: [
+                    Self.portal(
+                        id: Self.firstPortalID,
+                        name: "durable-active",
+                        createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+                    ),
+                    Self.portal(
+                        id: Self.secondPortalID,
+                        name: "durable-removing",
+                        createdAt: Date(timeIntervalSince1970: 1_700_000_001),
+                        lifecycle: .pendingRemoval,
+                        removalAssignedName: "durable-removing-1"
+                    ),
+                    Self.portal(
+                        id: Self.thirdPortalID,
+                        name: "durable-rejected",
+                        createdAt: Date(timeIntervalSince1970: 1_700_000_002),
+                        lifecycle: .pendingTailnetRejection,
+                        removalAssignedName: "durable-rejected-1"
+                    ),
+                ],
+                operationalLogging: .enabled,
+                launchAtLoginOffer: .declined
+            ))
+        case .recovery:
+            try store.save(InstallationRecord(
+                tailnetBinding: Self.tailnetBinding,
+                portals: [
+                    Self.portal(
+                        id: Self.thirdPortalID,
+                        name: "recovery-rejected",
+                        lifecycle: .pendingTailnetRejection,
+                        removalAssignedName: "recovery-rejected-1"
+                    ),
+                ],
+                alerts: [Self.recoveryAlert],
+                operationalLogging: .enabled,
+                launchAtLoginOffer: .declined
+            ))
+        case .resetEligible:
+            try store.save(InstallationRecord(
+                tailnetBinding: Self.tailnetBinding,
+                operationalLogging: .enabled,
+                launchAtLoginOffer: .declined
+            ))
         case .online, .authenticating, .awaitingApproval, .stale, .restarting, .terminalFailure:
             try store.save(InstallationRecord(
                 tailnetBinding: Self.tailnetBinding,
@@ -135,6 +186,16 @@ struct UITestLaunchConfiguration {
 
     private static let firstPortalID = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
     private static let secondPortalID = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
+    private static let thirdPortalID = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+    private static let recoveryAlert = InstallationAlert(
+        id: UUID(uuidString: "55555555-5555-4555-8555-555555555555")!,
+        kind: .crossTailnetRejection,
+        portalName: "recovery-rejected",
+        assignedName: "recovery-rejected-1",
+        expectedMagicDNSSuffix: "example.ts.net",
+        rejectedMagicDNSSuffix: "other.ts.net",
+        createdAt: Date(timeIntervalSince1970: 1_700_000_003)
+    )
 
     private static func portal(
         id: UUID = portalID,
@@ -258,9 +319,10 @@ private final class UITestHelperProcess: HelperProcess {
         case .authenticatePortal:
             respond(AuthenticatePortalResult(accepted: true), requestID: envelope.requestId)
         case .cleanupRejectedPortal:
+            if scenario == .durableManagement || scenario == .recovery { return }
             respond(CleanupRejectedPortalResult(accepted: true), requestID: envelope.requestId)
         case .removePortal:
-            if scenario == .removing { return }
+            if scenario == .removing || scenario == .durableManagement { return }
             if scenario == .removingFailure {
                 respondError(code: "remove_failed", requestID: envelope.requestId)
             } else {
@@ -330,7 +392,7 @@ private final class UITestHelperProcess: HelperProcess {
     }
 
     private func emitStatuses(for portals: [ReconcilePortalPayload]) {
-        guard [.online, .remoteOnline, .authenticating, .awaitingApproval, .stale, .restarting, .loginOffer, .management].contains(scenario) else { return }
+        guard [.online, .remoteOnline, .authenticating, .awaitingApproval, .stale, .restarting, .loginOffer, .management, .durableManagement].contains(scenario) else { return }
         for portal in portals {
             let state: PortalTailscaleState
             if scenario == .authenticating {

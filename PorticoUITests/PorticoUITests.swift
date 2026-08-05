@@ -82,6 +82,36 @@ final class PorticoUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 1))
     }
 
+    func testManagementSidebarRetainsDurablePortalRecords() {
+        let app = launch(scenario: "durable-management")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+
+        XCTAssertTrue(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
+        let active = app.buttons["management-sidebar-portal-durable-active"]
+        let removing = app.buttons["management-sidebar-portal-durable-removing"]
+        let rejected = app.buttons["management-sidebar-portal-durable-rejected"]
+        XCTAssertTrue(active.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(removing.exists, app.debugDescription)
+        XCTAssertTrue(rejected.exists, app.debugDescription)
+        XCTAssertLessThan(active.frame.minY, removing.frame.minY)
+        XCTAssertLessThan(removing.frame.minY, rejected.frame.minY)
+        XCTAssertTrue(removing.label.contains("Removing"))
+        XCTAssertTrue(rejected.label.contains("Cleanup in progress"))
+
+        active.click()
+        XCTAssertTrue(waitForValue("durable-active", element: app.staticTexts["selected-portal-name"], timeout: 3))
+        removing.click()
+        XCTAssertTrue(app.descendants(matching: .any)["removing-portal"].waitForExistence(timeout: 3))
+        rejected.click()
+        XCTAssertTrue(
+            waitForText(
+                "Removing durable-rejected from a different tailnet.",
+                element: app.staticTexts["pending-portal-detail"],
+                timeout: 3
+            )
+        )
+    }
+
     func testSelectedPortalDetailShowsFactsAndSafeURLActions() {
         var app = launch(scenario: "online")
         app.typeKey("o", modifierFlags: [.command, .shift])
@@ -408,43 +438,90 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(waitForValue("Connected", element: app.staticTexts["helper-state"], timeout: 5))
 
         app = launch(scenario: "terminal-failure")
-        openMenuBarExtra(app)
-        XCTAssertTrue(waitForValue("Helper unavailable", element: app.staticTexts["helper-state"], timeout: 3))
-        XCTAssertTrue(app.buttons["retry-helper"].isEnabled)
-        XCTAssertTrue(app.buttons["start-stop"].isEnabled)
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitForValue("Helper unavailable", element: app.staticTexts["overview-helper-state"], timeout: 3))
+        XCTAssertTrue(app.buttons["overview-retry-helper"].isEnabled)
     }
 
-    func testRemovalConfirmationCancelCompletionAndFailure() {
+    func testManagementPortalRemovalConfirmationRecoveryAndFocus() {
         var app = launch(scenario: "online")
-        openMenuBarExtra(app)
-        app.buttons["remove-portal"].click()
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-portal-one"].click()
+        app.buttons["selected-remove-portal"].click()
         XCTAssertTrue(app.staticTexts["remove-confirmation-heading"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["remove-warning"].exists)
+        XCTAssertTrue(app.links["How to remove a Tailscale device"].exists)
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertFalse(app.staticTexts["remove-confirmation-heading"].waitForExistence(timeout: 1))
-        XCTAssertTrue(app.descendants(matching: .any)["portal-name"].exists)
+        let removePortal = app.buttons["selected-remove-portal"]
+        XCTAssertTrue(removePortal.exists)
+        XCTAssertTrue(
+            removePortal.waitForExistence(timeout: 3),
+            app.debugDescription
+        )
+        app.typeKey(.space, modifierFlags: [])
+        XCTAssertTrue(app.staticTexts["remove-confirmation-heading"].waitForExistence(timeout: 3))
+        app.typeKey(.escape, modifierFlags: [])
 
-        app.buttons["remove-portal"].click()
+        app.buttons["selected-remove-portal"].click()
         XCTAssertTrue(app.buttons["remove-confirm"].waitForExistence(timeout: 3))
         app.typeKey(.return, modifierFlags: [])
         let removalComplete = app.descendants(matching: .any)["removal-complete"]
-        if !removalComplete.waitForExistence(timeout: 1) {
-            openMenuBarExtra(app)
-        }
         XCTAssertTrue(removalComplete.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.descendants(matching: .any)["management-sidebar-overview"].exists)
+        XCTAssertTrue(app.buttons["removal-complete-dismiss"].exists)
+        app.buttons["removal-complete-dismiss"].click()
+        XCTAssertFalse(removalComplete.waitForExistence(timeout: 3), app.debugDescription)
 
         app = launch(scenario: "removing")
-        openMenuBarExtra(app)
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-portal-one"].click()
         XCTAssertTrue(app.descendants(matching: .any)["removing-portal"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.buttons["Retry Removal"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["removing-progress"].exists)
+        XCTAssertTrue(app.links["How to remove a Tailscale device"].exists)
 
         app = launch(scenario: "removing-failure")
-        openMenuBarExtra(app)
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-portal-one"].click()
         let retryRemoval = app.buttons["Retry Removal"]
-        if !retryRemoval.waitForExistence(timeout: 1) {
-            openMenuBarExtra(app)
-        }
         XCTAssertTrue(retryRemoval.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(retryRemoval.isEnabled)
+    }
+
+    func testOverviewRecoveryAndResetTailnet() {
+        var app = launch(scenario: "terminal-failure")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitForValue("Helper unavailable", element: app.staticTexts["overview-helper-state"], timeout: 3))
+        XCTAssertTrue(app.buttons["overview-retry-helper"].isEnabled)
+        openMenuBarExtra(app)
+        XCTAssertFalse(app.buttons["retry-helper"].exists)
+
+        app = launch(scenario: "recovery")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        XCTAssertTrue(app.descendants(matching: .any)["pending-portal-warning"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.descendants(matching: .any)["completed-warning"].exists)
+        XCTAssertTrue(app.buttons["completed-warning-dismiss"].exists)
+        XCTAssertFalse(app.buttons["overview-reset-tailnet"].exists)
+        app.buttons["completed-warning-dismiss"].click()
+        XCTAssertFalse(app.descendants(matching: .any)["completed-warning"].waitForExistence(timeout: 3))
+
+        app = launch(scenario: "reset-eligible")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        let reset = app.buttons["overview-reset-tailnet"]
+        XCTAssertTrue(reset.waitForExistence(timeout: 3), app.debugDescription)
+        reset.click()
+        XCTAssertTrue(app.staticTexts["Reset this installation's tailnet binding? This does not remove any remote Tailscale node."].waitForExistence(timeout: 3))
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(reset.exists)
+        reset.click()
+        XCTAssertTrue(app.buttons["overview-confirm-reset-tailnet"].waitForExistence(timeout: 3))
+        app.buttons["overview-confirm-reset-tailnet"].click()
+        XCTAssertFalse(reset.waitForExistence(timeout: 3), app.debugDescription)
+
+        app = launch(scenario: "durable-management")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        XCTAssertFalse(app.buttons["overview-reset-tailnet"].exists)
     }
 
     func testLaunchAtLoginApprovalAndRegistrationError() {
