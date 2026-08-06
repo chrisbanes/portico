@@ -510,6 +510,12 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
     }
 
+    func testSettingsHasInitialAccessibilityFocusTarget() {
+        let app = launch(scenario: "online")
+        app.typeKey(",", modifierFlags: .command)
+        XCTAssertTrue(app.staticTexts["settings-heading"].waitForExistence(timeout: 3))
+    }
+
     func testLoggingRestartAndTerminalFailureStates() {
         var app = launch(scenario: "restarting")
         app.typeKey(",", modifierFlags: .command)

@@ -1315,9 +1315,15 @@ private struct SettingsView: View {
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
     @ObservedObject var launchAtLogin: LaunchAtLoginController
+    @AccessibilityFocusState private var headingFocused: Bool
 
     var body: some View {
         Form {
+            Text("Portico Settings")
+                .font(.title2)
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityFocused($headingFocused)
+                .accessibilityIdentifier("settings-heading")
             Section("Privacy") {
                 Picker(
                     "Operational-support logging",
@@ -1374,6 +1380,7 @@ private struct SettingsView: View {
         .accessibilityIdentifier("settings-view")
         .onAppear {
             launchAtLogin.refreshStatusAfterApplicationActivation()
+            headingFocused = true
         }
     }
 }
