@@ -35,8 +35,6 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
-  pages: write
-  id-token: write
 jobs:
   build:
     name: Validate Pages artifact
@@ -59,6 +57,10 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
       - name: Deploy
         id: deployment
@@ -201,18 +203,57 @@ def active_yaml_lines(workflow: str) -> list[str]:
     return [line.split("#", 1)[0].rstrip() for line in workflow.splitlines() if line.split("#", 1)[0].strip()]
 
 
+def yaml_block(lines: list[str], start: str) -> list[str]:
+    position = lines.index(start)
+    indentation = len(start) - len(start.lstrip())
+    block: list[str] = []
+    for line in lines[position + 1 :]:
+        if len(line) - len(line.lstrip()) <= indentation:
+            break
+        block.append(line)
+    return block
+
+
 def validate_pages_workflow(workflow: str) -> None:
     lines = active_yaml_lines(workflow)
     for line in lines:
         match = re.fullmatch(r"\s*-\s+uses:\s*(\S+)", line)
         if match:
             require(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", match.group(1)) is not None, "Pages workflow has unpinned action")
+    top_level_permissions = yaml_block(lines, "permissions:")
+    require(top_level_permissions == ["  contents: read"], "Pages workflow must not grant write permissions at top level")
+    build = yaml_block(lines, "  build:")
+    require("    permissions:" not in build, "Pages build job must inherit read-only permissions")
+    deploy = yaml_block(lines, "  deploy:")
+    require(
+        deploy[deploy.index("    permissions:") + 1 : deploy.index("    steps:")]
+        == ["      contents: read", "      pages: write", "      id-token: write"],
+        "Pages deploy job must own Pages write permissions",
+    )
     require(lines == CANONICAL_PAGES_LINES, "Pages workflow must match the canonical active YAML")
+
+
+def require_rejected_pages_workflow(workflow: str, expected_error: str) -> None:
+    try:
+        validate_pages_workflow(workflow)
+    except AssertionError as error:
+        require(str(error) == expected_error, f"expected {expected_error}, got {error}")
+    else:
+        raise AssertionError(f"Pages workflow accepted invalid permissions: {expected_error}")
 
 
 def pages() -> None:
     require(PAGES_WORKFLOW.is_file(), "missing Pages workflow")
-    validate_pages_workflow(PAGES_WORKFLOW.read_text(encoding="utf-8"))
+    workflow = PAGES_WORKFLOW.read_text(encoding="utf-8")
+    validate_pages_workflow(workflow)
+    require_rejected_pages_workflow(
+        workflow.replace("permissions:\n  contents: read", "permissions:\n  contents: read\n  pages: write", 1),
+        "Pages workflow must not grant write permissions at top level",
+    )
+    require_rejected_pages_workflow(
+        workflow.replace("    name: Validate Pages artifact", "    permissions:\n      pages: write\n    name: Validate Pages artifact", 1),
+        "Pages build job must inherit read-only permissions",
+    )
 
 
 CHECKS = {"structure": structure, "styles": styles, "behavior": behavior, "metadata": metadata, "pages": pages}
