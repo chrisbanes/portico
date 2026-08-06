@@ -383,6 +383,14 @@ final class PorticoUITests: XCTestCase {
         openMenuBarExtra(app)
         XCTAssertTrue(app.buttons["compact-open-portal-url"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["compact-open-portal-url"].isEnabled)
+        XCTAssertTrue(
+            waitForText("Removing", element: app.staticTexts["compact-portal-status-durable-removing"], timeout: 3),
+            app.debugDescription
+        )
+        XCTAssertTrue(
+            waitForText("Cleanup in progress", element: app.staticTexts["compact-portal-status-durable-rejected"], timeout: 3),
+            app.debugDescription
+        )
         XCTAssertFalse(app.buttons["compact-authenticate"].exists)
         XCTAssertFalse(app.buttons["compact-start"].exists)
         assertNoDetailedMenuControls(in: app)

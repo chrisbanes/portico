@@ -365,11 +365,7 @@ private struct OverviewView: View {
     }
 
     private func sidebarState(for portal: PortalConfiguration, presentation: PortalPresentation) -> String {
-        switch portal.lifecycle {
-        case .active: presentation.tailscaleState
-        case .pendingRemoval: "Removing"
-        case .pendingTailnetRejection: "Cleanup in progress"
-        }
+        lifecycleStatusText(for: portal) ?? presentation.tailscaleState
     }
 
     private func cancelRemoval() {
@@ -1059,10 +1055,21 @@ private struct CompactPortalMenuRow: View {
     }
 
     private func statusText(for presentation: PortalPresentation) -> String {
+        if let lifecycleStatus = lifecycleStatusText(for: portal) {
+            return lifecycleStatus
+        }
         if portal.localAppPort != nil {
             return "\(presentation.tailscaleState) • \(presentation.desiredState) • \(presentation.localAppReachability)"
         }
         return "\(presentation.tailscaleState) • \(presentation.desiredState)"
+    }
+}
+
+private func lifecycleStatusText(for portal: PortalConfiguration) -> String? {
+    switch portal.lifecycle {
+    case .active: nil
+    case .pendingRemoval: "Removing"
+    case .pendingTailnetRejection: "Cleanup in progress"
     }
 }
 
