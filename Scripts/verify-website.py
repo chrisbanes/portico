@@ -66,6 +66,10 @@ def document_text(document: Page) -> str:
 def check_local(value: str, kind: str) -> None:
     parsed = urlparse(value)
     require(not parsed.scheme and not parsed.netloc and not value.startswith("//"), f"remote {kind} asset: {value}")
+    require(not parsed.path.startswith("/"), f"root-relative {kind} asset: {value}")
+    require(".." not in Path(parsed.path).parts, f"parent-relative {kind} asset: {value}")
+    resolved = (WEBSITE / parsed.path).resolve()
+    require(resolved.is_relative_to(WEBSITE.resolve()), f"unsafe {kind} asset: {value}")
 
 
 def structure() -> None:
@@ -143,29 +147,90 @@ def metadata() -> None:
     require((width, height) == (1200, 630), "og.png must be 1200x630")
 
 
-def pages() -> None:
-    candidates = [
-        candidate
-        for candidate in (ROOT / ".github/workflows").glob("*.y*ml")
-        if "github-pages" in candidate.read_text(encoding="utf-8")
+def active_yaml_lines(workflow: str) -> list[str]:
+    return [line.split("#", 1)[0].rstrip() for line in workflow.splitlines() if line.split("#", 1)[0].strip()]
+
+
+def indentation(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def mapping_has(lines: list[str], key: str, expected: tuple[str, ...]) -> bool:
+    for index, line in enumerate(lines):
+        if line.strip() != key:
+            continue
+        base = indentation(line)
+        nested: list[str] = []
+        for child in lines[index + 1 :]:
+            if indentation(child) <= base:
+                break
+            nested.append(child.strip())
+        if all(value in nested for value in expected):
+            return True
+    return False
+
+
+def job_blocks(lines: list[str]) -> dict[str, list[str]]:
+    starts = [
+        (index, match.group(1))
+        for index, line in enumerate(lines)
+        if indentation(line) == 2 and (match := re.fullmatch(r"\s{2}([A-Za-z0-9_-]+):", line))
     ]
-    require(candidates, "missing Pages workflow")
-    workflow = "\n".join(candidate.read_text(encoding="utf-8") for candidate in candidates)
-    for expected in ("pull_request:", "workflow_dispatch:", "permissions:", "python3 Scripts/verify-website.py", "path: website", "environment: github-pages"):
-        require(expected in workflow, f"Pages workflow missing {expected}")
-    for permission in ("contents: read", "pages: write", "id-token: write"):
-        require(permission in workflow, f"Pages workflow missing {permission} permission")
-    pins = {
-        "actions/configure-pages": "983d7736d9b0ae728b81ab479565c72886d7745b",
-        "actions/upload-pages-artifact": "7b1f4a764d45c48632c6b24a0339c27f5614fb0b",
-        "actions/deploy-pages": "d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+    return {
+        name: lines[index + 1 : starts[position + 1][0] if position + 1 < len(starts) else len(lines)]
+        for position, (index, name) in enumerate(starts)
     }
-    for action, sha in pins.items():
-        matches = re.findall(rf"uses:\s*{re.escape(action)}@([^\s#]+)", workflow)
-        require(matches, f"Pages workflow missing {action}")
-        require(all(match == sha for match in matches), f"Pages workflow has unpinned {action}")
-    all_pins = re.findall(r"uses:\s*[^\s@]+@([^\s#]+)", workflow)
-    require(all(re.fullmatch(r"[0-9a-f]{40}", pin) for pin in all_pins), "Pages workflow has unpinned action")
+
+
+def has_pinned_action(lines: list[str], action: str, sha: str) -> bool:
+    return any(re.fullmatch(rf"\s*-\s+uses:\s*{re.escape(action)}@{sha}", line) for line in lines)
+
+
+def has_verifier_command(lines: list[str]) -> bool:
+    command = r"python3 Scripts/verify-website\.py(?:\s+\S+)*"
+    return any(
+        re.fullmatch(rf"\s*-\s+run:\s*{command}", line)
+        or re.fullmatch(rf"\s+{command}", line)
+        for line in lines
+    )
+
+
+def has_pages_environment(lines: list[str]) -> bool:
+    return any(line.strip() == "environment: github-pages" for line in lines) or mapping_has(lines, "environment:", ("name: github-pages",))
+
+
+def validate_pages_workflow(workflow: str) -> None:
+    lines = active_yaml_lines(workflow)
+    require(mapping_has(lines, "on:", ("pull_request:", "workflow_dispatch:")), "Pages workflow missing PR/manual triggers")
+    require(mapping_has(lines, "permissions:", ("contents: read", "pages: write", "id-token: write")), "Pages workflow missing required permissions")
+    blocks = job_blocks(lines)
+    require("build" in blocks, "Pages workflow missing build job")
+    require("deploy" in blocks, "Pages workflow missing deploy job")
+    build = blocks["build"]
+    deploy = blocks["deploy"]
+    require(has_verifier_command(build), "Pages workflow missing verifier command in build")
+    require(has_pinned_action(build, "actions/configure-pages", "983d7736d9b0ae728b81ab479565c72886d7745b"), "Pages workflow missing pinned configure-pages in build")
+    require(has_pinned_action(build, "actions/upload-pages-artifact", "7b1f4a764d45c48632c6b24a0339c27f5614fb0b"), "Pages workflow missing pinned upload-pages-artifact in build")
+    require(any(line.strip() == "path: website" for line in build), "Pages workflow missing website artifact path in build")
+    require(has_pages_environment(deploy), "Pages workflow missing github-pages environment in deploy")
+    require(has_pinned_action(deploy, "actions/deploy-pages", "d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e"), "Pages workflow missing pinned deploy-pages in deploy")
+    for line in lines:
+        match = re.fullmatch(r"\s*-\s+uses:\s*(\S+)", line)
+        if match:
+            require(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", match.group(1)) is not None, "Pages workflow has unpinned action")
+
+
+def pages() -> None:
+    candidates = list((ROOT / ".github/workflows").glob("*.y*ml"))
+    require(candidates, "missing Pages workflow")
+    failures: list[AssertionError] = []
+    for candidate in candidates:
+        try:
+            validate_pages_workflow(candidate.read_text(encoding="utf-8"))
+            return
+        except AssertionError as error:
+            failures.append(error)
+    raise failures[-1]
 
 
 CHECKS = {"structure": structure, "styles": styles, "behavior": behavior, "metadata": metadata, "pages": pages}

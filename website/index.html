@@ -13,11 +13,11 @@
     <link rel="stylesheet" href="styles.css">
     <script src="script.js" defer></script>
   </head>
-  <body>
+  <body id="top">
     <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="site-header">
       <nav aria-label="Primary navigation">
-        <a class="wordmark" href="#main-content" aria-label="Portico home">Portico</a>
+        <a class="wordmark" href="#top" aria-label="Portico home">Portico</a>
         <button class="menu-button" type="button" aria-controls="site-nav" aria-expanded="false">Menu</button>
         <div id="site-nav">
           <a href="#how-it-works">How it works</a>
@@ -39,11 +39,12 @@
             <a href="https://github.com/chrisbanes/portico">View on GitHub</a>
           </p>
         </div>
-        <div class="hero-portal" data-reveal aria-label="A local app becomes a private tailnet address">
+        <figure class="hero-portal" data-reveal>
           <p><code>http://127.0.0.1:8787</code></p>
-          <p aria-hidden="true">through Portico</p>
+          <p aria-hidden="true">→</p>
           <p><code>https://hermes.&lt;tailnet&gt;.ts.net</code></p>
-        </div>
+          <figcaption>Portico makes <code>http://127.0.0.1:8787</code> available on the tailnet as <code>https://hermes.&lt;tailnet&gt;.ts.net</code>.</figcaption>
+        </figure>
       </section>
 
       <section id="how-it-works" aria-labelledby="how-it-works-title">
