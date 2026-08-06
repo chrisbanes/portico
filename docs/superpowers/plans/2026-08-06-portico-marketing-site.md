@@ -328,7 +328,7 @@ Create website/index.html. Use the exact metadata from the metadata() check. The
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Portico gives apps reachable from your Mac stable, private HTTPS addresses on your Tailscale tailnet.">
     <meta property="og:title" content="Portico — your local apps, through a private door">
-    <meta property="og:description" content="Give apps reachable from your Mac a stable, private HTTPS address on your Tailscale tailnet.">
+    <meta property="og:description" content="Portico gives apps reachable from your Mac stable, private HTTPS addresses on your Tailscale tailnet.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://chrisbanes.github.io/portico/">
     <meta property="og:image" content="https://chrisbanes.github.io/portico/assets/og.png">
@@ -414,9 +414,10 @@ Create website/index.html. Use the exact metadata from the metadata() check. The
         <div class="feature-grid">
           <article class="feature feature-wide" data-reveal><span>A</span><h3>Durable private HTTPS</h3><p>Give an app a memorable Portal URL that retains its identity when you change the service behind it.</p><code>https://hermes.&lt;tailnet&gt;.ts.net</code></article>
           <article class="feature feature-dark" data-reveal><span>B</span><h3>Independent Portals</h3><p>Each Portal is its own Tailscale node with its own durable state, lifecycle, and Portal Destination.</p></article>
-          <article class="feature" data-reveal><span>C</span><h3>Local or remote</h3><p>Route to a Local App on the Mac or a Remote App available through the Mac’s normal network.</p></article>
-          <article class="feature" data-reveal><span>D</span><h3>Native controls</h3><p>Create, inspect, stop, repoint, and remove Portals from a focused macOS menu-bar app.</p></article>
-          <article class="feature" data-reveal><span>E</span><h3>Honest status</h3><p>Desired state, tailnet connectivity, and destination reachability remain separate and readable.</p></article>
+          <article class="feature" data-reveal><span>C</span><h3>Browser authentication with no auth keys</h3><p>Authenticate each Portal in the browser without handling auth keys.</p></article>
+          <article class="feature" data-reveal><span>D</span><h3>Local or remote</h3><p>Route to a Local App on the Mac or a Remote App available through the Mac’s normal network.</p></article>
+          <article class="feature" data-reveal><span>E</span><h3>Native controls</h3><p>Create, inspect, stop, repoint, and remove Portals from a focused macOS menu-bar app.</p></article>
+          <article class="feature" data-reveal><span>F</span><h3>Honest status</h3><p>Desired state, tailnet connectivity, and destination reachability remain separate and readable.</p></article>
         </div>
       </section>
       <section id="architecture" class="architecture">
@@ -428,8 +429,8 @@ Create website/index.html. Use the exact metadata from the metadata() check. The
       <section id="install" class="install section-shell">
         <div class="install-card" data-reveal>
           <div><p class="eyebrow">Preview instructions</p><h2>Open the door.</h2><p>Release packaging is still being prepared. These steps show the intended installation flow, not a currently published build.</p></div>
-          <ol><li><span>1</span><div><strong>Download</strong><p>Get the latest signed Portico build.</p></div></li><li><span>2</span><div><strong>Install</strong><p>Move Portico to Applications and open it.</p></div></li><li><span>3</span><div><strong>Create</strong><p>Add a Portal and authenticate in your browser.</p></div></li></ol>
-          <p class="install-note">Final download links, supported versions, and signed-release instructions will replace this preview before release.</p>
+          <ol><li><span>1</span><div><strong>Preview availability</strong><p>Preview availability will be announced here.</p></div></li><li><span>2</span><div><strong>Installation details</strong><p>Installation details will accompany an announced preview.</p></div></li><li><span>3</span><div><strong>Browser authentication</strong><p>The planned flow uses browser authentication.</p></div></li></ol>
+          <p class="install-note">Preview availability and installation details are still being prepared. This is placeholder guidance, not a release or download.</p>
         </div>
       </section>
     </main>

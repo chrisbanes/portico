@@ -5,10 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Portico gives apps reachable from your Mac stable, private HTTPS addresses on your Tailscale tailnet.">
     <meta property="og:title" content="Portico — your local apps, through a private door">
+    <meta property="og:description" content="Portico gives apps reachable from your Mac stable, private HTTPS addresses on your Tailscale tailnet.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://chrisbanes.github.io/portico/">
     <meta property="og:image" content="https://chrisbanes.github.io/portico/assets/og.png">
     <meta name="twitter:card" content="summary_large_image">
+    <meta name="theme-color" content="#e9e0cf">
     <title>Portico — your local apps, through a private door</title>
     <link rel="stylesheet" href="styles.css">
     <script src="script.js" defer></script>
@@ -63,11 +65,11 @@
         <div class="app-window" data-reveal>
           <aside aria-label="Portico sidebar">
             <p>Portico</p>
-            <nav aria-label="App navigation">
-              <a href="#app-preview">Overview</a>
-              <a href="#app-preview" aria-current="page">Portal: hermes</a>
-              <a href="#app-preview">Portal: preview</a>
-            </nav>
+            <div class="app-preview-list" aria-label="App preview sidebar">
+              <span class="app-preview-label">Overview</span>
+              <span class="app-preview-label is-current">Portal: hermes</span>
+              <span class="app-preview-label">Portal: preview</span>
+            </div>
           </aside>
           <article aria-labelledby="portal-detail-title">
             <header>
@@ -91,6 +93,7 @@
         <div class="feature-grid">
           <article data-reveal><h3>Stable private HTTPS</h3><p>Give services reachable from your Mac durable HTTPS addresses on your tailnet.</p></article>
           <article data-reveal><h3>Independent Portals</h3><p>Every Portal is its own node with an identity that lasts until you remove it.</p></article>
+          <article data-reveal><h3>Browser authentication with no auth keys</h3><p>Authenticate each Portal in your browser without handling auth keys.</p></article>
           <article data-reveal><h3>Local or Remote Apps</h3><p>Choose an on-Mac Local App or a Remote App your Mac can already reach.</p></article>
           <article data-reveal><h3>Native controls</h3><p>Manage routes from the menu bar and a focused management window.</p></article>
           <article data-reveal><h3>Clear states</h3><p>See Enabled state, Tailscale connection, and destination reachability independently.</p></article>
@@ -113,11 +116,11 @@
         <p class="eyebrow">Preview instructions</p>
         <h2 id="install-title">Try the preview when it is ready</h2>
         <ol>
-          <li>Download the latest signed build.</li>
-          <li>Move Portico to Applications and open it.</li>
-          <li>Add a Portal and follow browser authentication.</li>
+          <li>Preview availability will be announced here.</li>
+          <li>Installation details will accompany an announced preview.</li>
+          <li>The planned flow uses browser authentication.</li>
         </ol>
-        <p>Release packaging and final installation instructions are still being prepared. These are preview instructions, not a download link.</p>
+        <p>Preview availability and installation details are still being prepared. This is placeholder guidance, not a release or download.</p>
       </section>
     </main>
 

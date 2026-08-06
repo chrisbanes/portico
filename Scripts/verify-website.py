@@ -115,13 +115,27 @@ def document_text(document: Page) -> str:
     return " ".join(document.text)
 
 
-def check_local(value: str, kind: str) -> None:
+def check_local(value: str, kind: str, *, allow_external: bool = False) -> None:
     parsed = urlparse(value)
-    require(not parsed.scheme and not parsed.netloc and not value.startswith("//"), f"remote {kind} asset: {value}")
+    if parsed.scheme or parsed.netloc or value.startswith("//"):
+        require(allow_external, f"remote {kind} asset: {value}")
+        return
+    if not parsed.path:
+        return
     require(not parsed.path.startswith("/"), f"root-relative {kind} asset: {value}")
     require(".." not in Path(parsed.path).parts, f"parent-relative {kind} asset: {value}")
     resolved = (WEBSITE / parsed.path).resolve()
     require(resolved.is_relative_to(WEBSITE.resolve()), f"unsafe {kind} asset: {value}")
+    require(resolved.is_file(), f"missing local {kind}: {value}")
+
+
+def require_rejected_local(value: str, kind: str, expected_error: str) -> None:
+    try:
+        check_local(value, kind)
+    except AssertionError as error:
+        require(str(error) == expected_error, f"expected {expected_error}, got {error}")
+    else:
+        raise AssertionError(f"accepted invalid local {kind}: {value}")
 
 
 def structure() -> None:
@@ -150,6 +164,8 @@ def structure() -> None:
     for filename in ("styles.css", "script.js", ".nojekyll"):
         require((WEBSITE / filename).is_file(), f"missing website/{filename}")
     for tag, values in document.tags:
+        if tag == "a" and values.get("href"):
+            check_local(values["href"], "link", allow_external=True)
         if tag == "script" and values.get("src"):
             check_local(values["src"], "script")
         if tag == "link" and {"stylesheet", "icon", "preload"}.intersection(values.get("rel", "").split()) and values.get("href"):
@@ -159,6 +175,7 @@ def structure() -> None:
         if tag in {"img", "source"} and values.get("srcset"):
             for candidate in values["srcset"].split(","):
                 check_local(candidate.strip().split()[0], tag)
+    require_rejected_local("missing-file.html", "link", "missing local link: missing-file.html")
 
 
 def styles() -> None:
@@ -182,10 +199,12 @@ def metadata() -> None:
     expected = {
         ("name", "description"): "Portico gives apps reachable from your Mac stable, private HTTPS addresses on your Tailscale tailnet.",
         ("property", "og:title"): "Portico — your local apps, through a private door",
+        ("property", "og:description"): "Portico gives apps reachable from your Mac stable, private HTTPS addresses on your Tailscale tailnet.",
         ("property", "og:type"): "website",
         ("property", "og:url"): "https://chrisbanes.github.io/portico/",
         ("property", "og:image"): "https://chrisbanes.github.io/portico/assets/og.png",
         ("name", "twitter:card"): "summary_large_image",
+        ("name", "theme-color"): "#e9e0cf",
     }
     for (attribute, name), content in expected.items():
         require(any(tag == "meta" and values.get(attribute) == name and values.get("content") == content for tag, values in document.tags), f"missing metadata {name}")
@@ -289,14 +308,15 @@ CHECKS = {"structure": structure, "styles": styles, "behavior": behavior, "metad
 
 
 def main(arguments: list[str]) -> int:
-    requested = arguments[0] if arguments else "all"
-    if requested == "all":
-        modes = CHECKS.items()
-    elif requested in CHECKS:
-        modes = [(requested, CHECKS[requested])]
-    else:
-        print(f"unknown mode: {requested}", file=sys.stderr)
+    requested = arguments or ["all"]
+    unknown = [mode for mode in requested if mode != "all" and mode not in CHECKS]
+    if unknown:
+        print(f"unknown mode(s): {', '.join(unknown)}; expected all or: {', '.join(CHECKS)}", file=sys.stderr)
         return 2
+    if "all" in requested:
+        modes = CHECKS.items()
+    else:
+        modes = [(mode, CHECKS[mode]) for mode in requested]
     try:
         for name, check in modes:
             check()

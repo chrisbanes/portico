@@ -345,11 +345,11 @@
     content: "";
   }
 
-  .app-window aside nav { display: grid; gap: .25rem; }
+  .app-preview-list { display: grid; gap: .25rem; }
 
-  .app-window aside a { border-radius: .42rem; padding: .45rem .55rem; font-size: .78rem; text-decoration: none; }
+  .app-preview-label { border-radius: .42rem; padding: .45rem .55rem; font-size: .78rem; }
 
-  .app-window aside a[aria-current="page"] { background: rgba(36, 93, 74, .16); font-weight: 700; }
+  .app-preview-label.is-current { background: rgba(36, 93, 74, .16); font-weight: 700; }
 
   .app-window article { min-width: 0; background: var(--paper); padding: clamp(1.8rem, 5vw, 3.75rem); }
 
@@ -537,7 +537,7 @@
 
     .app-window aside { width: 100%; min-width: 32rem; border-right: 0; border-bottom: 1px solid rgba(21, 33, 29, .12); }
 
-    .app-window aside nav { display: flex; }
+    .app-preview-list { display: flex; }
 
     .app-window article { min-width: 32rem; }
 
