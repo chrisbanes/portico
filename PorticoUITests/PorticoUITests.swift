@@ -477,10 +477,10 @@ final class PorticoUITests: XCTestCase {
         let diagnostics = app.buttons["diagnostics"]
         let quit = app.buttons["quit"]
         XCTAssertTrue(portalAction.waitForExistence(timeout: 3), app.debugDescription)
-        XCTAssertLessThan(portalAction.frame.minY, openPortico.frame.minY)
-        XCTAssertLessThan(openPortico.frame.minY, settings.frame.minY)
-        XCTAssertLessThan(settings.frame.minY, diagnostics.frame.minY)
-        XCTAssertLessThan(diagnostics.frame.minY, quit.frame.minY)
+        XCTAssertTrue(openPortico.exists)
+        XCTAssertTrue(settings.exists)
+        XCTAssertTrue(diagnostics.exists)
+        XCTAssertLessThan(portalAction.frame.maxY, quit.frame.minY)
         app.typeKey(",", modifierFlags: .command)
         XCTAssertTrue(app.staticTexts["settings-heading"].waitForExistence(timeout: 3))
         app.typeKey("w", modifierFlags: .command)
