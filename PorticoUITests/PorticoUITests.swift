@@ -342,6 +342,23 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
     }
 
+    func testCompactAttentionRoutesConfiguredPersistenceFailureToOverviewMessage() {
+        let app = launch(scenario: "configured-message")
+        XCTAssertFalse(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 2))
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.buttons["compact-attention"].waitForExistence(timeout: 3))
+        app.buttons["compact-attention"].click()
+        XCTAssertTrue(
+            waitForText(
+                "Saved Portal configuration could not be loaded.",
+                element: app.staticTexts["overview-message"],
+                timeout: 3
+            ),
+            app.debugDescription
+        )
+        XCTAssertFalse(app.staticTexts["No Portals"].exists)
+    }
+
     func testCompactMenuPortalActionMatrix() {
         var app = launch(scenario: "online")
         openMenuBarExtra(app)

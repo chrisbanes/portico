@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 #if DEBUG
         let testConfiguration = UITestLaunchConfiguration.current
+        let reportsInitialPersistenceFailure = testConfiguration?.reportsInitialPersistenceFailure ?? false
         if let testConfiguration {
             do {
                 try testConfiguration.prepareInstallationIfNeeded()
@@ -63,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openURL = { _ in }
         }
 #else
+        let reportsInitialPersistenceFailure = false
         let applicationRoot = productionRoot
         let supervisorScheduler: PorticoScheduling = scheduler
         let launcher: HelperLaunching = ProcessHelperLauncher()
@@ -123,6 +125,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.requestsInitialManagementWindow = startupResult == .freshInstallation
         if startupResult == nil {
             portalController.reportInitialPersistenceFailure()
+        }
+        if reportsInitialPersistenceFailure {
+            DispatchQueue.main.async {
+                portalController.reportInitialPersistenceFailure()
+            }
         }
         super.init()
     }

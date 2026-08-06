@@ -27,6 +27,7 @@ enum UITestScenario: String {
     case loginOfferEmpty = "login-offer-empty"
     case migrated
     case initialSaveFailure = "initial-save-failure"
+    case configuredMessage = "configured-message"
 }
 
 struct UITestLaunchConfiguration {
@@ -66,6 +67,8 @@ struct UITestLaunchConfiguration {
             try Data(#"{"version":2,"portals":[],"alerts":[]}"#.utf8).write(to: store.versionTwoInstallationURL)
         case .initialSaveFailure:
             try Data("fixture".utf8).write(to: rootURL)
+        case .configuredMessage:
+            try store.save(InstallationRecord(operationalLogging: .enabled))
         case .loginApproval, .loginError:
             try store.save(InstallationRecord(operationalLogging: .enabled))
         case .removing, .removingFailure:
@@ -183,6 +186,7 @@ struct UITestLaunchConfiguration {
         }
     }
     var reachabilityResult: Bool { scenario != .terminalFailure }
+    var reportsInitialPersistenceFailure: Bool { scenario == .configuredMessage }
     var supervisorSchedulerScale: Double {
         switch scenario {
         case .terminalFailure: 0.01
@@ -320,6 +324,7 @@ private final class UITestHelperProcess: HelperProcess {
         case .shutdown:
             shutdownRequested = true
         case .reconcilePortals:
+            guard scenario != .configuredMessage else { return }
             let request = try JSONDecoder().decode(HelperRequest<ReconcilePortalsPayload>.self, from: data)
             recordEnrollmentIfNeeded(for: request.payload.portals)
             respond(

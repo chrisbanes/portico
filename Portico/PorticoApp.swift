@@ -361,7 +361,8 @@ private struct OverviewView: View {
 
     private var hasRecoveryContent: Bool {
         supervisor.availability == .failed || !controller.pendingPortals.isEmpty ||
-            !controller.removalNotices.isEmpty || !controller.alerts.isEmpty || controller.canResetTailnet
+            !controller.removalNotices.isEmpty || !controller.alerts.isEmpty ||
+            controller.canResetTailnet || controller.message != nil
     }
 
     private func sidebarState(for portal: PortalConfiguration, presentation: PortalPresentation) -> String {
