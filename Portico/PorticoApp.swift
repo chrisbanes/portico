@@ -256,14 +256,16 @@ private struct OverviewView: View {
                 }
                 Section("Operational-support logging") {
                     if controller.operationalLogging == .undecided {
-                        Button("Allow Operational-support Logging") {
-                            controller.setOperationalLogging(.enabled)
+                        WrappingHStack {
+                            Button("Allow Operational-support Logging") {
+                                controller.setOperationalLogging(.enabled)
+                            }
+                            .accessibilityIdentifier("overview-logging-enabled")
+                            Button("Disable Operational-support Logging") {
+                                controller.setOperationalLogging(.disabled)
+                            }
+                            .accessibilityIdentifier("overview-logging-disabled")
                         }
-                        .accessibilityIdentifier("overview-logging-enabled")
-                        Button("Disable Operational-support Logging") {
-                            controller.setOperationalLogging(.disabled)
-                        }
-                        .accessibilityIdentifier("overview-logging-disabled")
                     } else {
                         Text(controller.operationalLogging == .enabled
                             ? "Operational-support logging is allowed."
@@ -437,13 +439,25 @@ private struct SelectedPortalView: View {
                 if let portalURL = status?.portalURL {
                     LabeledContent(presentation.portalURLLabel, value: portalURL.absoluteString)
                         .accessibilityIdentifier("selected-portal-url")
-                    HStack {
-                        Button("Copy Portal URL") { controller.copyPortalURL(id: portal.id) }
-                            .disabled(!portalActions.copyPortalURL)
-                            .accessibilityIdentifier("selected-copy-portal-url")
-                        Button("Open Portal URL") { controller.openPortalURL(id: portal.id) }
-                            .disabled(!portalActions.openPortalURL)
-                            .accessibilityIdentifier("selected-open-portal-url")
+                    WrappingHStack {
+                        Button {
+                            controller.copyPortalURL(id: portal.id)
+                        } label: {
+                            Label("Copy Portal URL", systemImage: "doc.on.doc")
+                        }
+                        .labelStyle(.iconOnly)
+                        .help("Copy Portal URL")
+                        .disabled(!portalActions.copyPortalURL)
+                        .accessibilityIdentifier("selected-copy-portal-url")
+                        Button {
+                            controller.openPortalURL(id: portal.id)
+                        } label: {
+                            Label("Open Portal URL", systemImage: "arrow.up.right.square")
+                        }
+                        .labelStyle(.iconOnly)
+                        .help("Open Portal URL")
+                        .disabled(!portalActions.openPortalURL)
+                        .accessibilityIdentifier("selected-open-portal-url")
                     }
                 } else {
                     LabeledContent("Portal URL", value: "Unavailable")
@@ -490,13 +504,13 @@ private struct SelectedPortalView: View {
                 }
             }
             Section("Actions") {
-                if status?.state == .authenticating {
-                    Button("Authenticate") { controller.authenticate(id: portal.id) }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!portalActions.authenticate)
-                        .accessibilityIdentifier("selected-authenticate")
-                }
-                HStack {
+                WrappingHStack {
+                    if status?.state == .authenticating {
+                        Button("Authenticate") { controller.authenticate(id: portal.id) }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!portalActions.authenticate)
+                            .accessibilityIdentifier("selected-authenticate")
+                    }
                     FocusRestoringButton(
                         title: portal.desiredState == .enabled ? "Stop" : "Start",
                         isEnabled: portal.desiredState == .enabled ? portalActions.stop : portalActions.start
@@ -508,17 +522,23 @@ private struct SelectedPortalView: View {
                         }
                     }
                     .accessibilityIdentifier("selected-start-stop")
-                }
-                Button("Diagnostics") { openWindow(id: "diagnostics") }
+                    Button {
+                        openWindow(id: "diagnostics")
+                    } label: {
+                        Label("Diagnostics", systemImage: "stethoscope")
+                    }
+                    .labelStyle(.iconOnly)
+                    .help("Diagnostics")
                     .accessibilityIdentifier("selected-portal-diagnostics")
-                FocusRestoringButton(
-                    title: "Remove Portal",
-                    isEnabled: portalActions.remove,
-                    isDestructive: true,
-                    focusRequestID: removalFocusRequestID,
-                    action: onRemove
-                )
-                    .accessibilityIdentifier("selected-remove-portal")
+                    FocusRestoringButton(
+                        title: "Remove Portal",
+                        isEnabled: portalActions.remove,
+                        isDestructive: true,
+                        focusRequestID: removalFocusRequestID,
+                        action: onRemove
+                    )
+                        .accessibilityIdentifier("selected-remove-portal")
+                }
             }
             if let message = controller.message {
                 Text(message)
@@ -790,14 +810,32 @@ private struct PortalView: View {
                     .foregroundStyle(.secondary)
             }
             Divider()
-            SettingsLink()
+            HStack {
+                SettingsLink {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                .labelStyle(.iconOnly)
+                .help("Settings")
                 .keyboardShortcut(",", modifiers: .command)
                 .accessibilityIdentifier("settings")
-            Button("Diagnostics") { openWindow(id: "diagnostics") }
+                Button {
+                    openWindow(id: "diagnostics")
+                } label: {
+                    Label("Diagnostics", systemImage: "stethoscope")
+                }
+                .labelStyle(.iconOnly)
+                .help("Diagnostics")
                 .keyboardShortcut("d", modifiers: [.command, .shift])
                 .accessibilityIdentifier("diagnostics")
-            Button("Open Portico") { openWindow(id: "management") }
+                Button {
+                    openWindow(id: "management")
+                } label: {
+                    Label("Open Portico", systemImage: "rectangle.on.rectangle")
+                }
+                .labelStyle(.iconOnly)
+                .help("Open Portico")
                 .accessibilityIdentifier("open-portico")
+            }
         }
         .padding()
         .frame(width: 380)
@@ -847,19 +885,27 @@ private struct AddPortalSheet: View {
             HStack {
                 Text("Detected Local Apps").font(.subheadline)
                 Spacer()
-                Button("Refresh") { controller.refreshLocalApps() }
-                    .disabled(!controller.actionAvailability().refreshLocalApps)
-                    .accessibilityIdentifier("refresh-local-apps")
+                Button {
+                    controller.refreshLocalApps()
+                } label: {
+                    Label("Refresh Local Apps", systemImage: "arrow.clockwise")
+                }
+                .labelStyle(.iconOnly)
+                .help("Refresh Local Apps")
+                .disabled(!controller.actionAvailability().refreshLocalApps)
+                .accessibilityIdentifier("refresh-local-apps")
             }
             if controller.isRefreshingLocalApps {
                 ProgressView()
                     .controlSize(.small)
             }
-            ForEach(controller.localApps, id: \.localAppPort) { candidate in
-                Button("Use \(candidate.processLabel) on port \(candidate.localAppPort)") {
-                    controller.selectLocalApp(candidate)
+            WrappingHStack {
+                ForEach(controller.localApps, id: \.localAppPort) { candidate in
+                    Button("Use \(candidate.processLabel) on port \(candidate.localAppPort)") {
+                        controller.selectLocalApp(candidate)
+                    }
+                    .accessibilityIdentifier("local-app-\(candidate.localAppPort)")
                 }
-                .accessibilityIdentifier("local-app-\(candidate.localAppPort)")
             }
             if let message = controller.localAppsMessage {
                 Text(message)
@@ -1011,13 +1057,25 @@ private struct PortalStatusView: View {
                     value: portalURL.absoluteString
                 )
                 .accessibilityIdentifier("portal-url")
-                HStack {
-                    Button("Copy Portal URL") { controller.copyPortalURL(id: portal.id) }
-                        .disabled(!rowActions.copyPortalURL)
-                        .accessibilityIdentifier("copy-portal-url")
-                    Button("Open Portal URL") { controller.openPortalURL(id: portal.id) }
-                        .disabled(!rowActions.openPortalURL)
-                        .accessibilityIdentifier("open-portal-url")
+                WrappingHStack {
+                    Button {
+                        controller.copyPortalURL(id: portal.id)
+                    } label: {
+                        Label("Copy Portal URL", systemImage: "doc.on.doc")
+                    }
+                    .labelStyle(.iconOnly)
+                    .help("Copy Portal URL")
+                    .disabled(!rowActions.copyPortalURL)
+                    .accessibilityIdentifier("copy-portal-url")
+                    Button {
+                        controller.openPortalURL(id: portal.id)
+                    } label: {
+                        Label("Open Portal URL", systemImage: "arrow.up.right.square")
+                    }
+                    .labelStyle(.iconOnly)
+                    .help("Open Portal URL")
+                    .disabled(!rowActions.openPortalURL)
+                    .accessibilityIdentifier("open-portal-url")
                 }
             }
             if !status.addresses.isEmpty {
@@ -1072,7 +1130,7 @@ private struct PortalStatusView: View {
                         .accessibilityIdentifier("update-destination")
                 }
             }
-            HStack {
+            WrappingHStack {
                 Button(portal.desiredState == .enabled ? "Stop" : "Start") {
                     if portal.desiredState == .enabled {
                         controller.stopPortal(id: portal.id)
@@ -1090,11 +1148,17 @@ private struct PortalStatusView: View {
                 .disabled(portal.desiredState == .enabled
                     ? !rowActions.stop
                     : !rowActions.start)
+                Button {
+                    openWindow(id: "diagnostics")
+                } label: {
+                    Label("Diagnostics", systemImage: "stethoscope")
+                }
+                .labelStyle(.iconOnly)
+                .help("Diagnostics")
+                .controlSize(.small)
+                .accessibilityIdentifier("portal-diagnostics")
             }
         }
-        Button("Diagnostics") { openWindow(id: "diagnostics") }
-            .controlSize(.small)
-            .accessibilityIdentifier("portal-diagnostics")
     }
 
     private func updateDestination() {
@@ -1178,11 +1242,21 @@ private struct DiagnosticsView: View {
                 .accessibilityFocused($headingFocused)
                 .accessibilityIdentifier("diagnostics-heading")
             HStack {
-                Button("Refresh Local App Reachability") { controller.refreshReachability() }
-                Spacer()
-                Button("Copy Report") {
-                    controller.copyDiagnosticReport()
+                Button {
+                    controller.refreshReachability()
+                } label: {
+                    Label("Refresh Local App Reachability", systemImage: "arrow.clockwise")
                 }
+                .labelStyle(.iconOnly)
+                .help("Refresh Local App Reachability")
+                Spacer()
+                Button {
+                    controller.copyDiagnosticReport()
+                } label: {
+                    Label("Copy Report", systemImage: "doc.on.doc")
+                }
+                .labelStyle(.iconOnly)
+                .help("Copy Report")
             }
             ScrollView {
                 Text(controller.diagnosticReport())
@@ -1193,6 +1267,77 @@ private struct DiagnosticsView: View {
         }
         .padding()
         .onAppear { headingFocused = true }
+    }
+}
+
+private struct WrappingHStack: Layout {
+    var spacing: CGFloat = 8
+    var rowSpacing: CGFloat = 8
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let availableWidth = proposal.width ?? .greatestFiniteMagnitude
+        let rows = makeRows(for: subviews, availableWidth: availableWidth)
+        return CGSize(
+            width: proposal.width ?? rows.map(\.width).max() ?? 0,
+            height: rows.reduce(0) { $0 + $1.height } + rowSpacing * CGFloat(max(rows.count - 1, 0))
+        )
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        var y = bounds.minY
+        for row in makeRows(for: subviews, availableWidth: bounds.width) {
+            var x = bounds.minX
+            for item in row.items {
+                item.subview.place(at: CGPoint(x: x, y: y), proposal: .unspecified)
+                x += item.size.width + spacing
+            }
+            y += row.height + rowSpacing
+        }
+    }
+
+    private func makeRows(for subviews: Subviews, availableWidth: CGFloat) -> [Row] {
+        var rows: [Row] = []
+        var items: [Item] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            let proposedWidth = items.isEmpty ? size.width : width + spacing + size.width
+            if !items.isEmpty && proposedWidth > availableWidth {
+                rows.append(Row(items: items, width: width, height: height))
+                items = []
+                width = 0
+                height = 0
+            }
+            items.append(Item(subview: subview, size: size))
+            width = items.count == 1 ? size.width : width + spacing + size.width
+            height = max(height, size.height)
+        }
+        if !items.isEmpty {
+            rows.append(Row(items: items, width: width, height: height))
+        }
+        return rows
+    }
+
+    private struct Row {
+        let items: [Item]
+        let width: CGFloat
+        let height: CGFloat
+    }
+
+    private struct Item {
+        let subview: LayoutSubview
+        let size: CGSize
     }
 }
 
