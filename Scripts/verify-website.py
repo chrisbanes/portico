@@ -43,8 +43,6 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - name: Verify static site
         run: python3 Scripts/verify-website.py
-      - name: Configure Pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b
         with:
@@ -62,6 +60,8 @@ jobs:
       pages: write
       id-token: write
     steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e
@@ -204,7 +204,10 @@ def active_yaml_lines(workflow: str) -> list[str]:
 
 
 def yaml_block(lines: list[str], start: str) -> list[str]:
-    position = lines.index(start)
+    try:
+        position = lines.index(start)
+    except ValueError as error:
+        raise AssertionError(f"missing YAML block: {start}") from error
     indentation = len(start) - len(start.lstrip())
     block: list[str] = []
     for line in lines[position + 1 :]:
@@ -212,6 +215,10 @@ def yaml_block(lines: list[str], start: str) -> list[str]:
             break
         block.append(line)
     return block
+
+
+def has_yaml_sequence(lines: list[str], expected: list[str]) -> bool:
+    return any(lines[position : position + len(expected)] == expected for position in range(len(lines)))
 
 
 def validate_pages_workflow(workflow: str) -> None:
@@ -224,11 +231,24 @@ def validate_pages_workflow(workflow: str) -> None:
     require(top_level_permissions == ["  contents: read"], "Pages workflow must not grant write permissions at top level")
     build = yaml_block(lines, "  build:")
     require("    permissions:" not in build, "Pages build job must inherit read-only permissions")
+    require(not any("actions/configure-pages@" in line for line in build), "Pages build job must not configure Pages")
     deploy = yaml_block(lines, "  deploy:")
     require(
-        deploy[deploy.index("    permissions:") + 1 : deploy.index("    steps:")]
-        == ["      contents: read", "      pages: write", "      id-token: write"],
+        has_yaml_sequence(deploy, ["    permissions:", "      contents: read", "      pages: write", "      id-token: write", "    steps:"]),
         "Pages deploy job must own Pages write permissions",
+    )
+    require(
+        has_yaml_sequence(
+            deploy,
+            [
+                "      - name: Configure Pages",
+                "        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b",
+                "      - name: Deploy",
+                "        id: deployment",
+                "        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+            ],
+        ),
+        "Pages deploy job must configure Pages immediately before deployment",
     )
     require(lines == CANONICAL_PAGES_LINES, "Pages workflow must match the canonical active YAML")
 
@@ -253,6 +273,15 @@ def pages() -> None:
     require_rejected_pages_workflow(
         workflow.replace("    name: Validate Pages artifact", "    permissions:\n      pages: write\n    name: Validate Pages artifact", 1),
         "Pages build job must inherit read-only permissions",
+    )
+    configure_pages_step = "      - name: Configure Pages\n        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b\n"
+    require_rejected_pages_workflow(
+        workflow.replace(configure_pages_step, "", 1),
+        "Pages deploy job must configure Pages immediately before deployment",
+    )
+    require_rejected_pages_workflow(
+        workflow.replace("      - name: Upload Pages artifact", configure_pages_step + "      - name: Upload Pages artifact", 1),
+        "Pages build job must not configure Pages",
     )
 
 
