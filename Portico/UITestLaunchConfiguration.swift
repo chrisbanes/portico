@@ -10,6 +10,7 @@ enum UITestScenario: String {
     case recovery
     case resetEligible = "reset-eligible"
     case online
+    case stopped
     case remoteOnline = "remote-online"
     case authenticating
     case awaitingApproval = "awaiting-approval"
@@ -26,6 +27,7 @@ enum UITestScenario: String {
     case loginOfferEmpty = "login-offer-empty"
     case migrated
     case initialSaveFailure = "initial-save-failure"
+    case configuredMessage = "configured-message"
 }
 
 struct UITestLaunchConfiguration {
@@ -65,6 +67,8 @@ struct UITestLaunchConfiguration {
             try Data(#"{"version":2,"portals":[],"alerts":[]}"#.utf8).write(to: store.versionTwoInstallationURL)
         case .initialSaveFailure:
             try Data("fixture".utf8).write(to: rootURL)
+        case .configuredMessage:
+            try store.save(InstallationRecord(operationalLogging: .enabled))
         case .loginApproval, .loginError:
             try store.save(InstallationRecord(operationalLogging: .enabled))
         case .removing, .removingFailure:
@@ -163,10 +167,10 @@ struct UITestLaunchConfiguration {
                 operationalLogging: .enabled,
                 launchAtLoginOffer: .declined
             ))
-        case .online, .authenticating, .awaitingApproval, .stale, .restarting, .terminalFailure:
+        case .online, .stopped, .authenticating, .awaitingApproval, .stale, .restarting, .terminalFailure:
             try store.save(InstallationRecord(
                 tailnetBinding: Self.tailnetBinding,
-                portals: [Self.portal()],
+                portals: [Self.portal(desiredState: scenario == .stopped ? .stopped : .enabled)],
                 operationalLogging: .enabled,
                 launchAtLoginOffer: .declined
             ))
@@ -182,6 +186,7 @@ struct UITestLaunchConfiguration {
         }
     }
     var reachabilityResult: Bool { scenario != .terminalFailure }
+    var reportsInitialPersistenceFailure: Bool { scenario == .configuredMessage }
     var supervisorSchedulerScale: Double {
         switch scenario {
         case .terminalFailure: 0.01
@@ -214,6 +219,7 @@ struct UITestLaunchConfiguration {
         destination: PortalDestination = .localApp(port: 8080),
         createdAt: Date = Date(timeIntervalSince1970: 1_700_000_000),
         lifecycle: PortalLifecycle = .active,
+        desiredState: PortalDesiredState = .enabled,
         removalAssignedName: String? = nil
     ) -> PortalConfiguration {
         PortalConfiguration(
@@ -221,7 +227,7 @@ struct UITestLaunchConfiguration {
             name: name,
             destination: destination,
             createdAt: createdAt,
-            desiredState: .enabled,
+            desiredState: desiredState,
             lifecycle: lifecycle,
             removalAssignedName: removalAssignedName
         )
@@ -318,6 +324,7 @@ private final class UITestHelperProcess: HelperProcess {
         case .shutdown:
             shutdownRequested = true
         case .reconcilePortals:
+            guard scenario != .configuredMessage else { return }
             let request = try JSONDecoder().decode(HelperRequest<ReconcilePortalsPayload>.self, from: data)
             recordEnrollmentIfNeeded(for: request.payload.portals)
             respond(
@@ -403,10 +410,12 @@ private final class UITestHelperProcess: HelperProcess {
     }
 
     private func emitStatuses(for portals: [ReconcilePortalPayload]) {
-        guard [.online, .remoteOnline, .authenticating, .awaitingApproval, .stale, .restarting, .loginOffer, .loginOfferApproval, .loginOfferError, .management, .durableManagement].contains(scenario) else { return }
+        guard [.online, .stopped, .remoteOnline, .authenticating, .awaitingApproval, .stale, .restarting, .loginOffer, .loginOfferApproval, .loginOfferError, .management, .durableManagement].contains(scenario) else { return }
         for portal in portals {
             let state: PortalTailscaleState
-            if scenario == .authenticating {
+            if scenario == .stopped {
+                state = .stopped
+            } else if scenario == .authenticating {
                 state = .authenticating
             } else if scenario == .awaitingApproval {
                 state = .awaitingApproval
