@@ -199,6 +199,10 @@ def has_pages_environment(lines: list[str]) -> bool:
     return any(line.strip() == "environment: github-pages" for line in lines) or mapping_has(lines, "environment:", ("name: github-pages",))
 
 
+def active_if_lines(lines: list[str]) -> list[str]:
+    return [line.strip() for line in lines if re.fullmatch(r"(?:-\s+)?if:\s*.+", line.strip())]
+
+
 def validate_pages_workflow(workflow: str) -> None:
     lines = active_yaml_lines(workflow)
     require(mapping_has(lines, "on:", ("pull_request:", "workflow_dispatch:")), "Pages workflow missing PR/manual triggers")
@@ -208,6 +212,11 @@ def validate_pages_workflow(workflow: str) -> None:
     require("deploy" in blocks, "Pages workflow missing deploy job")
     build = blocks["build"]
     deploy = blocks["deploy"]
+    require(not active_if_lines(build), "Pages workflow build job must not be conditional")
+    require(
+        active_if_lines(deploy) == ["if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"],
+        "Pages workflow deploy job must have only the required condition",
+    )
     require(has_verifier_command(build), "Pages workflow missing verifier command in build")
     require(has_pinned_action(build, "actions/configure-pages", "983d7736d9b0ae728b81ab479565c72886d7745b"), "Pages workflow missing pinned configure-pages in build")
     require(has_pinned_action(build, "actions/upload-pages-artifact", "7b1f4a764d45c48632c6b24a0339c27f5614fb0b"), "Pages workflow missing pinned upload-pages-artifact in build")
