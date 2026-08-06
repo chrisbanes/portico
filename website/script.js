@@ -28,9 +28,16 @@
     });
 
     if (typeof window.matchMedia === "function") {
-      window.matchMedia("(min-width: 761px)").addEventListener("change", () => {
+      const wideLayout = window.matchMedia("(min-width: 761px)");
+      const closeMenu = () => {
         setMenuOpen(false);
-      });
+      };
+
+      if (typeof wideLayout.addEventListener === "function") {
+        wideLayout.addEventListener("change", closeMenu);
+      } else if (typeof wideLayout.addListener === "function") {
+        wideLayout.addListener(closeMenu);
+      }
     }
   }
 
