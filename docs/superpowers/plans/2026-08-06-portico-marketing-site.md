@@ -1,6 +1,8 @@
 # Portico Marketing Site Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
+> **Status (2026-08-06): Complete.** This document records the initial implementation plan and its finished outcome. Review and validation are complete, and the worktree is expected to be clean. No deployment or push occurred as part of this work; the configured GitHub Pages workflow will publish after these commits are integrated into `main`.
+>
+> **Current authority:** [`website/index.html`](../../../website/index.html), [`website/styles.css`](../../../website/styles.css), [`website/script.js`](../../../website/script.js), [`.github/workflows/pages.yml`](../../../.github/workflows/pages.yml), and [`Scripts/verify-website.py`](../../../Scripts/verify-website.py) are the authoritative completed implementation. The task sequence, boxes, expected outcomes, and code blocks below are initial/reference sketches retained as implementation history, not mandatory sub-skill invocations or current source-of-truth requirements.
 
 **Goal:** Build a distinctive, accessible Portico marketing page and a verified GitHub Pages publishing workflow.
 
@@ -10,15 +12,15 @@
 
 ---
 
-## File map
+## Completed file map
 
-- Create Scripts/verify-website.py: page, asset, metadata, and workflow contract checks.
-- Create website/index.html: marketing content and semantic native-app preview.
-- Create website/styles.css: brand tokens, layout, responsiveness, focus, and reduced motion.
-- Create website/script.js: progressive mobile navigation and scroll reveals.
-- Create website/.nojekyll: disable Jekyll processing.
-- Create website/assets/og.png: 1200 by 630 Portico social card.
-- Create .github/workflows/pages.yml: validate and deploy website/ through Pages.
+- Scripts/verify-website.py: page, asset, metadata, and workflow contract checks.
+- website/index.html: marketing content and semantic native-app preview.
+- website/styles.css: brand tokens, layout, responsiveness, focus, and reduced motion.
+- website/script.js: progressive mobile navigation and scroll reveals.
+- website/.nojekyll: disables Jekyll processing.
+- website/assets/og.png: 1200 by 630 Portico social card.
+- .github/workflows/pages.yml: validates and deploys website/ through Pages on `main`.
 
 Do not modify Portico/, helper/, the Xcode project specification, or the existing Swift and Go CI workflow.
 
@@ -318,7 +320,7 @@ Create website/assets/. Add empty website/.nojekyll, website/styles.css, and web
 
 - [ ] **Step 2: Add the semantic document**
 
-Create website/index.html. Use the exact metadata from the metadata() check. The body must use this exact semantic skeleton and copy:
+The following is the initial semantic-page reference sketch. It includes the final metadata values, including `og:description` and `theme-color`, but does not prescribe the completed HTML. Use the tracked `website/index.html` and `Scripts/verify-website.py` as the authority for the final structure, metadata, and accessible behavior:
 
 ~~~html
 <!doctype html>
@@ -474,7 +476,7 @@ Run python3 Scripts/verify-website.py styles.
 
 Expected: exit 1 beginning with “FAIL CSS is missing”.
 
-- [ ] **Step 2: Define the exact brand foundation**
+- [ ] **Step 2: Define the initial brand-foundation reference**
 
 Start website/styles.css with:
 
@@ -519,9 +521,9 @@ code { font-family: "SFMono-Regular", Consolas, monospace; }
 }
 ~~~
 
-- [ ] **Step 3: Implement every component selector**
+- [ ] **Step 3: Implement the initial component reference**
 
-Add focused blocks for the following selectors. These values are requirements, not suggestions:
+The following selectors and values were initial visual targets. They are not assertions about the final selector set; refer to the tracked stylesheet and verifier for the completed implementation:
 
 - .skip-link: fixed above the viewport until focused, then visible at top-left.
 - .site-header: sticky pill, translucent limestone, 4.25rem minimum height.
@@ -635,7 +637,7 @@ h2 { margin-bottom: 1.4rem; font-size: clamp(2.8rem, 5.5vw, 5.2rem); }
 }
 ~~~
 
-Use this exact motion and accessibility ending:
+Initial motion and accessibility reference:
 
 ~~~css
 .enhanced [data-reveal] {
@@ -713,9 +715,9 @@ Run python3 Scripts/verify-website.py behavior.
 
 Expected: exit 1 beginning with “FAIL JavaScript is missing”.
 
-- [ ] **Step 2: Add progressive enhancement**
+- [ ] **Step 2: Add the initial progressive-enhancement reference**
 
-Replace website/script.js:
+Initial `website/script.js` reference:
 
 ~~~javascript
 document.documentElement.classList.add("js");
@@ -836,9 +838,9 @@ Run python3 Scripts/verify-website.py pages.
 
 Expected: exit 1 with “FAIL Missing required file: .github/workflows/pages.yml”.
 
-- [ ] **Step 2: Add the workflow**
+- [ ] **Step 2: Add the initial workflow reference**
 
-Create .github/workflows/pages.yml:
+Initial `.github/workflows/pages.yml` reference. The tracked workflow is authoritative for the final least-privilege job layout:
 
 ~~~yaml
 name: Pages
@@ -994,6 +996,4 @@ git diff --check
 git status --short
 ~~~
 
-Expected: all five verifier modes pass; syntax and diff checks exit 0; only the implementation-plan file may remain uncommitted.
-
-Deployment begins only after these commits reach main and the repository’s Pages source is configured for GitHub Actions. Do not change repository settings, push, or publish unless the user separately authorizes those external mutations.
+Completed: all five verifier modes pass, JavaScript syntax and diff checks pass, browser and review checks are complete, and the worktree is expected clean. No deployment or push is claimed by this record. The Pages workflow publishes after the completed commits are integrated into `main`.
