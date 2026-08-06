@@ -14,6 +14,56 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parents[1]
 WEBSITE = ROOT / "website"
 INDEX = WEBSITE / "index.html"
+PAGES_WORKFLOW = ROOT / ".github/workflows/pages.yml"
+CANONICAL_PAGES_LINES = """\
+name: Pages
+on:
+  push:
+    branches: [main]
+    paths:
+      - website/**
+      - Scripts/verify-website.py
+      - .github/workflows/pages.yml
+  pull_request:
+    paths:
+      - website/**
+      - Scripts/verify-website.py
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+concurrency:
+  group: pages
+  cancel-in-progress: false
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+jobs:
+  build:
+    name: Validate Pages artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Verify static site
+        run: python3 Scripts/verify-website.py
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b
+        with:
+          path: website
+  deploy:
+    name: Deploy Pages
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e
+""".splitlines()
 
 
 class Page(HTMLParser):
@@ -151,95 +201,18 @@ def active_yaml_lines(workflow: str) -> list[str]:
     return [line.split("#", 1)[0].rstrip() for line in workflow.splitlines() if line.split("#", 1)[0].strip()]
 
 
-def indentation(line: str) -> int:
-    return len(line) - len(line.lstrip())
-
-
-def mapping_has(lines: list[str], key: str, expected: tuple[str, ...]) -> bool:
-    for index, line in enumerate(lines):
-        if line.strip() != key:
-            continue
-        base = indentation(line)
-        nested: list[str] = []
-        for child in lines[index + 1 :]:
-            if indentation(child) <= base:
-                break
-            nested.append(child.strip())
-        if all(value in nested for value in expected):
-            return True
-    return False
-
-
-def job_blocks(lines: list[str]) -> dict[str, list[str]]:
-    starts = [
-        (index, match.group(1))
-        for index, line in enumerate(lines)
-        if indentation(line) == 2 and (match := re.fullmatch(r"\s{2}([A-Za-z0-9_-]+):", line))
-    ]
-    return {
-        name: lines[index + 1 : starts[position + 1][0] if position + 1 < len(starts) else len(lines)]
-        for position, (index, name) in enumerate(starts)
-    }
-
-
-def has_pinned_action(lines: list[str], action: str, sha: str) -> bool:
-    return any(re.fullmatch(rf"\s*-\s+uses:\s*{re.escape(action)}@{sha}", line) for line in lines)
-
-
-def has_verifier_command(lines: list[str]) -> bool:
-    command = r"python3 Scripts/verify-website\.py(?:\s+\S+)*"
-    return any(
-        re.fullmatch(rf"\s*-\s+run:\s*{command}", line)
-        or re.fullmatch(rf"\s+{command}", line)
-        for line in lines
-    )
-
-
-def has_pages_environment(lines: list[str]) -> bool:
-    return any(line.strip() == "environment: github-pages" for line in lines) or mapping_has(lines, "environment:", ("name: github-pages",))
-
-
-def active_if_lines(lines: list[str]) -> list[str]:
-    return [line.strip() for line in lines if re.fullmatch(r"(?:-\s+)?if:\s*.+", line.strip())]
-
-
 def validate_pages_workflow(workflow: str) -> None:
     lines = active_yaml_lines(workflow)
-    require(mapping_has(lines, "on:", ("pull_request:", "workflow_dispatch:")), "Pages workflow missing PR/manual triggers")
-    require(mapping_has(lines, "permissions:", ("contents: read", "pages: write", "id-token: write")), "Pages workflow missing required permissions")
-    blocks = job_blocks(lines)
-    require("build" in blocks, "Pages workflow missing build job")
-    require("deploy" in blocks, "Pages workflow missing deploy job")
-    build = blocks["build"]
-    deploy = blocks["deploy"]
-    require(not active_if_lines(build), "Pages workflow build job must not be conditional")
-    require(
-        active_if_lines(deploy) == ["if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"],
-        "Pages workflow deploy job must have only the required condition",
-    )
-    require(has_verifier_command(build), "Pages workflow missing verifier command in build")
-    require(has_pinned_action(build, "actions/configure-pages", "983d7736d9b0ae728b81ab479565c72886d7745b"), "Pages workflow missing pinned configure-pages in build")
-    require(has_pinned_action(build, "actions/upload-pages-artifact", "7b1f4a764d45c48632c6b24a0339c27f5614fb0b"), "Pages workflow missing pinned upload-pages-artifact in build")
-    require(any(line.strip() == "path: website" for line in build), "Pages workflow missing website artifact path in build")
-    require(has_pages_environment(deploy), "Pages workflow missing github-pages environment in deploy")
-    require(has_pinned_action(deploy, "actions/deploy-pages", "d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e"), "Pages workflow missing pinned deploy-pages in deploy")
     for line in lines:
         match = re.fullmatch(r"\s*-\s+uses:\s*(\S+)", line)
         if match:
             require(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", match.group(1)) is not None, "Pages workflow has unpinned action")
+    require(lines == CANONICAL_PAGES_LINES, "Pages workflow must match the canonical active YAML")
 
 
 def pages() -> None:
-    candidates = list((ROOT / ".github/workflows").glob("*.y*ml"))
-    require(candidates, "missing Pages workflow")
-    failures: list[AssertionError] = []
-    for candidate in candidates:
-        try:
-            validate_pages_workflow(candidate.read_text(encoding="utf-8"))
-            return
-        except AssertionError as error:
-            failures.append(error)
-    raise failures[-1]
+    require(PAGES_WORKFLOW.is_file(), "missing Pages workflow")
+    validate_pages_workflow(PAGES_WORKFLOW.read_text(encoding="utf-8"))
 
 
 CHECKS = {"structure": structure, "styles": styles, "behavior": behavior, "metadata": metadata, "pages": pages}
