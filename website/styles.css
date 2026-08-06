@@ -77,8 +77,9 @@
   a:hover { color: var(--oxidized); }
 
   :focus-visible {
-    outline: 3px solid var(--coral);
-    outline-offset: 4px;
+    outline: 3px solid var(--paper);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 6px var(--ink);
   }
 
   code {
@@ -167,8 +168,7 @@
   #site-nav { display: flex; align-items: center; gap: .2rem; }
 
   #site-nav a,
-  .menu-button,
-  .nav-toggle {
+  .menu-button {
     min-height: 44px;
     display: inline-flex;
     align-items: center;
@@ -185,15 +185,12 @@
   }
 
   #site-nav a:last-child,
-  .menu-button,
-  .nav-toggle { background: var(--ink); color: var(--paper); }
+  .menu-button { background: var(--ink); color: var(--paper); }
 
   #site-nav a:last-child:hover,
-  .menu-button:hover,
-  .nav-toggle:hover { background: var(--oxidized); color: var(--paper); }
+  .menu-button:hover { background: var(--oxidized); color: var(--paper); }
 
-  .menu-button,
-  .nav-toggle { display: none; cursor: pointer; }
+  .menu-button { display: none; cursor: pointer; }
 
   .hero {
     min-height: calc(100svh - 5.25rem);
@@ -481,10 +478,21 @@
 
     .site-header { margin-top: .6rem; }
 
-    .site-header > nav { position: relative; min-height: 3.75rem; padding-left: 1rem; }
+    .site-header > nav { position: relative; min-height: 3.75rem; flex-wrap: wrap; padding-left: 1rem; }
 
-    .js .menu-button,
-    .js .nav-toggle { display: inline-flex; }
+    #site-nav {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: .2rem;
+      padding: .35rem 0 .15rem;
+    }
+
+    #site-nav a { width: 100%; justify-content: flex-start; padding-inline: .8rem; }
+
+    .js .site-header > nav { flex-wrap: nowrap; }
+
+    .js .menu-button { display: inline-flex; }
 
     .js #site-nav {
       position: absolute;
@@ -492,6 +500,7 @@
       right: 0;
       left: 0;
       display: none;
+      width: auto;
       align-items: stretch;
       flex-direction: column;
       border: 1px solid var(--line);
@@ -504,8 +513,6 @@
     }
 
     .js #site-nav.is-open { display: flex; }
-
-    #site-nav a { justify-content: flex-start; padding-inline: .8rem; }
 
     .hero { gap: 2.75rem; padding-top: 4rem; }
 
