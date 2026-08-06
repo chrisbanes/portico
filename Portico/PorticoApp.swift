@@ -780,34 +780,34 @@ private struct PortalView: View {
     @ObservedObject var launchAtLogin: LaunchAtLoginController
     @ObservedObject var managementRouting: ManagementRouting
     let takeInitialManagementWindowRequest: () -> Bool
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(supervisor.availability.title, systemImage: supervisor.availability.symbolName)
                 .accessibilityIdentifier("helper-state")
-            if let suffix = controller.tailnetDisplaySuffix {
-                LabeledContent("Tailnet", value: suffix)
+            LabeledContent("Tailnet", value: controller.tailnetDisplaySuffix ?? "Not connected")
+                .accessibilityIdentifier("tailnet-state")
+            if requiresAttention {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Portico needs your attention.")
+                    Button("Review in Portico") { openOverview() }
+                        .accessibilityIdentifier("compact-attention")
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("compact-attention-summary")
             }
             if launchAtLogin.isOffering {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Launch at login is ready to set up.")
-                    Button("Set Up Launch at Login") {
-                        managementRouting.requestOverview()
-                        openWindow(id: "management")
-                        dismiss()
-                    }
+                    Button("Set Up Launch at Login") { openOverview() }
                     .accessibilityIdentifier("login-offer-reminder")
                 }
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("launch-at-login-offer")
             }
-            ForEach(controller.portals.filter { $0.lifecycle == .active }, id: \.id) { portal in
-                PortalStatusView(controller: controller, portal: portal)
+            ForEach(controller.portals, id: \.id) { portal in
+                CompactPortalMenuRow(controller: controller, portal: portal)
                 Divider()
-            }
-            if let message = controller.message {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             Divider()
             HStack {
@@ -836,6 +836,12 @@ private struct PortalView: View {
                 .help("Open Portico")
                 .accessibilityIdentifier("open-portico")
             }
+            Divider()
+            Button("Quit Portico") {
+                NSApp.terminate(nil)
+            }
+            .keyboardShortcut("q")
+            .accessibilityIdentifier("quit")
         }
         .padding()
         .frame(width: 380)
@@ -844,12 +850,21 @@ private struct PortalView: View {
                 openWindow(id: "management")
             }
         }
-        Divider()
-        Button("Quit Portico") {
-            NSApp.terminate(nil)
-        }
-        .keyboardShortcut("q")
-        .accessibilityIdentifier("quit")
+    }
+
+    private var requiresAttention: Bool {
+        supervisor.availability == .failed
+            || !controller.pendingPortals.isEmpty
+            || !controller.pendingRemovalPortals.isEmpty
+            || !controller.alerts.isEmpty
+            || !controller.removalNotices.isEmpty
+            || controller.message != nil
+    }
+
+    private func openOverview() {
+        managementRouting.requestOverview()
+        openWindow(id: "management")
+        dismiss()
     }
 }
 
@@ -1005,164 +1020,49 @@ private struct AddPortalSheet: View {
 
 }
 
-private struct PortalStatusView: View {
-    @Environment(\.openWindow) private var openWindow
+private struct CompactPortalMenuRow: View {
     @ObservedObject var controller: PortalController
     let portal: PortalConfiguration
-    @State private var destinationEdit: PortalDestinationEdit
-    @FocusState private var startStopFocused: Bool
-
-    init(controller: PortalController, portal: PortalConfiguration) {
-        self.controller = controller
-        self.portal = portal
-        _destinationEdit = State(initialValue: PortalDestinationEdit(destination: portal.destination))
-    }
 
     var body: some View {
-        let isStale = controller.staleStatusIDs.contains(portal.id)
-        let status = controller.statuses[portal.id]
         let presentation = PortalPresentation(
             portal: portal,
-            status: status,
+            status: controller.statuses[portal.id],
             reachability: controller.reachabilityStates[portal.id] ?? .unknown,
-            isStale: isStale
+            isStale: controller.staleStatusIDs.contains(portal.id)
         )
-        let rowActions = controller.actionAvailability(for: portal)
-        let editedDestinationActions = controller.actionAvailability(
-            for: portal,
-            editedDestination: destinationEdit
-        )
-        Text(presentation.portalName).font(.headline)
-            .accessibilityLabel("Portal Name, \(presentation.portalName)")
-            .accessibilityIdentifier("portal-name")
-        if let assignedName = presentation.assignedName {
-            LabeledContent("Assigned Name", value: assignedName)
-                .accessibilityIdentifier("assigned-name")
-        }
-        if let explanation = presentation.collisionExplanation {
-            Text(explanation).font(.caption).foregroundStyle(.secondary)
-        }
-        LabeledContent("Desired State", value: presentation.desiredState)
-            .accessibilityIdentifier("desired-state")
-        LabeledContent("Tailscale", value: presentation.tailscaleState)
-            .accessibilityIdentifier("tailscale-state")
-        if portal.localAppPort != nil {
-            LabeledContent("Local App", value: presentation.localAppReachability)
-                .accessibilityIdentifier("local-app-state")
-        }
-        if let status = controller.statuses[portal.id] {
-            if let portalURL = status.portalURL {
-                LabeledContent(
-                    presentation.portalURLLabel,
-                    value: portalURL.absoluteString
-                )
-                .accessibilityIdentifier("portal-url")
-                WrappingHStack {
-                    Button {
-                        controller.copyPortalURL(id: portal.id)
-                    } label: {
-                        Label("Copy Portal URL", systemImage: "doc.on.doc")
-                    }
-                    .labelStyle(.iconOnly)
-                    .help("Copy Portal URL")
-                    .disabled(!rowActions.copyPortalURL)
-                    .accessibilityIdentifier("copy-portal-url")
-                    Button {
-                        controller.openPortalURL(id: portal.id)
-                    } label: {
-                        Label("Open Portal URL", systemImage: "arrow.up.right.square")
-                    }
-                    .labelStyle(.iconOnly)
-                    .help("Open Portal URL")
-                    .disabled(!rowActions.openPortalURL)
-                    .accessibilityIdentifier("open-portal-url")
-                }
-            }
-            if !status.addresses.isEmpty {
-                LabeledContent("Addresses", value: status.addresses.joined(separator: ", "))
-            }
-            if status.state == .authenticating {
-                Button("Authenticate") { controller.authenticate(id: portal.id) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!rowActions.authenticate)
-                    .accessibilityIdentifier("authenticate")
-            }
-        }
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Button("Local App") { destinationEdit.kind = .localApp }
-                    .accessibilityIdentifier("edit-destination-local")
-                    .disabled(destinationEdit.kind == .localApp)
-                Button("Remote App") { destinationEdit.kind = .remoteApp }
-                    .accessibilityIdentifier("edit-destination-remote")
-                    .disabled(destinationEdit.kind == .remoteApp)
-            }
-            .buttonStyle(.bordered)
-            if destinationEdit.kind == .localApp {
-                HStack {
-                    TextField("Local App Port", text: $destinationEdit.localAppPort)
-                        .frame(width: 80)
-                        .onSubmit { updateDestination() }
-                        .accessibilityIdentifier("edit-local-app-port")
-                    Button("Update Destination") { updateDestination() }
-                        .controlSize(.small)
-                        .disabled(!editedDestinationActions.editDestination)
-                        .accessibilityIdentifier("update-destination")
-                }
-            } else {
-                HStack {
-                    Picker("Scheme", selection: $destinationEdit.remoteAppScheme) {
-                        Text("HTTP").tag(RemoteAppScheme.http)
-                        Text("HTTPS").tag(RemoteAppScheme.https)
-                    }
-                    .accessibilityIdentifier("edit-remote-app-scheme")
-                    TextField("Remote App Host", text: $destinationEdit.remoteAppHost)
-                        .accessibilityIdentifier("edit-remote-app-host")
-                }
-                HStack {
-                    TextField("Remote App Port", text: $destinationEdit.remoteAppPort)
-                        .frame(width: 80)
-                        .onSubmit { updateDestination() }
-                        .accessibilityIdentifier("edit-remote-app-port")
-                    Button("Update Destination") { updateDestination() }
-                        .controlSize(.small)
-                        .disabled(!editedDestinationActions.editDestination)
-                        .accessibilityIdentifier("update-destination")
-                }
-            }
-            WrappingHStack {
-                Button(portal.desiredState == .enabled ? "Stop" : "Start") {
-                    if portal.desiredState == .enabled {
-                        controller.stopPortal(id: portal.id)
-                    } else {
-                        controller.startPortal(id: portal.id)
-                    }
-                    DispatchQueue.main.async {
-                        startStopFocused = true
-                    }
-                }
-                .controlSize(.small)
-                .focusable()
-                .focused($startStopFocused)
-                .accessibilityIdentifier("start-stop")
-                .disabled(portal.desiredState == .enabled
-                    ? !rowActions.stop
-                    : !rowActions.start)
-                Button {
-                    openWindow(id: "diagnostics")
-                } label: {
-                    Label("Diagnostics", systemImage: "stethoscope")
-                }
-                .labelStyle(.iconOnly)
-                .help("Diagnostics")
-                .controlSize(.small)
-                .accessibilityIdentifier("portal-diagnostics")
-            }
+            Text(presentation.portalName).font(.headline)
+            Text(statusText(for: presentation))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("compact-portal-status-\(portal.name)")
+            contextualAction
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("compact-portal-\(portal.name)")
+    }
+
+    @ViewBuilder
+    private var contextualAction: some View {
+        let availability = controller.actionAvailability(for: portal)
+        if availability.authenticate {
+            Button("Authenticate") { controller.authenticate(id: portal.id) }
+                .accessibilityIdentifier("compact-authenticate")
+        } else if availability.start {
+            Button("Start") { controller.startPortal(id: portal.id) }
+                .accessibilityIdentifier("compact-start")
+        } else if availability.openPortalURL {
+            Button("Open") { controller.openPortalURL(id: portal.id) }
+                .accessibilityIdentifier("compact-open-portal-url")
         }
     }
 
-    private func updateDestination() {
-        controller.updateDestination(id: portal.id, edit: destinationEdit)
+    private func statusText(for presentation: PortalPresentation) -> String {
+        if portal.localAppPort != nil {
+            return "\(presentation.tailscaleState) • \(presentation.desiredState) • \(presentation.localAppReachability)"
+        }
+        return "\(presentation.tailscaleState) • \(presentation.desiredState)"
     }
 }
 

@@ -219,7 +219,7 @@ final class PorticoUITests: XCTestCase {
         )
     }
 
-    func testSelectedPortalDetailTracksDestinationChangesFromMenuBar() {
+    func testSelectedPortalDetailTracksDestinationChangesFromManagementWindow() {
         let app = launch(scenario: "management")
         app.typeKey("o", modifierFlags: [.command, .shift])
         app.buttons["management-sidebar-portal-first-portal"].click()
@@ -227,13 +227,10 @@ final class PorticoUITests: XCTestCase {
         let selectedPort = app.textFields["selected-edit-local-app-port"]
         XCTAssertTrue(waitForValue("8080", element: selectedPort, timeout: 3), app.debugDescription)
 
-        openMenuBarExtra(app)
-        let menuBarPort = app.textFields.matching(identifier: "edit-local-app-port").firstMatch
-        XCTAssertTrue(menuBarPort.waitForExistence(timeout: 3), app.debugDescription)
-        menuBarPort.click()
-        menuBarPort.typeKey("a", modifierFlags: .command)
-        menuBarPort.typeText("8081")
-        app.buttons.matching(identifier: "update-destination").firstMatch.click()
+        selectedPort.click()
+        selectedPort.typeKey("a", modifierFlags: .command)
+        selectedPort.typeText("8081")
+        app.buttons["selected-update-destination"].click()
 
         XCTAssertTrue(waitForValue("8081", element: selectedPort, timeout: 3), app.debugDescription)
         XCTAssertFalse(app.buttons["selected-update-destination"].isEnabled)
@@ -339,88 +336,133 @@ final class PorticoUITests: XCTestCase {
         app = launch(scenario: "initial-save-failure")
         XCTAssertFalse(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 2))
         openMenuBarExtra(app)
-        XCTAssertTrue(app.staticTexts["Saved Portal configuration could not be loaded."].exists)
+        XCTAssertTrue(app.buttons["compact-attention"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.staticTexts["Saved Portal configuration could not be loaded."].exists)
+        app.buttons["compact-attention"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
     }
 
-    func testOnlinePortalActionsAndNativeWindows() {
-        let app = launch(scenario: "online")
+    func testCompactMenuPortalActionMatrix() {
+        var app = launch(scenario: "online")
         openMenuBarExtra(app)
 
-        XCTAssertTrue(app.descendants(matching: .any)["portal-name"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.descendants(matching: .any)["assigned-name"].exists)
-        XCTAssertTrue(app.descendants(matching: .any)["desired-state"].exists)
-        XCTAssertTrue(app.descendants(matching: .any)["tailscale-state"].exists)
-        XCTAssertTrue(app.descendants(matching: .any)["local-app-state"].exists)
-        XCTAssertTrue(app.buttons["copy-portal-url"].isEnabled)
-        XCTAssertTrue(app.buttons["open-portal-url"].isEnabled)
-        let startStop = app.buttons["start-stop"]
-        XCTAssertTrue(startStop.isEnabled)
-        XCTAssertFalse(app.buttons["authenticate"].exists)
+        let openPortalURL = app.buttons["compact-open-portal-url"]
+        XCTAssertTrue(openPortalURL.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(openPortalURL.isEnabled)
+        XCTAssertFalse(app.buttons["compact-authenticate"].exists)
+        XCTAssertFalse(app.buttons["compact-start"].exists)
+        assertNoDetailedMenuControls(in: app)
 
-        startStop.click()
-        XCTAssertTrue(waitForValue("Stopped", element: app.staticTexts["desired-state"], timeout: 3))
-        let focusedStartStop = app.buttons.matching(
-            NSPredicate(format: "identifier == %@ AND hasKeyboardFocus == true", "start-stop")
-        ).firstMatch
-        XCTAssertTrue(focusedStartStop.waitForExistence(timeout: 3), app.debugDescription)
+        app = launch(scenario: "stopped")
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.buttons["compact-start"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["compact-start"].isEnabled)
+        XCTAssertFalse(app.buttons["compact-open-portal-url"].exists)
 
+        app = launch(scenario: "authenticating")
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.buttons["compact-authenticate"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["compact-authenticate"].isEnabled)
+        XCTAssertFalse(app.buttons["compact-open-portal-url"].exists)
+
+        app = launch(scenario: "stale")
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.buttons["open-portico"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["compact-authenticate"].exists)
+        XCTAssertFalse(app.buttons["compact-start"].exists)
+        XCTAssertFalse(app.buttons["compact-open-portal-url"].exists)
+
+        app = launch(scenario: "awaiting-approval")
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.buttons["open-portico"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["compact-authenticate"].exists)
+        XCTAssertFalse(app.buttons["compact-start"].exists)
+        XCTAssertFalse(app.buttons["compact-open-portal-url"].exists)
+
+        app = launch(scenario: "durable-management")
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.buttons["compact-open-portal-url"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["compact-open-portal-url"].isEnabled)
+        XCTAssertFalse(app.buttons["compact-authenticate"].exists)
+        XCTAssertFalse(app.buttons["compact-start"].exists)
+        assertNoDetailedMenuControls(in: app)
+    }
+
+    func testLocalAndRemoteDestinationEditorsSupportCrossKindChanges() {
+        var app = launch(scenario: "online")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-portal-one"].click()
+        XCTAssertTrue(app.textFields["selected-edit-local-app-port"].waitForExistence(timeout: 3))
+        app.buttons["selected-edit-destination-remote"].click()
+        XCTAssertTrue(app.textFields["selected-edit-remote-app-host"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.textFields["selected-edit-local-app-port"].exists)
+        app.textFields["selected-edit-remote-app-host"].click()
+        app.textFields["selected-edit-remote-app-host"].typeText("app.example.com")
+        app.textFields["selected-edit-remote-app-port"].click()
+        app.textFields["selected-edit-remote-app-port"].typeText("443")
+        XCTAssertTrue(app.buttons["selected-update-destination"].isEnabled)
+        app.buttons["selected-update-destination"].click()
+        XCTAssertTrue(app.buttons["selected-start-stop"].isEnabled)
+
+        app = launch(scenario: "remote-online")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-portal-one"].click()
+        XCTAssertTrue(app.textFields["selected-edit-remote-app-host"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.textFields["selected-edit-local-app-port"].exists)
+        app.buttons["selected-edit-destination-local"].click()
+        XCTAssertTrue(app.textFields["selected-edit-local-app-port"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.textFields["selected-edit-remote-app-host"].exists)
+        app.textFields["selected-edit-local-app-port"].click()
+        app.textFields["selected-edit-local-app-port"].typeKey("a", modifierFlags: .command)
+        app.textFields["selected-edit-local-app-port"].typeText("8081")
+        XCTAssertTrue(app.buttons["selected-update-destination"].isEnabled)
+        app.buttons["selected-update-destination"].click()
+        XCTAssertTrue(app.buttons["selected-start-stop"].isEnabled)
+    }
+
+    func testCompactMenuAttentionAndCommands() {
+        var app = launch(scenario: "terminal-failure")
+        openMenuBarExtra(app)
+        let attention = app.buttons["compact-attention"]
+        XCTAssertTrue(attention.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(attention.label, "Review in Portico")
+        attention.click()
+        XCTAssertTrue(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
+
+        app = launch(scenario: "recovery")
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.buttons["compact-attention"].waitForExistence(timeout: 3))
+
+        app = launch(scenario: "removing-failure")
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.buttons["compact-attention"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Retry Removal"].exists)
+
+        app = launch(scenario: "login-offer")
+        openMenuBarExtra(app)
+        XCTAssertTrue(app.buttons["login-offer-reminder"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["login-offer-enable"].exists)
+        XCTAssertFalse(app.buttons["login-offer-decline"].exists)
+
+        app = launch(scenario: "online")
+        openMenuBarExtra(app)
+        let portalAction = app.buttons["compact-open-portal-url"]
+        let openPortico = app.buttons["open-portico"]
+        let settings = app.buttons["settings"]
+        let diagnostics = app.buttons["diagnostics"]
+        let quit = app.buttons["quit"]
+        XCTAssertTrue(portalAction.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertLessThan(portalAction.frame.minY, openPortico.frame.minY)
+        XCTAssertLessThan(openPortico.frame.minY, settings.frame.minY)
+        XCTAssertLessThan(settings.frame.minY, diagnostics.frame.minY)
+        XCTAssertLessThan(diagnostics.frame.minY, quit.frame.minY)
         app.typeKey(",", modifierFlags: .command)
         XCTAssertTrue(app.staticTexts["settings-heading"].waitForExistence(timeout: 3))
         app.typeKey("w", modifierFlags: .command)
         app.typeKey("d", modifierFlags: [.command, .shift])
         XCTAssertTrue(app.staticTexts["diagnostics-heading"].waitForExistence(timeout: 3))
-        XCTAssertFalse(app.staticTexts["settings-heading"].exists)
         app.typeKey("q", modifierFlags: .command)
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
-    }
-
-    func testLocalAndRemoteDestinationEditorsSupportCrossKindChanges() {
-        var app = launch(scenario: "online")
-        openMenuBarExtra(app)
-        XCTAssertTrue(app.textFields["edit-local-app-port"].waitForExistence(timeout: 3))
-        app.buttons["edit-destination-remote"].click()
-        XCTAssertTrue(app.textFields["edit-remote-app-host"].waitForExistence(timeout: 3))
-        XCTAssertFalse(app.textFields["edit-local-app-port"].exists)
-        app.textFields["edit-remote-app-host"].click()
-        app.textFields["edit-remote-app-host"].typeText("app.example.com")
-        app.textFields["edit-remote-app-port"].click()
-        app.textFields["edit-remote-app-port"].typeText("443")
-        XCTAssertTrue(app.buttons["update-destination"].isEnabled)
-        app.buttons["update-destination"].click()
-        XCTAssertTrue(app.buttons["start-stop"].isEnabled)
-
-        app = launch(scenario: "remote-online")
-        openMenuBarExtra(app)
-        XCTAssertTrue(app.textFields["edit-remote-app-host"].waitForExistence(timeout: 3))
-        XCTAssertFalse(app.textFields["edit-local-app-port"].exists)
-        app.buttons["edit-destination-local"].click()
-        XCTAssertTrue(app.textFields["edit-local-app-port"].waitForExistence(timeout: 3))
-        XCTAssertFalse(app.textFields["edit-remote-app-host"].exists)
-        app.textFields["edit-local-app-port"].click()
-        app.textFields["edit-local-app-port"].typeKey("a", modifierFlags: .command)
-        app.textFields["edit-local-app-port"].typeText("8081")
-        XCTAssertTrue(app.buttons["update-destination"].isEnabled)
-        app.buttons["update-destination"].click()
-        XCTAssertTrue(app.buttons["start-stop"].isEnabled)
-    }
-
-    func testStaleAndAuthenticatingActions() {
-        var app = launch(scenario: "stale")
-        openMenuBarExtra(app)
-
-        let lastKnown = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "Last Known", "Last Known")
-        ).firstMatch
-        XCTAssertTrue(lastKnown.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.buttons["copy-portal-url"].isEnabled)
-        XCTAssertFalse(app.buttons["open-portal-url"].isEnabled)
-
-        app = launch(scenario: "authenticating")
-        openMenuBarExtra(app)
-        XCTAssertTrue(app.buttons["authenticate"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["authenticate"].isEnabled)
-        XCTAssertTrue(app.buttons["copy-portal-url"].isEnabled)
-        XCTAssertFalse(app.buttons["open-portal-url"].isEnabled)
     }
 
     func testLoggingRestartAndTerminalFailureStates() {
@@ -615,6 +657,16 @@ final class PorticoUITests: XCTestCase {
         let predicate = NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text)
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func assertNoDetailedMenuControls(in app: XCUIApplication) {
+        XCTAssertFalse(app.buttons["copy-portal-url"].exists)
+        XCTAssertFalse(app.buttons["start-stop"].exists)
+        XCTAssertFalse(app.buttons["edit-destination-local"].exists)
+        XCTAssertFalse(app.buttons["edit-destination-remote"].exists)
+        XCTAssertFalse(app.buttons["portal-diagnostics"].exists)
+        XCTAssertFalse(app.textFields["edit-local-app-port"].exists)
+        XCTAssertFalse(app.staticTexts["portal-url"].exists)
     }
 
     private func openMenuBarExtra(_ app: XCUIApplication) {
