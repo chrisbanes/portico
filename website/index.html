@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Portico gives apps reachable from your Mac stable, private HTTPS addresses on your Tailscale tailnet.">
+    <meta property="og:title" content="Portico — your local apps, through a private door">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://chrisbanes.github.io/portico/">
+    <meta property="og:image" content="https://chrisbanes.github.io/portico/assets/og.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <title>Portico — your local apps, through a private door</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="site-header">
+      <nav aria-label="Primary navigation">
+        <a class="wordmark" href="#main-content" aria-label="Portico home">Portico</a>
+        <button class="menu-button" type="button" aria-controls="site-nav" aria-expanded="false">Menu</button>
+        <div id="site-nav">
+          <a href="#how-it-works">How it works</a>
+          <a href="#features">Features</a>
+          <a href="#install">Install</a>
+          <a href="https://github.com/chrisbanes/portico">GitHub</a>
+        </div>
+      </nav>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy" data-reveal>
+          <p class="eyebrow">Private HTTPS for local apps</p>
+          <h1 id="hero-title">Your local apps, through a private door.</h1>
+          <p>Portico is a native macOS menu-bar app that gives services reachable from the Mac stable, private HTTPS addresses on a Tailscale tailnet.</p>
+          <p>
+            <a href="#install">See installation</a>
+            <a href="https://github.com/chrisbanes/portico">View on GitHub</a>
+          </p>
+        </div>
+        <div class="hero-portal" data-reveal aria-label="A local app becomes a private tailnet address">
+          <p><code>http://127.0.0.1:8787</code></p>
+          <p aria-hidden="true">through Portico</p>
+          <p><code>https://hermes.&lt;tailnet&gt;.ts.net</code></p>
+        </div>
+      </section>
+
+      <section id="how-it-works" aria-labelledby="how-it-works-title">
+        <p class="eyebrow">A small, durable route</p>
+        <h2 id="how-it-works-title">How it works</h2>
+        <ol class="steps">
+          <li data-reveal><h3>Choose an app.</h3><p>Select a detected Local App or enter a Local App or Remote App destination.</p></li>
+          <li data-reveal><h3>Create a Portal.</h3><p>Choose an immutable Portal Name and authenticate the independent Tailscale node.</p></li>
+          <li data-reveal><h3>Use the private URL.</h3><p>Copy a stable HTTPS Portal URL that is reachable on the tailnet.</p></li>
+        </ol>
+      </section>
+
+      <section id="app-preview" aria-labelledby="app-preview-title">
+        <p class="eyebrow">At a glance</p>
+        <h2 id="app-preview-title">A management window for every doorway</h2>
+        <div class="app-window" data-reveal>
+          <aside aria-label="Portico sidebar">
+            <p>Portico</p>
+            <nav aria-label="App navigation">
+              <a href="#app-preview">Overview</a>
+              <a href="#app-preview" aria-current="page">Portal: hermes</a>
+              <a href="#app-preview">Portal: preview</a>
+            </nav>
+          </aside>
+          <article aria-labelledby="portal-detail-title">
+            <header>
+              <p>Portal</p>
+              <h3 id="portal-detail-title">hermes</h3>
+              <p>Enabled · Tailscale Online · Local App Reachable</p>
+            </header>
+            <dl>
+              <div><dt>Identity</dt><dd>Portal Name: <code>hermes</code><br>Assigned Name: <code>hermes</code></dd></div>
+              <div><dt>Portal State</dt><dd>Desired State: Enabled<br>Tailscale: Online</dd></div>
+              <div><dt>Portal URL</dt><dd><code>https://hermes.example-tailnet.ts.net</code></dd></div>
+              <div><dt>Destination</dt><dd>Local App · <code>127.0.0.1:8787</code> · Reachable</dd></div>
+            </dl>
+          </article>
+        </div>
+      </section>
+
+      <section id="features" aria-labelledby="features-title">
+        <p class="eyebrow">Built for the route, not a dashboard</p>
+        <h2 id="features-title">Private access with fewer moving parts</h2>
+        <div class="feature-grid">
+          <article data-reveal><h3>Stable private HTTPS</h3><p>Give services reachable from your Mac durable HTTPS addresses on your tailnet.</p></article>
+          <article data-reveal><h3>Independent Portals</h3><p>Every Portal is its own node with an identity that lasts until you remove it.</p></article>
+          <article data-reveal><h3>Local or Remote Apps</h3><p>Choose an on-Mac Local App or a Remote App your Mac can already reach.</p></article>
+          <article data-reveal><h3>Native controls</h3><p>Manage routes from the menu bar and a focused management window.</p></article>
+          <article data-reveal><h3>Clear states</h3><p>See Enabled state, Tailscale connection, and destination reachability independently.</p></article>
+        </div>
+      </section>
+
+      <section id="architecture" aria-labelledby="architecture-title">
+        <p class="eyebrow">The boundary stays clear</p>
+        <h2 id="architecture-title">A Portal is an independent Tailscale node</h2>
+        <p>Portico does not rename or proxy through your Mac’s existing Tailscale node. Each Portal joins the tailnet independently, then forwards requests to its configured destination.</p>
+        <ol class="route-flow" aria-label="Portal route">
+          <li>Tailnet device</li>
+          <li>Independent Portal node</li>
+          <li>Destination</li>
+        </ol>
+        <p><a href="https://github.com/chrisbanes/portico">Explore the architecture on GitHub</a></p>
+      </section>
+
+      <section id="install" aria-labelledby="install-title">
+        <p class="eyebrow">Preview instructions</p>
+        <h2 id="install-title">Try the preview when it is ready</h2>
+        <ol>
+          <li>Download the latest signed build.</li>
+          <li>Move Portico to Applications and open it.</li>
+          <li>Add a Portal and follow browser authentication.</li>
+        </ol>
+        <p>Release packaging and final installation instructions are still being prepared. These are preview instructions, not a download link.</p>
+      </section>
+    </main>
+
+    <footer>
+      <p><a href="https://github.com/chrisbanes/portico">Portico on GitHub</a></p>
+      <p>Portico is a selected working name and has not yet been legally cleared.</p>
+    </footer>
+  </body>
+</html>
