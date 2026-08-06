@@ -20,7 +20,8 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(emptyStateAddPortal.waitForExistence(timeout: 3), app.debugDescription)
         emptyStateAddPortal.click()
         XCTAssertTrue(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 3))
-        XCTAssertFalse(app.buttons["add-portal"].isEnabled)
+        XCTAssertTrue(app.buttons["add-portal-next"].isEnabled)
+        XCTAssertFalse(app.buttons["add-portal"].exists)
 
         app.buttons["add-portal-cancel"].click()
         XCTAssertFalse(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 1))
@@ -38,6 +39,7 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["No Portals"].waitForExistence(timeout: 3))
         app.buttons["overview-add-portal"].click()
         XCTAssertTrue(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 3))
+        app.buttons["add-portal-next"].click()
         let portalName = app.textFields["portal-name-field"]
         XCTAssertTrue(portalName.waitForExistence(timeout: 3), app.debugDescription)
         portalName.click()
@@ -50,6 +52,7 @@ final class PorticoUITests: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertFalse(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 1))
         app.buttons["overview-add-portal"].click()
+        app.buttons["add-portal-next"].click()
         XCTAssertTrue(app.textFields["portal-name-field"].waitForExistence(timeout: 3))
         XCTAssertEqual(app.textFields["portal-name-field"].value as? String, "")
         XCTAssertEqual(app.textFields["local-app-port-field"].value as? String, "")
@@ -70,6 +73,12 @@ final class PorticoUITests: XCTestCase {
         XCTAssertLessThan(firstPortal.frame.minY, secondPortal.frame.minY)
         XCTAssertTrue(firstPortal.label.contains("Online"))
         XCTAssertTrue(secondPortal.label.contains("Connecting"))
+
+        app.descendants(matching: .any)["management-sidebar-settings"].click()
+        XCTAssertTrue(app.radioButtons["Allow operational-support logging"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["overview-add-portal"].exists)
+        app.descendants(matching: .any)["management-sidebar-overview"].click()
+        XCTAssertTrue(app.buttons["overview-add-portal"].waitForExistence(timeout: 3))
 
         firstPortal.click()
         XCTAssertTrue(waitForValue("first-portal", element: app.staticTexts["selected-portal-name"], timeout: 3))
@@ -246,11 +255,13 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 3))
 
         app.buttons["refresh-local-apps"].click()
-        let candidate = app.buttons["local-app-3000"]
+        let candidate = app.buttons["local-app-9342"]
         XCTAssertTrue(candidate.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(candidate.label.contains("localhost:9342"))
+        XCTAssertFalse(candidate.label.contains("9,342"))
         candidate.click()
         XCTAssertTrue(waitForValue("detected-portal", element: app.textFields["portal-name-field"], timeout: 3))
-        XCTAssertTrue(waitForValue("3000", element: app.textFields["local-app-port-field"], timeout: 3))
+        XCTAssertTrue(waitForValue("9342", element: app.textFields["local-app-port-field"], timeout: 3))
 
         let portalName = app.textFields["portal-name-field"]
         portalName.click()
@@ -272,9 +283,11 @@ final class PorticoUITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: "\(root)/helper-enrollment.txt"))
 
         app.buttons["overview-add-portal"].click()
+        app.buttons["add-portal-next"].click()
         XCTAssertTrue(app.textFields["portal-name-field"].waitForExistence(timeout: 3))
         XCTAssertEqual(app.textFields["portal-name-field"].value as? String, "")
         XCTAssertEqual(app.textFields["local-app-port-field"].value as? String, "")
+        app.buttons["add-portal-back"].click()
         app.buttons["refresh-local-apps"].click()
         XCTAssertTrue(candidate.waitForExistence(timeout: 3))
         candidate.click()
@@ -294,7 +307,8 @@ final class PorticoUITests: XCTestCase {
     func testOpenPorticoRaisesTheManagementWindowAndClosingItKeepsTheMenuBarAppRunning() {
         let app = launch(scenario: "online")
 
-        app.typeKey("o", modifierFlags: [.command, .shift])
+        openMenuBarExtra(app)
+        app.buttons["open-portico"].click()
         let overview = app.descendants(matching: .any)["management-overview"]
         XCTAssertTrue(overview.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertFalse(app.descendants(matching: .any)["overview-first-portal-guidance"].exists)
@@ -401,11 +415,11 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(app.buttons["compact-open-portal-url"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["compact-open-portal-url"].isEnabled)
         XCTAssertTrue(
-            waitForText("Removing", element: app.staticTexts["compact-portal-status-durable-removing"], timeout: 3),
+            waitForText("Removing", element: app.descendants(matching: .any)["compact-portal-status-durable-removing"], timeout: 3),
             app.debugDescription
         )
         XCTAssertTrue(
-            waitForText("Cleanup in progress", element: app.staticTexts["compact-portal-status-durable-rejected"], timeout: 3),
+            waitForText("Cleanup in progress", element: app.descendants(matching: .any)["compact-portal-status-durable-rejected"], timeout: 3),
             app.debugDescription
         )
         XCTAssertFalse(app.buttons["compact-authenticate"].exists)
@@ -481,13 +495,25 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(settings.exists)
         XCTAssertTrue(diagnostics.exists)
         XCTAssertLessThan(portalAction.frame.maxY, quit.frame.minY)
-        app.typeKey(",", modifierFlags: .command)
-        XCTAssertTrue(app.staticTexts["settings-heading"].waitForExistence(timeout: 3))
+        let compactPortal = app.descendants(matching: .any)["compact-portal-portal-one"]
+        XCTAssertLessThan(abs(portalAction.frame.midY - compactPortal.frame.midY), 8)
+        settings.click()
+        XCTAssertTrue(app.radioButtons["Allow operational-support logging"].waitForExistence(timeout: 3))
+        let focusedManagementWindow = app.windows.matching(
+            NSPredicate(format: "identifier == %@ AND hasKeyboardFocus == true", "management")
+        )
+        XCTAssertTrue(focusedManagementWindow.firstMatch.waitForExistence(timeout: 3), app.debugDescription)
         app.typeKey("w", modifierFlags: .command)
         app.typeKey("d", modifierFlags: [.command, .shift])
         XCTAssertTrue(app.staticTexts["diagnostics-heading"].waitForExistence(timeout: 3))
         app.typeKey("q", modifierFlags: .command)
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
+    }
+
+    func testSettingsHasInitialAccessibilityFocusTarget() {
+        let app = launch(scenario: "online")
+        app.typeKey(",", modifierFlags: .command)
+        XCTAssertTrue(app.staticTexts["settings-heading"].waitForExistence(timeout: 3))
     }
 
     func testLoggingRestartAndTerminalFailureStates() {
@@ -497,11 +523,12 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(disabledLogging.waitForExistence(timeout: 3), app.debugDescription)
         disabledLogging.click()
         XCTAssertTrue(waitForValue("Restarting", element: app.staticTexts["settings-helper-state"], timeout: 2))
-        app.typeKey("r", modifierFlags: [.command, .shift])
         app.typeKey("w", modifierFlags: .command)
         openMenuBarExtra(app)
-        XCTAssertTrue(waitForValue("Restarting", element: app.staticTexts["helper-state"], timeout: 2))
-        XCTAssertTrue(waitForValue("Connected", element: app.staticTexts["helper-state"], timeout: 5))
+        let compactHelperState = app.descendants(matching: .any)["helper-state"]
+        XCTAssertTrue(waitForText("Restarting", element: compactHelperState, timeout: 2))
+        app.typeKey("r", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitForText("Connected", element: compactHelperState, timeout: 5))
 
         app = launch(scenario: "terminal-failure")
         app.typeKey("o", modifierFlags: [.command, .shift])
@@ -598,7 +625,7 @@ final class PorticoUITests: XCTestCase {
         app.buttons["overview-login-offer-enable"].click()
         XCTAssertFalse(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 3))
         app.typeKey(",", modifierFlags: .command)
-        XCTAssertTrue(app.staticTexts["settings-heading"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.radioButtons["Allow operational-support logging"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["open-login-items-settings"].isEnabled)
     }
 

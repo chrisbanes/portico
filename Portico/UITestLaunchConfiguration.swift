@@ -349,7 +349,7 @@ private final class UITestHelperProcess: HelperProcess {
         case .discoverLocalApps:
             let candidates: [LocalAppCandidatePayload] = scenario == .creation ? [
                 LocalAppCandidatePayload(
-                    localAppPort: 3000,
+                    localAppPort: 9342,
                     processLabel: "node",
                     suggestedPortalName: "detected-portal"
                 ),

@@ -13,6 +13,7 @@ struct PorticoApp: App {
                 supervisor: appDelegate.supervisor,
                 launchAtLogin: appDelegate.launchAtLoginController,
                 managementRouting: appDelegate.managementRouting,
+                windowActivation: appDelegate.windowActivation,
                 takeInitialManagementWindowRequest: appDelegate.takeInitialManagementWindowRequest
             )
             .environment(\.openURL, OpenURLAction { url in
@@ -21,7 +22,12 @@ struct PorticoApp: App {
             })
         }
         .menuBarExtraStyle(.window)
-        .commands { PorticoCommands() }
+        .commands {
+            PorticoCommands(
+                managementRouting: appDelegate.managementRouting,
+                windowActivation: appDelegate.windowActivation
+            )
+        }
         Window("Portico", id: "management") {
             OverviewView(
                 controller: appDelegate.portalController,
@@ -35,19 +41,14 @@ struct PorticoApp: App {
             DiagnosticsView(controller: appDelegate.portalController)
         }
         .defaultSize(width: 720, height: 520)
-        Settings {
-            SettingsView(
-                controller: appDelegate.portalController,
-                supervisor: appDelegate.supervisor,
-                launchAtLogin: appDelegate.launchAtLoginController
-            )
-        }
     }
 
     private func scheduleInitialManagementWindowIfNeeded() {
         guard appDelegate.takeInitialManagementWindowRequest() else { return }
         DispatchQueue.main.async {
-            openWindow(id: "management")
+            appDelegate.windowActivation.present {
+                openWindow(id: "management")
+            }
         }
     }
 }
@@ -60,12 +61,21 @@ public enum PorticoApplication {
 
 private struct PorticoCommands: Commands {
     @Environment(\.openWindow) private var openWindow
+    @ObservedObject var managementRouting: ManagementRouting
+    let windowActivation: AppWindowActivation
 
     var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") {
+                managementRouting.requestSettings()
+                presentWindow(id: "management")
+            }
+            .keyboardShortcut(",", modifiers: .command)
+        }
         CommandGroup(after: .appSettings) {
-            Button("Open Portico") { openWindow(id: "management") }
+            Button("Open Portico") { presentWindow(id: "management") }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
-            Button("Diagnostics") { openWindow(id: "diagnostics") }
+            Button("Diagnostics") { presentWindow(id: "diagnostics") }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
 #if DEBUG
             if UITestLaunchConfiguration.current?.scenario == .restarting {
@@ -75,12 +85,19 @@ private struct PorticoCommands: Commands {
 #endif
         }
     }
+
+    private func presentWindow(id: String) {
+        windowActivation.present {
+            openWindow(id: id)
+        }
+    }
 }
 
 private struct OverviewView: View {
     private enum Destination: Hashable {
         case overview
         case portal(UUID)
+        case settings
     }
 
     private enum AccessibilityFocusTarget: Hashable {
@@ -115,11 +132,16 @@ private struct OverviewView: View {
                     Button {
                         selection = .portal(portal.id)
                     } label: {
-                        VStack(alignment: .leading) {
+                        HStack {
                             Text(presentation.portalName)
-                            Text(sidebarState(for: portal, presentation: presentation))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            Spacer()
+                            PortalStatusIcons(
+                                portal: portal,
+                                status: controller.statuses[portal.id],
+                                reachability: controller.reachabilityStates[portal.id] ?? .unknown,
+                                isStale: controller.staleStatusIDs.contains(portal.id),
+                                summary: sidebarState(for: portal, presentation: presentation)
+                            )
                         }
                     }
                     .buttonStyle(.plain)
@@ -127,16 +149,23 @@ private struct OverviewView: View {
                     .accessibilityIdentifier("management-sidebar-portal-\(portal.name)")
                     .tag(Destination.portal(portal.id))
                 }
+                Section {
+                    Label("Settings", systemImage: "gearshape")
+                        .accessibilityIdentifier("management-sidebar-settings")
+                        .tag(Destination.settings)
+                }
             }
             .navigationTitle("Portico")
         } detail: {
             managementContent
-            .navigationTitle(selectedPortal?.name ?? "Overview")
+            .navigationTitle(navigationTitle)
             .accessibilityIdentifier("management-overview")
             .toolbar {
-                Button("Add Portal") { showingAddPortal = true }
-                    .disabled(controller.operationalLogging == .undecided)
-                    .accessibilityIdentifier("overview-add-portal")
+                if selection != .settings {
+                    Button("Add Portal") { showingAddPortal = true }
+                        .disabled(controller.operationalLogging == .undecided)
+                        .accessibilityIdentifier("overview-add-portal")
+                }
             }
             .sheet(isPresented: Binding(
                 get: { showingAddPortal },
@@ -171,9 +200,15 @@ private struct OverviewView: View {
                     accessibilityFocus = .removalNotice(id)
                 }
             }
-            .onChange(of: managementRouting.overviewRequest) {
-                selection = .overview
+            .onChange(of: managementRouting.requestRevision) { applyManagementRequest() }
+            .onChange(of: selection) { _, selection in
+                switch selection {
+                case .overview: managementRouting.recordVisibleDestination(.overview)
+                case .settings: managementRouting.recordVisibleDestination(.settings)
+                case .portal, nil: break
+                }
             }
+            .onAppear { applyManagementRequest() }
             .confirmationDialog(
                 "Reset this installation's tailnet binding? This does not remove any remote Tailscale node.",
                 isPresented: $showingResetConfirmation,
@@ -211,9 +246,23 @@ private struct OverviewView: View {
         return controller.portals.first(where: { $0.id == id })
     }
 
+    private var navigationTitle: String {
+        switch selection {
+        case .settings: "Settings"
+        case let .portal(id): controller.portals.first(where: { $0.id == id })?.name ?? "Portal"
+        case .overview, nil: "Overview"
+        }
+    }
+
     @ViewBuilder
     private var managementContent: some View {
-        if let selectedPortal {
+        if selection == .settings {
+            SettingsView(
+                controller: controller,
+                supervisor: supervisor,
+                launchAtLogin: launchAtLogin
+            )
+        } else if let selectedPortal {
             selectedDetail(for: selectedPortal)
                 .id(selectedPortal.id)
         } else if controller.portals.isEmpty,
@@ -373,6 +422,13 @@ private struct OverviewView: View {
         guard let portal = removalCandidate else { return }
         removalCandidate = nil
         removalCancelFocusPortalID = portal.id
+    }
+
+    private func applyManagementRequest() {
+        switch managementRouting.destination {
+        case .overview: selection = .overview
+        case .settings: selection = .settings
+        }
     }
 }
 
@@ -776,6 +832,7 @@ private struct PortalView: View {
     @ObservedObject var supervisor: HelperSupervisor
     @ObservedObject var launchAtLogin: LaunchAtLoginController
     @ObservedObject var managementRouting: ManagementRouting
+    let windowActivation: AppWindowActivation
     let takeInitialManagementWindowRequest: () -> Bool
 
     var body: some View {
@@ -808,7 +865,9 @@ private struct PortalView: View {
             }
             Divider()
             HStack {
-                SettingsLink {
+                Button {
+                    openSettings()
+                } label: {
                     Label("Settings", systemImage: "gearshape")
                 }
                 .labelStyle(.iconOnly)
@@ -816,7 +875,7 @@ private struct PortalView: View {
                 .keyboardShortcut(",", modifiers: .command)
                 .accessibilityIdentifier("settings")
                 Button {
-                    openWindow(id: "diagnostics")
+                    presentWindow(id: "diagnostics")
                 } label: {
                     Label("Diagnostics", systemImage: "stethoscope")
                 }
@@ -825,7 +884,8 @@ private struct PortalView: View {
                 .keyboardShortcut("d", modifiers: [.command, .shift])
                 .accessibilityIdentifier("diagnostics")
                 Button {
-                    openWindow(id: "management")
+                    presentWindow(id: "management")
+                    dismiss()
                 } label: {
                     Label("Open Portico", systemImage: "rectangle.on.rectangle")
                 }
@@ -844,7 +904,7 @@ private struct PortalView: View {
         .frame(width: 380)
         .task {
             if takeInitialManagementWindowRequest() {
-                openWindow(id: "management")
+                presentWindow(id: "management")
             }
         }
     }
@@ -860,12 +920,43 @@ private struct PortalView: View {
 
     private func openOverview() {
         managementRouting.requestOverview()
-        openWindow(id: "management")
+        presentWindow(id: "management")
         dismiss()
+    }
+
+    private func openSettings() {
+        managementRouting.requestSettings()
+        presentWindow(id: "management")
+        dismiss()
+    }
+
+    private func presentWindow(id: String) {
+        windowActivation.present {
+            openWindow(id: id)
+        }
     }
 }
 
 private struct AddPortalSheet: View {
+    private enum Step: Equatable {
+        case destination
+        case details
+
+        var title: String {
+            switch self {
+            case .destination: "Choose a destination"
+            case .details: "Name your Portal"
+            }
+        }
+
+        var number: Int {
+            switch self {
+            case .destination: 1
+            case .details: 2
+            }
+        }
+    }
+
     private enum FocusTarget: Hashable {
         case portalName
         case localAppPort
@@ -878,24 +969,77 @@ private struct AddPortalSheet: View {
     let dismissAfterPersistence: () -> Void
     @FocusState private var inputFocus: FocusTarget?
     @AccessibilityFocusState private var accessibilityFocus: FocusTarget?
+    @State private var step = Step.destination
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Add Portal").font(.headline)
-                .accessibilityIdentifier("add-portal-sheet")
-            if PortalPresentation.showsPrerequisiteGuidance(portalCount: controller.portals.count) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Before creating your first Portal").font(.subheadline)
-                    ForEach(PortalPresentation.prerequisiteGuidance, id: \.self) { guidance in
-                        Label(guidance, systemImage: "info.circle")
-                            .font(.caption)
-                    }
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("add-guidance")
-            }
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Detected Local Apps").font(.subheadline)
+                Label(step.title, systemImage: "\(step.number).circle.fill")
+                    .font(.headline)
+                    .accessibilityIdentifier("add-portal-sheet")
+                Spacer()
+                Text("Step \(step.number) of 2")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            switch step {
+            case .destination:
+                destinationStep
+            case .details:
+                detailsStep
+            }
+
+            HStack {
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("add-portal-cancel")
+                Spacer()
+                if step == .details {
+                    Button("Back") {
+                        step = .destination
+                        inputFocus = nil
+                    }
+                    .accessibilityIdentifier("add-portal-back")
+                    Button("Add Portal") { submitPortal() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!controller.actionAvailability().addPortal)
+                        .keyboardShortcut(.defaultAction)
+                        .accessibilityIdentifier("add-portal")
+                } else {
+                    Button("Continue") { showDetails() }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                        .accessibilityIdentifier("add-portal-next")
+                }
+            }
+        }
+        .padding()
+        .frame(width: 480)
+    }
+
+    @ViewBuilder
+    private var destinationStep: some View {
+        if PortalPresentation.showsPrerequisiteGuidance(portalCount: controller.portals.count) {
+            DisclosureGroup("First Portal requirements") {
+                ForEach(PortalPresentation.prerequisiteGuidance, id: \.self) { guidance in
+                    Label(guidance, systemImage: "info.circle")
+                        .font(.caption)
+                }
+            }
+            .accessibilityIdentifier("add-guidance")
+        }
+        Picker("Destination", selection: $controller.creationKind) {
+            Text("Local App").tag(PortalCreationKind.localApp)
+            Text("Remote App").tag(PortalCreationKind.remoteApp)
+        }
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier("destination-kind")
+
+        if controller.creationKind == .localApp {
+            HStack {
+                Label("Detected Local Apps", systemImage: "sparkle.magnifyingglass")
+                    .font(.subheadline)
                 Spacer()
                 Button {
                     controller.refreshLocalApps()
@@ -913,8 +1057,11 @@ private struct AddPortalSheet: View {
             }
             WrappingHStack {
                 ForEach(controller.localApps, id: \.localAppPort) { candidate in
-                    Button("Use \(candidate.processLabel) on port \(candidate.localAppPort)") {
+                    Button {
                         controller.selectLocalApp(candidate)
+                        showDetails()
+                    } label: {
+                        Text(verbatim: "\(candidate.processLabel) · localhost:\(candidate.localAppPort)")
                     }
                     .accessibilityIdentifier("local-app-\(candidate.localAppPort)")
                 }
@@ -924,60 +1071,54 @@ private struct AddPortalSheet: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if let error = controller.portalCreationError {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("add-portal-error")
-            }
-            TextField("Portal Name", text: $controller.portalName)
-                .accessibilityIdentifier("portal-name-field")
-                .focused($inputFocus, equals: .portalName)
-                .accessibilityFocused($accessibilityFocus, equals: .portalName)
-                .onSubmit { validateNameAndAdvance() }
-            Picker("Destination", selection: $controller.creationKind) {
-                Text("Local App").tag(PortalCreationKind.localApp)
-                Text("Remote App").tag(PortalCreationKind.remoteApp)
-            }
-            .pickerStyle(.segmented)
-            .accessibilityIdentifier("destination-kind")
-            if controller.creationKind == .localApp {
-                TextField("Local App Port", text: $controller.localAppPort)
-                    .accessibilityIdentifier("local-app-port-field")
-                    .focused($inputFocus, equals: .localAppPort)
-                    .accessibilityFocused($accessibilityFocus, equals: .localAppPort)
-                    .onSubmit { submitPortal() }
-            } else {
-                Picker("Scheme", selection: $controller.remoteAppScheme) {
-                    Text("HTTP").tag(RemoteAppScheme.http)
-                    Text("HTTPS").tag(RemoteAppScheme.https)
-                }
-                .accessibilityIdentifier("remote-app-scheme")
-                TextField("Remote App Host", text: $controller.remoteAppHost)
-                    .accessibilityIdentifier("remote-app-host-field")
-                    .focused($inputFocus, equals: .remoteAppHost)
-                    .accessibilityFocused($accessibilityFocus, equals: .remoteAppHost)
-                TextField("Remote App Port", text: $controller.remoteAppPort)
-                    .accessibilityIdentifier("remote-app-port-field")
-                    .focused($inputFocus, equals: .remoteAppPort)
-                    .accessibilityFocused($accessibilityFocus, equals: .remoteAppPort)
-                    .onSubmit { submitPortal() }
-            }
-            HStack {
-                Spacer()
-                Button("Cancel", action: cancel)
-                    .keyboardShortcut(.cancelAction)
-                    .accessibilityIdentifier("add-portal-cancel")
-                Button("Add Portal") { submitPortal() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!controller.actionAvailability().addPortal)
-                    .keyboardShortcut(.defaultAction)
-                    .accessibilityIdentifier("add-portal")
-            }
+        } else {
+            Label("Connect to an HTTP or HTTPS app reachable from this Mac.", systemImage: "network")
+                .foregroundStyle(.secondary)
         }
-        .padding()
-        .frame(width: 480)
-        .onAppear { inputFocus = .portalName }
+    }
+
+    @ViewBuilder
+    private var detailsStep: some View {
+        if let error = controller.portalCreationError {
+            Label(error, systemImage: "exclamationmark.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("add-portal-error")
+        }
+        TextField("Portal Name", text: $controller.portalName)
+            .accessibilityIdentifier("portal-name-field")
+            .focused($inputFocus, equals: .portalName)
+            .accessibilityFocused($accessibilityFocus, equals: .portalName)
+            .onSubmit { validateNameAndAdvance() }
+        if controller.creationKind == .localApp {
+            TextField("Local App Port", text: $controller.localAppPort)
+                .accessibilityIdentifier("local-app-port-field")
+                .focused($inputFocus, equals: .localAppPort)
+                .accessibilityFocused($accessibilityFocus, equals: .localAppPort)
+                .onSubmit { submitPortal() }
+        } else {
+            Picker("Scheme", selection: $controller.remoteAppScheme) {
+                Text("HTTP").tag(RemoteAppScheme.http)
+                Text("HTTPS").tag(RemoteAppScheme.https)
+            }
+            .accessibilityIdentifier("remote-app-scheme")
+            TextField("Remote App Host", text: $controller.remoteAppHost)
+                .accessibilityIdentifier("remote-app-host-field")
+                .focused($inputFocus, equals: .remoteAppHost)
+                .accessibilityFocused($accessibilityFocus, equals: .remoteAppHost)
+            TextField("Remote App Port", text: $controller.remoteAppPort)
+                .accessibilityIdentifier("remote-app-port-field")
+                .focused($inputFocus, equals: .remoteAppPort)
+                .accessibilityFocused($accessibilityFocus, equals: .remoteAppPort)
+                .onSubmit { submitPortal() }
+        }
+    }
+
+    private func showDetails() {
+        step = .details
+        DispatchQueue.main.async {
+            inputFocus = .portalName
+        }
     }
 
     private func validateNameAndAdvance() {
@@ -1014,7 +1155,86 @@ private struct AddPortalSheet: View {
             break
         }
     }
+}
 
+private struct PortalStatusIcons: View {
+    let portal: PortalConfiguration
+    let status: PortalStatusPayload?
+    let reachability: LocalAppReachabilityState
+    let isStale: Bool
+    let summary: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: tailscaleSymbol)
+                .foregroundStyle(tailscaleColor)
+            if portal.lifecycle == .active {
+                if status?.state != .stopped || portal.desiredState != .stopped {
+                    Image(systemName: portal.desiredState == .enabled ? "play.fill" : "pause.fill")
+                        .foregroundStyle(.secondary)
+                }
+                if portal.localAppPort != nil {
+                    Image(systemName: reachabilitySymbol)
+                        .foregroundStyle(reachabilityColor)
+                }
+            }
+        }
+        .font(.caption)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(summary)
+        .help(summary)
+    }
+
+    private var tailscaleSymbol: String {
+        switch portal.lifecycle {
+        case .pendingRemoval:
+            return "trash.circle"
+        case .pendingTailnetRejection:
+            return "exclamationmark.triangle.fill"
+        case .active:
+            if isStale { return "clock.arrow.circlepath" }
+            switch status?.state {
+            case .authenticating: return "key.fill"
+            case .awaitingApproval: return "clock.badge.exclamationmark"
+            case .connecting: return "arrow.triangle.2.circlepath"
+            case .online: return "checkmark.circle.fill"
+            case .stopped: return "pause.circle.fill"
+            case .error: return "exclamationmark.triangle.fill"
+            case nil: return "questionmark.circle"
+            }
+        }
+    }
+
+    private var tailscaleColor: Color {
+        switch portal.lifecycle {
+        case .pendingRemoval, .pendingTailnetRejection:
+            return .orange
+        case .active:
+            if isStale { return .gray }
+            switch status?.state {
+            case .online: return .green
+            case .error: return .red
+            case .authenticating, .awaitingApproval: return .orange
+            case .connecting, .stopped, nil: return .gray
+            }
+        }
+    }
+
+    private var reachabilitySymbol: String {
+        switch reachability {
+        case .reachable: "bolt.horizontal.circle.fill"
+        case .unavailable: "bolt.slash.circle.fill"
+        case .unknown: "questionmark.circle"
+        }
+    }
+
+    private var reachabilityColor: Color {
+        switch reachability {
+        case .reachable: .green
+        case .unavailable: .red
+        case .unknown: .gray
+        }
+    }
 }
 
 private struct CompactPortalMenuRow: View {
@@ -1028,12 +1248,17 @@ private struct CompactPortalMenuRow: View {
             reachability: controller.reachabilityStates[portal.id] ?? .unknown,
             isStale: controller.staleStatusIDs.contains(portal.id)
         )
-        VStack(alignment: .leading, spacing: 6) {
+        HStack(spacing: 10) {
             Text(presentation.portalName).font(.headline)
-            Text(statusText(for: presentation))
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            PortalStatusIcons(
+                portal: portal,
+                status: controller.statuses[portal.id],
+                reachability: controller.reachabilityStates[portal.id] ?? .unknown,
+                isStale: controller.staleStatusIDs.contains(portal.id),
+                summary: statusText(for: presentation)
+            )
                 .accessibilityIdentifier("compact-portal-status-\(portal.name)")
+            Spacer()
             contextualAction
         }
         .accessibilityElement(children: .contain)
@@ -1044,13 +1269,25 @@ private struct CompactPortalMenuRow: View {
     private var contextualAction: some View {
         let availability = controller.actionAvailability(for: portal)
         if availability.authenticate {
-            Button("Authenticate") { controller.authenticate(id: portal.id) }
+            Button {
+                controller.authenticate(id: portal.id)
+            } label: {
+                Label("Authenticate", systemImage: "key.fill")
+            }
                 .accessibilityIdentifier("compact-authenticate")
         } else if availability.start {
-            Button("Start") { controller.startPortal(id: portal.id) }
+            Button {
+                controller.startPortal(id: portal.id)
+            } label: {
+                Label("Start", systemImage: "play.fill")
+            }
                 .accessibilityIdentifier("compact-start")
         } else if availability.openPortalURL {
-            Button("Open") { controller.openPortalURL(id: portal.id) }
+            Button {
+                controller.openPortalURL(id: portal.id)
+            } label: {
+                Label("Open", systemImage: "arrow.up.right.square")
+            }
                 .accessibilityIdentifier("compact-open-portal-url")
         }
     }
@@ -1087,51 +1324,60 @@ private struct SettingsView: View {
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityFocused($headingFocused)
                 .accessibilityIdentifier("settings-heading")
-            Picker(
-                "Operational-support logging",
-                selection: Binding(
-                    get: { controller.operationalLogging },
-                    set: { controller.setOperationalLogging($0) }
-                )
-            ) {
-                Text("Allow operational-support logging").tag(OperationalLoggingPreference.enabled)
-                Text("Disable operational-support logging").tag(OperationalLoggingPreference.disabled)
-            }
-            .pickerStyle(.radioGroup)
-            .accessibilityIdentifier("logging-preference")
-            Text("Changing this setting safely restarts the helper.")
-                .font(.caption)
-            LabeledContent("Helper", value: supervisor.availability.title)
+            Section("Privacy") {
+                Picker(
+                    "Operational-support logging",
+                    selection: Binding(
+                        get: { controller.operationalLogging },
+                        set: { controller.setOperationalLogging($0) }
+                    )
+                ) {
+                    Text("Allow operational-support logging").tag(OperationalLoggingPreference.enabled)
+                    Text("Disable operational-support logging").tag(OperationalLoggingPreference.disabled)
+                }
+                .pickerStyle(.radioGroup)
+                .accessibilityIdentifier("logging-preference")
+                Label("Changing this setting safely restarts the helper.", systemImage: "arrow.clockwise")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                LabeledContent("Helper") {
+                    Label(supervisor.availability.title, systemImage: supervisor.availability.symbolName)
+                }
                 .accessibilityIdentifier("settings-helper-state")
-            if let error = controller.operationalLoggingError {
-                Text(error).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("logging-preference-error")
+                if let error = controller.operationalLoggingError {
+                    Label(error, systemImage: "exclamationmark.circle")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("logging-preference-error")
+                }
             }
-            LabeledContent("Launch at login", value: launchAtLogin.status.title)
-                .accessibilityIdentifier("launch-at-login-status")
-            if launchAtLogin.status == .notRegistered {
-                Button("Enable Launch at Login") { launchAtLogin.setEnabled(true) }
-                    .accessibilityIdentifier("enable-launch-at-login")
-            } else if launchAtLogin.status == .enabled {
-                Button("Disable Launch at Login") { launchAtLogin.setEnabled(false) }
-                    .accessibilityIdentifier("disable-launch-at-login")
-            } else if launchAtLogin.status == .requiresApproval {
-                Button("Open Login Items Settings") { launchAtLogin.openLoginItemsSettings() }
-                    .accessibilityIdentifier("open-login-items-settings")
-            }
-            if controller.launchAtLoginOffer == .accepted,
-               launchAtLogin.status == .notRegistered,
-               launchAtLogin.errorMessage != nil {
-                Button("Retry Launch at Login") { launchAtLogin.retryRegistration() }
-                    .accessibilityIdentifier("retry-launch-at-login")
-            }
-            if let error = launchAtLogin.errorMessage {
-                Text(error).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("launch-at-login-error")
+            Section("Startup") {
+                LabeledContent("Launch at login", value: launchAtLogin.status.title)
+                    .accessibilityIdentifier("launch-at-login-status")
+                if launchAtLogin.status == .notRegistered {
+                    Button("Enable Launch at Login") { launchAtLogin.setEnabled(true) }
+                        .accessibilityIdentifier("enable-launch-at-login")
+                } else if launchAtLogin.status == .enabled {
+                    Button("Disable Launch at Login") { launchAtLogin.setEnabled(false) }
+                        .accessibilityIdentifier("disable-launch-at-login")
+                } else if launchAtLogin.status == .requiresApproval {
+                    Button("Open Login Items Settings") { launchAtLogin.openLoginItemsSettings() }
+                        .accessibilityIdentifier("open-login-items-settings")
+                }
+                if controller.launchAtLoginOffer == .accepted,
+                   launchAtLogin.status == .notRegistered,
+                   launchAtLogin.errorMessage != nil {
+                    Button("Retry Launch at Login") { launchAtLogin.retryRegistration() }
+                        .accessibilityIdentifier("retry-launch-at-login")
+                }
+                if let error = launchAtLogin.errorMessage {
+                    Label(error, systemImage: "exclamationmark.circle")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("launch-at-login-error")
+                }
             }
         }
-        .padding()
-        .frame(width: 480)
+        .formStyle(.grouped)
+        .accessibilityIdentifier("settings-view")
         .onAppear {
             launchAtLogin.refreshStatusAfterApplicationActivation()
             headingFocused = true

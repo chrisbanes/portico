@@ -2,11 +2,59 @@ import AppKit
 import Combine
 
 @MainActor
+final class AppWindowActivation {
+    private let application: NSApplication
+
+    init() {
+        application = .shared
+    }
+
+    init(application: NSApplication) {
+        self.application = application
+    }
+
+    func present(_ openWindow: () -> Void) {
+        application.setActivationPolicy(.regular)
+        openWindow()
+        DispatchQueue.main.async { [application] in
+            application.activate(ignoringOtherApps: true)
+        }
+    }
+
+    func windowDidClose() {
+        DispatchQueue.main.async { [application] in
+            let hasVisibleApplicationWindow = application.windows.contains { window in
+                window.isVisible && window.styleMask.contains(.titled) && !(window is NSPanel)
+            }
+            if !hasVisibleApplicationWindow {
+                application.setActivationPolicy(.accessory)
+            }
+        }
+    }
+}
+
+@MainActor
 final class ManagementRouting: ObservableObject {
-    @Published private(set) var overviewRequest = 0
+    enum Destination {
+        case overview
+        case settings
+    }
+
+    @Published private(set) var destination = Destination.overview
+    @Published private(set) var requestRevision = 0
 
     func requestOverview() {
-        overviewRequest += 1
+        destination = .overview
+        requestRevision += 1
+    }
+
+    func requestSettings() {
+        destination = .settings
+        requestRevision += 1
+    }
+
+    func recordVisibleDestination(_ destination: Destination) {
+        self.destination = destination
     }
 }
 
@@ -16,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let portalController: PortalController
     let launchAtLoginController: LaunchAtLoginController
     let managementRouting = ManagementRouting()
+    let windowActivation = AppWindowActivation()
     private var requestsInitialManagementWindow = false
 
     override init() {
@@ -144,6 +193,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationWindowDidClose),
+            name: NSWindow.willCloseNotification,
+            object: nil
+        )
         supervisor.start(loggingPreference: portalController.operationalLogging)
     }
 
@@ -161,5 +216,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func takeInitialManagementWindowRequest() -> Bool {
         defer { requestsInitialManagementWindow = false }
         return requestsInitialManagementWindow
+    }
+
+    @objc private func applicationWindowDidClose(_ notification: Notification) {
+        windowActivation.windowDidClose()
     }
 }
