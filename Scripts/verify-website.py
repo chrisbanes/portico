@@ -161,6 +161,8 @@ def structure() -> None:
     require(stylesheets == ["styles.css"], "stylesheets must be local styles.css only")
     scripts = [values.get("src") for tag, values in document.tags if tag == "script" and values.get("src")]
     require(scripts == ["script.js"], "scripts must be local script.js only")
+    require(has_tag(document, "link", rel="icon", href="assets/portico-mark.svg", type="image/svg+xml"), "missing Portico site icon")
+    require(has_tag(document, "img", src="assets/portico-mark.svg", alt=""), "wordmark must use the Portico mark")
     for filename in ("styles.css", "script.js", ".nojekyll"):
         require((WEBSITE / filename).is_file(), f"missing website/{filename}")
     for tag, values in document.tags:

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254">
+  <defs>
+    <radialGradient id="navy" cx="50%" cy="46%" r="72%"><stop offset="0" stop-color="#062346"/><stop offset=".58" stop-color="#001a36"/><stop offset="1" stop-color="#00132a"/></radialGradient>
+    <clipPath id="field"><rect x="89" y="89" width="1076" height="1076" rx="214"/></clipPath>
+  </defs>
+  <rect width="1254" height="1254" fill="url(#navy)"/>
+  <g clip-path="url(#field)" fill="none" stroke="#0b5790" stroke-linecap="round">
+    <rect x="89" y="89" width="1076" height="1076" rx="214" stroke-width="4" opacity=".72"/>
+    <rect x="98" y="98" width="1058" height="1058" rx="205" stroke-width="2" opacity=".34"/>
+    <circle cx="626" cy="624" r="454" stroke-width="2.5" stroke-dasharray="9 10" opacity=".52"/>
+    <path d="M626 106V1150M99 623H1160" stroke-width="2" stroke-dasharray="10 11" opacity=".3"/>
+    <g stroke-width="2" opacity=".7">
+      <circle cx="626" cy="177" r="13"/><path d="M600 177H652M626 151V203"/>
+      <circle cx="172" cy="623" r="13"/><circle cx="207" cy="623" r="13"/><path d="M146 623H233M172 597V649M207 597V649"/>
+      <circle cx="975" cy="924" r="15"/><circle cx="975" cy="924" r="10"/><path d="M947 924H1003M975 896V952M955 904L995 944M995 904L955 944"/>
+    </g>
+  </g>
+</svg>
