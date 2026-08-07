@@ -144,10 +144,10 @@
   }
 
   .wordmark {
-    position: relative;
     min-height: 44px;
     display: inline-flex;
     align-items: center;
+    gap: .48rem;
     font-family: var(--display);
     font-size: 1.55rem;
     font-weight: 700;
@@ -155,15 +155,7 @@
     text-decoration: none;
   }
 
-  .wordmark::before {
-    width: 1.15rem;
-    height: 1.55rem;
-    margin-right: .48rem;
-    border: 2px solid var(--oxidized);
-    border-bottom: 0;
-    border-radius: 1rem 1rem 0 0;
-    content: "";
-  }
+  .wordmark img { width: 2rem; height: 2rem; flex: 0 0 auto; }
 
   #site-nav { display: flex; align-items: center; gap: .2rem; }
 

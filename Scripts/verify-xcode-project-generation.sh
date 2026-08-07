@@ -51,7 +51,36 @@ if ! awk '/^[[:space:]]*PRODUCT_TYPE[[:space:]]*=[[:space:]]*com\.apple\.product
   exit 1
 fi
 
+app_settings="$(xcodebuild -showBuildSettings -project "$project_path" -target Portico -configuration Debug)"
+if ! awk '/^[[:space:]]*ASSETCATALOG_COMPILER_APPICON_NAME[[:space:]]*=[[:space:]]*AppIcon$/ { found = 1 } END { exit !found }' <<<"$app_settings"; then
+  echo "Portico must compile the AppIcon layered icon" >&2
+  exit 1
+fi
+
+app_icon="$repo_root/PorticoLauncher/AppIcon.icon"
+if [[ ! -f "$app_icon/icon.json" ]]; then
+  echo "Portico is missing its layered AppIcon.icon" >&2
+  exit 1
+fi
+
+icon_layers="$(python3 -c 'import json, pathlib, sys; data = json.loads(pathlib.Path(sys.argv[1]).read_text()); print(*(layer["image-name"] for group in data["groups"] for layer in group["layers"]), sep="\n")' "$app_icon/icon.json")"
+if [[ -z "$icon_layers" ]]; then
+  echo "AppIcon does not declare any layers" >&2
+  exit 1
+fi
+
+while IFS= read -r layer; do
+  if [[ ! -f "$app_icon/Assets/$layer" ]]; then
+    echo "AppIcon is missing $layer" >&2
+    exit 1
+  fi
+done <<<"$icon_layers"
+
 project_metadata="$project_path/project.pbxproj"
+if ! grep -Fq 'AppIcon.icon' "$project_metadata"; then
+  echo "Generated project is missing AppIcon.icon" >&2
+  exit 1
+fi
 library_target_id="$(awk '
   /\/\* PorticoApplication \*\/ = \{$/ { candidate = $1; in_target = 1; next }
   in_target && /isa = PBXNativeTarget;/ { native_target = 1 }
