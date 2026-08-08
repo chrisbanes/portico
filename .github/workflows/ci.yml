@@ -27,14 +27,10 @@ jobs:
           go-version: '1.26.5'
           cache: false
 
-      - name: Install XcodeGen 2.46.0
+      - name: Install XcodeGen with Homebrew
         run: |
-          curl --fail --location --retry 3 --output xcodegen.zip \
-            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
-          echo '4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  xcodegen.zip' | shasum -a 256 -c -
-          unzip -q xcodegen.zip
-          xcodegen/bin/xcodegen --version
-          echo "$PWD/xcodegen/bin" >> "$GITHUB_PATH"
+          brew install xcodegen
+          xcodegen --version
 
       - name: Generate Xcode project
         run: ./Scripts/generate-xcode-project.sh

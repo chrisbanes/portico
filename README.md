@@ -84,7 +84,7 @@ Prerequisites:
 
 - Xcode 26.3 selected with `xcode-select`
 - Go 1.26.5
-- [XcodeGen 2.46.0](https://github.com/yonaskolb/XcodeGen/releases/tag/2.46.0)
+- XcodeGen (`brew install xcodegen`)
 
 Generate the local Xcode project, build, and launch:
 
