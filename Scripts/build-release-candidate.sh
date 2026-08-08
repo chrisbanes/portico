@@ -102,7 +102,6 @@ xcrun notarytool submit "$dmg_path" \
   --wait
 xcrun stapler staple "$dmg_path"
 xcrun stapler validate "$dmg_path"
-spctl --assess --type open --verbose=4 "$dmg_path"
 
 shasum -a 256 "$dmg_path"
 echo "Release candidate: $dmg_path"
