@@ -101,7 +101,7 @@ xcrun notarytool submit "$dmg_path" \
   --issuer "$APPLE_NOTARY_ISSUER_ID" \
   --wait
 xcrun stapler staple "$dmg_path"
-xcrun stapler validate "$dmg_path"
+./Scripts/verify-release-artifact.sh "$version" "$dmg_path"
 
 shasum -a 256 "$dmg_path"
 echo "Release candidate: $dmg_path"

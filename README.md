@@ -65,14 +65,13 @@ private doorway; it does not add a second application-level authorization layer.
 
 ## Current status
 
-Portico is in active development and is not yet packaged as a public release.
+Portico is in active development and no public preview has been published yet.
 The repository is the source of truth for the current executable, helper, and
-MVP behavior. The planned release and installation flow will be documented when
-it is ready.
+MVP behavior.
 
 You will need:
 
-- An Apple silicon Mac running macOS 14 or later.
+- A Mac running macOS 14 or later.
 - A Tailscale tailnet with MagicDNS and HTTPS certificates enabled.
 - A web service reachable from the Mac.
 
@@ -120,11 +119,45 @@ xcodebuild \
 For the generated-project check and local app smoke test, see the scripts in
 [`Scripts/`](Scripts/).
 
-## Release candidates
+## Public previews
 
-Release candidates are built as universal macOS 14+ applications. The helper
-is built for arm64 and x86_64, embedded in Portico.app, signed before the app,
-and distributed in a notarized DMG. The credentialed release command is:
+A public preview is a universal macOS 14+ application. The helper is built for
+arm64 and x86_64, embedded in Portico.app, signed before the app, and
+distributed in one notarized DMG. The direct download and Homebrew cask use
+that same DMG; Portico does not check for, download, or install updates itself.
+After the first public preview exists, Homebrew users can install or update it
+with:
+
+```shell
+brew install --cask chrisbanes/tap/portico
+```
+
+The **Publish public preview** workflow is the only publishing path. It must be
+dispatched manually with a `0.x.y` version and the full 40-character commit ID
+to release. This allows the first public preview to be validated end to end from
+a PR before it lands; retain that commit on `main` when merging the PR. Before
+it creates a public GitHub Release or changes the tap, the workflow runs the
+Swift and Go suites, builds, signs, notarizes, staples, mounts, and verifies the
+exact DMG.
+It then verifies the uploaded draft asset and audits the generated cask before
+publishing the normal GitHub Release. It clean-installs the cask before
+committing its version, URL, and SHA-256 to `chrisbanes/homebrew-tap`; a retry
+for the same version and source commit resumes a release whose tap update did
+not complete.
+
+Keep these repository secrets outside the repository. The `public-release`
+environment still protects the manual publishing job:
+
+- `APPLE_SIGNING_CERTIFICATE_BASE64`
+- `APPLE_SIGNING_CERTIFICATE_PASSWORD`
+- `APPLE_NOTARY_KEY_BASE64`
+- `APPLE_NOTARY_KEY_ID`
+- `APPLE_NOTARY_ISSUER_ID`
+- `HOMEBREW_TAP_TOKEN` — an expiring fine-grained token with Contents write
+  access only to `chrisbanes/homebrew-tap`
+
+The local credentialed build remains useful for verifying release material
+before dispatching the workflow:
 
 ```shell
 DEVELOPER_ID_APPLICATION='Developer ID Application: …' \
@@ -135,10 +168,8 @@ APPLE_NOTARY_ISSUER_ID=… \
 ```
 
 Keep the Developer ID certificate and App Store Connect team API key outside
-the repository. The **Release candidate** workflow reconstructs them from
-repository secrets and uploads its notarized DMG only to that workflow run; it
-does not create a GitHub Release or update Homebrew. Before configuring
-credentials, the universal helper build can be verified locally with:
+the repository. Before configuring credentials, the universal helper build can
+be verified locally with:
 
 ```shell
 ./Scripts/verify-universal-helper.sh
