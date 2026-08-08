@@ -5,7 +5,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 derived_data="$repo_root/.build/xcode"
-app="$derived_data/Build/Products/Debug/Portico.app"
+app="${PORTICO_APP_PATH:-$derived_data/Build/Products/Debug/Portico.app}"
 app_executable="$app/Contents/MacOS/Portico"
 helper="$app/Contents/Helpers/portico-helper"
 app_pid=""
@@ -22,15 +22,17 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$repo_root"
-./Scripts/generate-xcode-project.sh
-xcodebuild \
-  -project Portico.xcodeproj \
-  -scheme Portico \
-  -destination 'platform=macOS,arch=arm64' \
-  -derivedDataPath "$derived_data" \
-  ONLY_ACTIVE_ARCH=YES \
-  ARCHS=arm64 \
-  build
+if [[ -z "${PORTICO_APP_PATH:-}" ]]; then
+  ./Scripts/generate-xcode-project.sh
+  xcodebuild \
+    -project Portico.xcodeproj \
+    -scheme Portico \
+    -destination 'platform=macOS,arch=arm64' \
+    -derivedDataPath "$derived_data" \
+    ONLY_ACTIVE_ARCH=YES \
+    ARCHS=arm64 \
+    build
+fi
 
 [[ -x "$app_executable" ]] || { echo "Portico app executable is missing" >&2; exit 1; }
 [[ -x "$helper" ]] || { echo "Bundled helper is missing or not executable" >&2; exit 1; }

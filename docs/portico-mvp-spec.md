@@ -596,9 +596,13 @@ runtime, verify both signatures, notarize the final ZIP or DMG, and staple the
 ticket where supported. Issue #11 owns this signed-app work, including the
 production `SMAppService.mainApp` registration smoke check.
 
-A Homebrew cask can consume the same notarized versioned artifact. Mac App
-Store sandbox feasibility is a separate investigation; it must not change the
-MVP process boundary until proven practical.
+The initial Homebrew cask will live in
+[`chrisbanes/homebrew-tap`](https://github.com/chrisbanes/homebrew-tap) and
+consume the same notarized versioned artifact. It must retain a concrete
+version and SHA-256 checksum; the tap is an installation channel, not a second
+build or release pipeline. Mac App Store sandbox feasibility is a separate
+investigation; it must not change the MVP process boundary until proven
+practical.
 
 ## Unresolved risks
 
