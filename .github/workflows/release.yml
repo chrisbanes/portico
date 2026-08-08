@@ -228,7 +228,7 @@ jobs:
           app_directory="$RUNNER_TEMP/Applications"
           installed=false
           for attempt in 1 2 3; do
-            if HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask --no-quarantine --appdir="$app_directory" chrisbanes/tap/portico; then
+            if HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask --appdir="$app_directory" chrisbanes/tap/portico; then
               installed=true
               break
             fi
