@@ -30,7 +30,9 @@
   readiness, and polished error recovery.
 - Automate universal helper builds, inside-out signing, notarization, release
   verification, and versioned DMG or ZIP publication.
-- Publish a Homebrew cask and a support/troubleshooting guide.
+- Publish the initial Homebrew cask in
+  [`chrisbanes/homebrew-tap`](https://github.com/chrisbanes/homebrew-tap) and a
+  support/troubleshooting guide.
 - Complete legal naming clearance and third-party licence notices.
 
 ## Later evaluation

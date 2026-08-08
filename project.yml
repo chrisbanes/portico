@@ -39,8 +39,12 @@ targets:
         CODE_SIGNING_REQUIRED: "NO"
         ENABLE_USER_SCRIPT_SANDBOXING: "NO"
         GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        INFOPLIST_KEY_CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         INFOPLIST_KEY_LSUIElement: "YES"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
+        MARKETING_VERSION: 0.0.0
+        CURRENT_PROJECT_VERSION: 1
         ONLY_ACTIVE_ARCH: "YES"
         PRODUCT_BUNDLE_IDENTIFIER: dev.chrisbanes.Portico
         PRODUCT_NAME: "$(TARGET_NAME)"
@@ -59,10 +63,7 @@ targets:
         script: |
           set -euo pipefail
           helper_output="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/portico-helper"
-          mkdir -p "$(dirname "${helper_output}")"
-          cd "${SRCROOT}/helper"
-          GOCACHE="${DERIVED_FILE_DIR}/go-build-cache" GOMODCACHE="${SRCROOT}/helper/.build/go-mod-cache" go build -trimpath -o "${helper_output}" ./cmd/portico-helper
-          chmod 755 "${helper_output}"
+          PORTICO_GO_BUILD_CACHE="${DERIVED_FILE_DIR}/go-build-cache" PORTICO_GO_MOD_CACHE="${SRCROOT}/helper/.build/go-mod-cache" ARCHS="${ARCHS}" CURRENT_ARCH="${CURRENT_ARCH}" "${SRCROOT}/Scripts/build-helper.sh" "${helper_output}"
 
   PorticoTests:
     type: bundle.unit-test

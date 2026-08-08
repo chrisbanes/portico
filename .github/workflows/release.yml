@@ -1,0 +1,100 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Preview version to build and notarize (for example, 0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release-candidate:
+    name: Build and notarize preview DMG
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Validate preview version
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^0\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must be a 0.x.y preview, such as 0.1.0" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: Set up Go 1.26.5 for embedded helper
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.5'
+          cache: false
+
+      - name: Install XcodeGen with Homebrew
+        run: |
+          set -euo pipefail
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Import signing certificate and notarization key
+        env:
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.APPLE_SIGNING_CERTIFICATE_BASE64 }}
+          APPLE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/portico-signing.p12"
+          keychain_path="$RUNNER_TEMP/portico-release.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          notary_key_path="$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+
+          printf '%s' "$APPLE_SIGNING_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
+          printf '%s' "$APPLE_NOTARY_KEY_BASE64" | base64 -D > "$notary_key_path"
+          chmod 600 "$certificate_path" "$notary_key_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_SIGNING_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+
+          signing_identity="$(security find-identity -v -p codesigning "$keychain_path" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)"
+          if [[ -z "$signing_identity" ]]; then
+            echo "Imported certificate does not provide a Developer ID Application identity" >&2
+            exit 1
+          fi
+
+          {
+            echo "APPLE_NOTARY_KEY_PATH=$notary_key_path"
+            echo "DEVELOPER_ID_APPLICATION=$signing_identity"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, sign, and notarize DMG
+        env:
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+        run: ./Scripts/build-release-candidate.sh "$VERSION" "$RUNNER_TEMP/release"
+
+      - name: Upload notarized DMG
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Portico-${{ env.VERSION }}-notarized-dmg
+          path: ${{ runner.temp }}/release/Portico-${{ env.VERSION }}.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove imported credentials
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/portico-release.keychain-db" || true
+          rm -f "$RUNNER_TEMP/portico-signing.p12" "$RUNNER_TEMP"/AuthKey_*.p8
