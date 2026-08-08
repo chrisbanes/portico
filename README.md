@@ -137,10 +137,8 @@ APPLE_NOTARY_ISSUER_ID=… \
 Keep the Developer ID certificate and App Store Connect team API key outside
 the repository. The **Release candidate** workflow reconstructs them from
 repository secrets and uploads its notarized DMG only to that workflow run; it
-does not create a GitHub Release or update Homebrew. While testing the initial
-setup, it also runs for same-repository pull requests; that temporary trigger
-will be removed before this change lands. Before configuring credentials, the
-universal helper build can be verified locally with:
+does not create a GitHub Release or update Homebrew. Before configuring
+credentials, the universal helper build can be verified locally with:
 
 ```shell
 ./Scripts/verify-universal-helper.sh

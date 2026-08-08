@@ -1,10 +1,6 @@
 name: Release candidate
 
 on:
-  # Temporary: exercise signing and notarization from this PR before merging.
-  # Remove this trigger and the same-repository PR guard below before landing.
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -15,19 +11,14 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
   release-candidate:
     name: Build and notarize preview DMG
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-26
     timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
-      VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || format('0.0.{0}', github.run_number) }}
+      VERSION: ${{ inputs.version }}
     steps:
       - name: Validate preview version
         run: |
