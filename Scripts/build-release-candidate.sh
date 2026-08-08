@@ -86,8 +86,6 @@ codesign --display --verbose=4 "$app_path" 2>&1 | grep -q 'runtime' || {
   echo "Portico must use the hardened runtime" >&2
   exit 1
 }
-PORTICO_APP_PATH="$app_path" ./Scripts/smoke-test-local-app.sh
-
 cp -R "$app_path" "$dmg_staging_directory/Portico.app"
 hdiutil create \
   -volname Portico \

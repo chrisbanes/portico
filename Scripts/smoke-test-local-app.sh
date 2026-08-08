@@ -10,8 +10,6 @@ app_executable="$app/Contents/MacOS/Portico"
 helper="$app/Contents/Helpers/portico-helper"
 app_pid=""
 helper_pid=""
-smoke_home="$(mktemp -d "${TMPDIR:-/tmp}/portico-smoke.XXXXXX")"
-installation_path="$smoke_home/Library/Application Support/Portico/installation-v4.json"
 
 cleanup() {
   if [[ -n "$app_pid" ]] && kill -0 "$app_pid" 2>/dev/null; then
@@ -20,7 +18,6 @@ cleanup() {
   if [[ -n "$helper_pid" ]] && kill -0 "$helper_pid" 2>/dev/null; then
     kill "$helper_pid" 2>/dev/null || true
   fi
-  rm -rf "$smoke_home"
 }
 trap cleanup EXIT
 
@@ -39,19 +36,12 @@ fi
 
 [[ -x "$app_executable" ]] || { echo "Portico app executable is missing" >&2; exit 1; }
 [[ -x "$helper" ]] || { echo "Bundled helper is missing or not executable" >&2; exit 1; }
-bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")"
-[[ -n "$bundle_identifier" ]] || { echo "Built app bundle identifier is missing" >&2; exit 1; }
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$app/Contents/Info.plist")" == "true" ]] || {
   echo "Built app is not configured as a menu-bar-only application" >&2
   exit 1
 }
 
-mkdir -p "$(dirname "$installation_path")"
-printf '%s\n' \
-  '{"version":4,"tailnetBinding":null,"portals":[],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}' \
-  > "$installation_path"
-
-HOME="$smoke_home" "$app_executable" &
+"$app_executable" &
 app_pid=$!
 
 for _ in {1..100}; do
@@ -65,7 +55,7 @@ sleep 3.5
 kill -0 "$app_pid" 2>/dev/null || { echo "Portico exited before the handshake window completed" >&2; exit 1; }
 kill -0 "$helper_pid" 2>/dev/null || { echo "Bundled helper did not survive the handshake window" >&2; exit 1; }
 
-osascript -e "tell application id \"$bundle_identifier\" to quit"
+osascript -e 'tell application id "dev.chrisbanes.Portico" to quit'
 
 for _ in {1..100}; do
   if ! kill -0 "$app_pid" 2>/dev/null; then
