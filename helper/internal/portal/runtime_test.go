@@ -1036,16 +1036,25 @@ func TestRuntimeCloseReturnsListenerFailure(t *testing.T) {
 
 func TestRuntimeCloseCancelsActiveRequest(t *testing.T) {
 	requestEntered := make(chan struct{})
-	handlerExited := make(chan struct{})
-	runtime, proxyURL, factory := newOnlineRuntimeWithLocalApp(t, http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
-		close(requestEntered)
-		<-request.Context().Done()
-		close(handlerExited)
-	}))
+	cancellationDelivered := make(chan struct{})
+	transport := &cancellationTrackingTransport{
+		transport: http.DefaultTransport,
+		canceled:  cancellationDelivered,
+	}
+	var cancellationDeliveredBeforeNode bool
+	runtime, proxyURL, factory := newOnlineRuntimeWithLocalAppWithProxy(t,
+		http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+			close(requestEntered)
+			<-request.Context().Done()
+		}),
+		func(destination Destination) (http.Handler, error) {
+			return newLoopbackProxyWithTransport(int(destination.Port), transport)
+		},
+	)
 	factory.node.observeClose = func() {
 		select {
-		case <-handlerExited:
-			factory.node.handlersExitedBeforeNode = true
+		case <-cancellationDelivered:
+			cancellationDeliveredBeforeNode = true
 		default:
 		}
 	}
@@ -1061,13 +1070,12 @@ func TestRuntimeCloseCancelsActiveRequest(t *testing.T) {
 	waitForSignal(t, requestEntered, "active Local App request")
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- runtime.Close() }()
-	waitForSignal(t, handlerExited, "active Local App handler exit")
 	if err := waitForRuntimeClose(t, closeDone); err != nil {
 		t.Fatal(err)
 	}
 	_ = waitForError(t, requestDone, "client request")
-	if !factory.node.handlersExitedBeforeNode {
-		t.Fatal("tsnet node closed before the active proxy handler exited")
+	if !cancellationDeliveredBeforeNode {
+		t.Fatal("tsnet node closed before cancellation reached the active Local App proxy request")
 	}
 }
 
@@ -1138,18 +1146,36 @@ func TestRuntimeCloseClosesWebSocket(t *testing.T) {
 
 func TestRuntimeCloseCancelsActiveRemoteAppRequestBeforeNodeClose(t *testing.T) {
 	requestEntered := make(chan struct{})
-	handlerExited := make(chan struct{})
+	cancellationDelivered := make(chan struct{})
 	remote := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
 		close(requestEntered)
 		<-request.Context().Done()
-		close(handlerExited)
 	}))
 	t.Cleanup(remote.Close)
-	runtime, proxyURL, factory, _ := newOnlineRuntimeWithRemoteApp(t, remote, func(Event) {})
+	remoteURL, err := url.Parse(remote.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+	baseTransport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, remoteURL.Host)
+	}
+	transport := &cancellationTrackingTransport{
+		transport: baseTransport,
+		canceled:  cancellationDelivered,
+	}
+	var cancellationDeliveredBeforeNode bool
+	runtime, proxyURL, factory, _ := newOnlineRuntimeWithRemoteAppWithProxy(t, remote, func(Event) {}, func(destination Destination) (http.Handler, error) {
+		target := &url.URL{
+			Scheme: destination.Scheme,
+			Host:   net.JoinHostPort(destination.Host, strconv.Itoa(int(destination.Port))),
+		}
+		return newRemoteProxy(target, transport), nil
+	})
 	factory.node.observeClose = func() {
 		select {
-		case <-handlerExited:
-			factory.node.handlersExitedBeforeNode = true
+		case <-cancellationDelivered:
+			cancellationDeliveredBeforeNode = true
 		default:
 		}
 	}
@@ -1165,13 +1191,12 @@ func TestRuntimeCloseCancelsActiveRemoteAppRequestBeforeNodeClose(t *testing.T) 
 	waitForSignal(t, requestEntered, "active Remote App request")
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- runtime.Close() }()
-	waitForSignal(t, handlerExited, "active Remote App handler exit")
 	if err := waitForRuntimeClose(t, closeDone); err != nil {
 		t.Fatal(err)
 	}
 	_ = waitForError(t, requestDone, "Remote App client request")
-	if !factory.node.handlersExitedBeforeNode {
-		t.Fatal("tsnet node closed before the active Remote App handler exited")
+	if !cancellationDeliveredBeforeNode {
+		t.Fatal("tsnet node closed before cancellation reached the active Remote App proxy request")
 	}
 }
 
@@ -1363,6 +1388,14 @@ func assertRemoteAppResponse(t *testing.T, baseURL, path string, wantStatus int,
 }
 
 func newOnlineRuntimeWithLocalApp(t *testing.T, handler http.Handler) (*Runtime, string, *fakeFactory) {
+	return newOnlineRuntimeWithLocalAppWithProxy(t, handler, nil)
+}
+
+func newOnlineRuntimeWithLocalAppWithProxy(
+	t *testing.T,
+	handler http.Handler,
+	proxyForDestination func(Destination) (http.Handler, error),
+) (*Runtime, string, *fakeFactory) {
 	t.Helper()
 	localApp := httptest.NewServer(handler)
 	t.Cleanup(localApp.Close)
@@ -1379,6 +1412,9 @@ func newOnlineRuntimeWithLocalApp(t *testing.T, handler http.Handler) (*Runtime,
 	}
 	factory.node.realListener = listener
 	runtime := NewRuntime(t.TempDir(), factory.New)
+	if proxyForDestination != nil {
+		runtime.proxyForDestination = proxyForDestination
+	}
 	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(uint16(port))}, func(Event) {}); err != nil {
 		_ = listener.Close()
 		t.Fatal(err)
@@ -1391,6 +1427,15 @@ func newOnlineRuntimeWithRemoteApp(
 	t *testing.T,
 	remote *httptest.Server,
 	emit func(Event),
+) (*Runtime, string, *fakeFactory, *closeTrackingTransport) {
+	return newOnlineRuntimeWithRemoteAppWithProxy(t, remote, emit, nil)
+}
+
+func newOnlineRuntimeWithRemoteAppWithProxy(
+	t *testing.T,
+	remote *httptest.Server,
+	emit func(Event),
+	proxyForDestination func(Destination) (http.Handler, error),
 ) (*Runtime, string, *fakeFactory, *closeTrackingTransport) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1424,6 +1469,9 @@ func newOnlineRuntimeWithRemoteApp(
 			Host:   net.JoinHostPort(destination.Host, strconv.Itoa(int(destination.Port))),
 		}
 		return newRemoteProxy(target, trackedTransport), nil
+	}
+	if proxyForDestination != nil {
+		runtime.proxyForDestination = proxyForDestination
 	}
 	if err := reconcileOne(runtime, Config{
 		ID:          testPortalID,
@@ -1536,7 +1584,6 @@ type fakeNode struct {
 	realListener              net.Listener
 	listenerClosedBeforeNode  bool
 	observeClose              func()
-	handlersExitedBeforeNode  bool
 }
 
 func (n *fakeNode) clone() *fakeNode {
@@ -1638,3 +1685,25 @@ func (w *fakeWatcher) Next() (Notification, error) {
 }
 func (w *fakeWatcher) Close() error                   { close(w.ch); return nil }
 func (w *fakeWatcher) send(notification Notification) { w.ch <- notification }
+
+type cancellationTrackingTransport struct {
+	transport  http.RoundTripper
+	canceled   chan struct{}
+	cancelOnce sync.Once
+}
+
+func (t *cancellationTrackingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := t.transport.RoundTrip(request)
+	select {
+	case <-request.Context().Done():
+		t.cancelOnce.Do(func() { close(t.canceled) })
+	default:
+	}
+	return response, err
+}
+
+func (t *cancellationTrackingTransport) CloseIdleConnections() {
+	if transport, ok := t.transport.(interface{ CloseIdleConnections() }); ok {
+		transport.CloseIdleConnections()
+	}
+}

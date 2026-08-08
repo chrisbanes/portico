@@ -18,11 +18,16 @@ import (
 const proxyShutdownTimeout = 500 * time.Millisecond
 
 func newLoopbackProxy(port int) (http.Handler, error) {
+	return newLoopbackProxyWithTransport(port, nil)
+}
+
+func newLoopbackProxyWithTransport(port int, transport http.RoundTripper) (http.Handler, error) {
 	if port < 1 || port > 65535 {
 		return nil, errors.New("invalid Local App port")
 	}
 	target := loopbackDestination(port)
 	proxy := &httputil.ReverseProxy{
+		Transport: transport,
 		Rewrite: func(request *httputil.ProxyRequest) {
 			request.SetURL(target)
 			request.SetXForwarded()
