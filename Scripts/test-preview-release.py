@@ -134,6 +134,19 @@ end
         self.assertNotIn("git merge-base --is-ancestor", release_workflow)
         self.assertEqual(release_workflow.count("if: env.RELEASE_HAS_ASSET != 'true'"), 6)
 
+    def test_clean_cask_smoke_test_configures_and_restores_helper_state(self) -> None:
+        release_workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        smoke_test = (REPOSITORY_ROOT / "Scripts" / "smoke-test-local-app.sh").read_text(encoding="utf-8")
+
+        self.assertIn("prepare_smoke_state", release_workflow)
+        self.assertIn('"operationalLogging":"disabled"', release_workflow)
+        self.assertIn("restore_smoke_state", release_workflow)
+        self.assertLess(
+            release_workflow.index("\n          prepare_smoke_state\n"),
+            release_workflow.index("PORTICO_APP_PATH=\"$app_directory/Portico.app\""),
+        )
+        self.assertIn('pgrep -P "$app_pid" -x portico-helper', smoke_test)
+
 
 if __name__ == "__main__":
     unittest.main()
