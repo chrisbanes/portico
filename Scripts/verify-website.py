@@ -75,21 +75,29 @@ class Page(HTMLParser):
         self.text: list[str] = []
         self._in_h1 = False
         self.h1: list[str] = []
+        self._in_title = False
+        self.title: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = {name: value or "" for name, value in attrs}
         self.tags.append((tag, attributes))
         if tag == "h1":
             self._in_h1 = True
+        if tag == "title":
+            self._in_title = True
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "h1":
             self._in_h1 = False
+        if tag == "title":
+            self._in_title = False
 
     def handle_data(self, data: str) -> None:
         self.text.append(data)
         if self._in_h1:
             self.h1.append(data)
+        if self._in_title:
+            self.title.append(data)
 
 
 def require(condition: bool, message: str) -> None:
@@ -153,7 +161,26 @@ def structure() -> None:
     require("Preview instructions" in text, "missing Preview instructions")
     require("selected working name" in text and "legally cleared" in text, "missing working-name disclaimer")
     require(any(values.get("href") == "https://github.com/chrisbanes/portico" for tag, values in document.tags if tag == "a"), "missing GitHub URL")
-    require(len(document.h1) == 1 and "".join(document.h1).strip() == "Your local apps, through a private door.", "expected exactly one approved H1")
+    require(len(document.h1) == 1 and "".join(document.h1).strip() == "Give your Mac apps a private URL.", "expected exactly one approved H1")
+    require(any(tag == "a" and values.get("href") == "#how-it-works" and values.get("class") == "button" for tag, values in document.tags), "missing workflow CTA")
+    require("first-portal" in text and "first-portal-1" in text, "missing canonical Portal identity example")
+    require("https://first-portal-1.<tailnet>.ts.net" in text, "missing Assigned Name Portal URL example")
+    require("Assigned Name may differ" in text and "URL follows Assigned Name" in text, "missing Portal Name and Assigned Name explanation")
+    require(not any("data-reveal" in values for _, values in document.tags), "reveal attributes must not control content visibility")
+    require(not any("app-window" in values.get("class", "").split() for _, values in document.tags), "simulated app window must be removed")
+    feature_articles = [values for tag, values in document.tags if tag == "article" and "feature-card" in values.get("class", "").split()]
+    require(len(feature_articles) == 3, "expected exactly three feature articles")
+    expected_screenshots = {
+        "assets/portal-detail.png": (1507, 1044),
+        "assets/add-portal.png": (1507, 1044),
+        "assets/menu-bar.png": (1325, 1187),
+    }
+    for source, (width, height) in expected_screenshots.items():
+        matches = [values for tag, values in document.tags if tag == "img" and values.get("src") == source]
+        require(len(matches) == 1, f"expected one local screenshot: {source}")
+        screenshot = matches[0]
+        require(screenshot.get("alt"), f"screenshot needs useful alt text: {source}")
+        require(screenshot.get("width") == str(width) and screenshot.get("height") == str(height), f"screenshot dimensions must be explicit: {source}")
     anchors = {values.get("href") for tag, values in document.tags if tag == "a"}
     for anchor in ("#how-it-works", "#features", "#install"):
         require(anchor in anchors, f"missing navigation anchor {anchor}")
@@ -184,29 +211,34 @@ def styles() -> None:
     stylesheet_path = WEBSITE / "styles.css"
     require(stylesheet_path.is_file(), "missing website/styles.css")
     stylesheet = stylesheet_path.read_text(encoding="utf-8")
-    for expected in ("--limestone", "--ink", "--oxidized", "--coral", ".skip-link", ":focus-visible", ".hero-portal", ".route-flow", ".app-window", ".feature-grid", "max-width: 760", "prefers-reduced-motion", "overflow-x: hidden"):
+    for expected in ("--navy", "--blue", "--sky", "--paper", "--ink", "--sans", ".skip-link", ":focus-visible", ".workflow-list", ".screen-frame", ".architecture-points", "max-width: 760", "min-height: 44px", "prefers-color-scheme: dark", "prefers-reduced-motion", "overflow-x: hidden"):
         require(expected in stylesheet, f"missing style {expected}")
+    for obsolete in ("--limestone", "--oxidized", ".hero-portal", ".app-window", ".feature-grid"):
+        require(obsolete not in stylesheet, f"obsolete style remains: {obsolete}")
 
 
 def behavior() -> None:
     script_path = WEBSITE / "script.js"
     require(script_path.is_file(), "missing website/script.js")
     script = script_path.read_text(encoding="utf-8")
-    for expected in ("document.documentElement.classList.add", "aria-expanded", "Escape", "IntersectionObserver", "prefers-reduced-motion"):
+    for expected in ("document.documentElement.classList.add", "aria-expanded", "Escape", "matchMedia"):
         require(expected in script, f"missing behavior {expected}")
+    for obsolete in ("IntersectionObserver", "data-reveal", "prefers-reduced-motion"):
+        require(obsolete not in script, f"obsolete behavior remains: {obsolete}")
 
 
 def metadata() -> None:
     document = page()
+    require("".join(document.title).strip() == "Portico - private URLs for Mac apps", "missing document title")
     expected = {
-        ("name", "description"): "Portico gives apps reachable from your Mac stable, private HTTPS addresses on your Tailscale tailnet.",
-        ("property", "og:title"): "Portico — your local apps, through a private door",
-        ("property", "og:description"): "Portico gives apps reachable from your Mac stable, private HTTPS addresses on your Tailscale tailnet.",
+        ("name", "description"): "Portico gives services reachable from your Mac stable, private HTTPS addresses on your Tailscale tailnet.",
+        ("property", "og:title"): "Portico - private URLs for Mac apps",
+        ("property", "og:description"): "Portico gives services reachable from your Mac stable, private HTTPS addresses on your Tailscale tailnet.",
         ("property", "og:type"): "website",
         ("property", "og:url"): "https://chrisbanes.github.io/portico/",
         ("property", "og:image"): "https://chrisbanes.github.io/portico/assets/og.png",
         ("name", "twitter:card"): "summary_large_image",
-        ("name", "theme-color"): "#e9e0cf",
+        ("name", "theme-color"): "#f4f7fb",
     }
     for (attribute, name), content in expected.items():
         require(any(tag == "meta" and values.get(attribute) == name and values.get("content") == content for tag, values in document.tags), f"missing metadata {name}")
