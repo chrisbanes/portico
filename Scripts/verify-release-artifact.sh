@@ -52,7 +52,7 @@ for binary in "$app_executable" "$helper_path"; do
     exit 1
   }
   codesign --verify --strict --verbose=2 "$binary"
-  codesign --display --verbose=4 "$binary" 2>&1 | grep -q 'flags=.*runtime' || {
+  codesign --display --verbose=4 "$binary" 2>&1 | grep 'flags=.*runtime' >/dev/null || {
     echo "Expected hardened runtime at $binary" >&2
     exit 1
   }
