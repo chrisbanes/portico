@@ -18,8 +18,18 @@ jobs:
     runs-on: macos-26
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      FASTLANE_SKIP_UPDATE_CHECK: 'true'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+
+      - name: Test release contract
+        run: python3 Scripts/test-release.py
 
       - name: Setup Go 1.26.5 for embedded helper
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
@@ -32,18 +42,8 @@ jobs:
           brew install xcodegen
           xcodegen --version
 
-      - name: Generate Xcode project
-        run: ./Scripts/generate-xcode-project.sh
-
-      - name: Test headless Swift unit suite
-        run: >
-          xcodebuild -project Portico.xcodeproj -scheme Portico
-          -destination 'platform=macOS' -derivedDataPath .build/xcode-unit test
-
-      - name: Test native Swift UI suite
-        run: >
-          xcodebuild -project Portico.xcodeproj -scheme 'Portico UI Tests'
-          -destination 'platform=macOS' -derivedDataPath .build/xcode-ui test
+      - name: Run Swift unit and native UI suites
+        run: bundle exec fastlane mac test
 
   go:
     name: Go

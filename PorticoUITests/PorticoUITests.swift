@@ -523,7 +523,6 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(disabledLogging.waitForExistence(timeout: 3), app.debugDescription)
         disabledLogging.click()
         XCTAssertTrue(waitForValue("Restarting", element: app.staticTexts["settings-helper-state"], timeout: 2))
-        app.typeKey("w", modifierFlags: .command)
         openMenuBarExtra(app)
         let compactHelperState = app.descendants(matching: .any)["helper-state"]
         XCTAssertTrue(waitForText("Restarting", element: compactHelperState, timeout: 2))

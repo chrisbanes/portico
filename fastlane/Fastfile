@@ -1,0 +1,202 @@
+require "digest"
+require "fileutils"
+require_relative "homebrew_tap"
+
+default_platform(:mac)
+opt_out_usage
+
+REPOSITORY = "chrisbanes/portico"
+ROOT = File.expand_path("..", __dir__)
+PROJECT = File.join(ROOT, "Portico.xcodeproj")
+ENV["HOMEBREW_NO_AUTO_UPDATE"] ||= "1"
+
+def script(name)
+  File.join(ROOT, "Scripts", name)
+end
+
+def require_environment(name)
+  value = ENV[name]
+  UI.user_error!("#{name} must be set") if value.nil? || value.empty?
+  value
+end
+
+def validate_version(version)
+  UI.user_error!("Version must be a 0.x.y release, such as 0.1.0") unless version.match?(/\A0\.(0|[1-9]\d*)\.(0|[1-9]\d*)\z/)
+end
+
+platform :mac do
+  desc "Run the Swift unit and native UI tests"
+  lane :test do
+    output_root = File.expand_path(ENV["RUNNER_TEMP"] || File.join(ROOT, ".build"))
+    sh(script("generate-xcode-project.sh"))
+    {
+      "Portico" => "xcode-unit",
+      "Portico UI Tests" => "xcode-ui"
+    }.each do |scheme, directory|
+      run_tests(
+        project: PROJECT,
+        scheme: scheme,
+        destination: "platform=macOS",
+        derived_data_path: File.join(output_root, directory),
+        output_directory: File.join(output_root, "test-results", directory)
+      )
+    end
+  end
+
+  desc "Build, sign, notarize, and verify a release DMG"
+  lane :build do |options|
+    version = options[:version] || ENV["VERSION"]
+    UI.user_error!("Pass version:<0.x.y> or set VERSION") if version.nil?
+    validate_version(version)
+
+    key_id = require_environment("APPLE_NOTARY_KEY_ID")
+    issuer_id = require_environment("APPLE_NOTARY_ISSUER_ID")
+    key_content = require_environment("APPLE_NOTARY_KEY_BASE64")
+    output_directory = File.expand_path(options[:output_directory] || File.join(ROOT, ".build/release"))
+    identity_output = sh("security", "find-identity", "-v", "-p", "codesigning")
+    signing_identity = identity_output[/"(Developer ID Application: [^"]+)"/, 1]
+    UI.user_error!("No Developer ID Application signing identity is available") if signing_identity.nil?
+
+    FileUtils.mkdir_p(output_directory)
+    archive_path = File.join(output_directory, "Portico.xcarchive")
+    app_path = File.join(archive_path, "Products/Applications/Portico.app")
+    app_executable = File.join(app_path, "Contents/MacOS/Portico")
+    helper_path = File.join(app_path, "Contents/Helpers/portico-helper")
+    derived_data_path = File.join(output_directory, "DerivedData")
+    staging_directory = File.join(output_directory, "dmg-root")
+    dmg_path = File.join(output_directory, "Portico-#{version}.dmg")
+
+    FileUtils.rm_rf([archive_path, derived_data_path, staging_directory])
+    FileUtils.rm_f(dmg_path)
+    FileUtils.mkdir_p(staging_directory)
+
+    sh(script("generate-xcode-project.sh"))
+    build_mac_app(
+      project: PROJECT,
+      scheme: "Portico",
+      configuration: "Release",
+      destination: "generic/platform=macOS",
+      archive_path: archive_path,
+      derived_data_path: derived_data_path,
+      output_directory: File.join(output_directory, "gym-output"),
+      skip_codesigning: true,
+      skip_package_pkg: true,
+      xcargs: "ARCHS='arm64 x86_64' MARKETING_VERSION=#{version} CURRENT_PROJECT_VERSION=1 ONLY_ACTIVE_ARCH=NO"
+    )
+
+    UI.user_error!("Packaged app executable is missing") unless File.executable?(app_executable)
+    UI.user_error!("Packaged helper is missing") unless File.executable?(helper_path)
+    packaged_version = sh("/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", File.join(app_path, "Contents/Info.plist")).strip
+    UI.user_error!("Expected app version #{version}, found #{packaged_version}") unless packaged_version == version
+
+    [app_executable, helper_path].each do |binary|
+      architectures = sh("lipo", "-archs", binary)
+      UI.user_error!("Expected universal binary at #{binary}, found: #{architectures.strip}") unless architectures.include?("arm64") && architectures.include?("x86_64")
+    end
+
+    sh("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", signing_identity, helper_path)
+    sh("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", signing_identity, app_path)
+    sh("codesign", "--verify", "--deep", "--strict", "--verbose=2", app_path)
+
+    FileUtils.cp_r(app_path, File.join(staging_directory, "Portico.app"))
+    sh("hdiutil", "create", "-volname", "Portico", "-srcfolder", staging_directory, "-ov", "-format", "UDZO", dmg_path)
+    sh("hdiutil", "verify", dmg_path)
+
+    api_key = app_store_connect_api_key(
+      key_id: key_id,
+      issuer_id: issuer_id,
+      key_content: key_content,
+      is_key_content_base64: true,
+      set_spaceship_token: false
+    )
+    notarize(package: dmg_path, bundle_id: "dev.chrisbanes.Portico", api_key: api_key, print_log: true)
+    sh(script("verify-release-artifact.sh"), version, dmg_path)
+    dmg_path
+  end
+
+  desc "Publish a GitHub release and its Homebrew cask"
+  lane :release do |options|
+    version = options[:version] || ENV["VERSION"]
+    UI.user_error!("Pass version:<0.x.y> or set VERSION") if version.nil?
+    validate_version(version)
+    source_commit = sh("git", "rev-parse", "HEAD").strip
+
+    github_token = require_environment("GH_TOKEN")
+    tap_token = require_environment("HOMEBREW_TAP_TOKEN")
+    tag = "v#{version}"
+    asset_name = "Portico-#{version}.dmg"
+    output_directory = File.join(require_environment("RUNNER_TEMP"), "release")
+    download_directory = File.join(require_environment("RUNNER_TEMP"), "release-download")
+
+    release_response = github_api(
+      path: "repos/#{REPOSITORY}/releases/tags/#{tag}",
+      api_bearer: github_token,
+      error_handlers: { 404 => proc {} }
+    )
+    release = release_response[:status] == 200 ? release_response[:json] : nil
+    if release
+      UI.user_error!("Existing GitHub Release does not target the requested source commit") unless release["target_commitish"] == source_commit
+    else
+      tag_response = github_api(
+        path: "repos/#{REPOSITORY}/git/ref/tags/#{tag}",
+        api_bearer: github_token,
+        error_handlers: { 404 => proc {} }
+      )
+      UI.user_error!("Release tag exists without a GitHub Release and cannot be resumed safely: #{tag}") if tag_response[:status] == 200
+    end
+
+    has_asset = !release.nil? && release.fetch("assets", []).any? { |asset| asset["name"] == asset_name }
+    dmg_path = if has_asset
+                 FileUtils.mkdir_p(output_directory)
+                 File.join(output_directory, asset_name)
+               else
+                 build(version: version, output_directory: output_directory)
+               end
+
+    if release.nil?
+      release = set_github_release(
+        repository_name: REPOSITORY,
+        api_bearer: github_token,
+        tag_name: tag,
+        name: "Portico #{version}",
+        commitish: source_commit,
+        description: "Portico #{version} is a release. Portico is a selected working name and has not yet been legally cleared.",
+        is_draft: true
+      )
+    end
+    sh("gh", "release", "upload", tag, dmg_path, "--repo", REPOSITORY) unless has_asset
+
+    FileUtils.rm_rf(download_directory)
+    FileUtils.mkdir_p(download_directory)
+    sh("gh", "release", "download", tag, "--repo", REPOSITORY, "--pattern", asset_name, "--dir", download_directory)
+    downloaded_dmg = File.join(download_directory, asset_name)
+    if has_asset
+      FileUtils.cp(downloaded_dmg, dmg_path)
+    else
+      sh("cmp", "--silent", dmg_path, downloaded_dmg)
+    end
+    sh(script("verify-release-artifact.sh"), version, dmg_path)
+
+    checksum = Digest::SHA256.file(dmg_path).hexdigest
+    begin
+      app_directory = File.join(require_environment("RUNNER_TEMP"), "Applications")
+      update_homebrew_tap(
+        version: version,
+        checksum: checksum,
+        tap_token: tap_token,
+        app_directory: app_directory
+      ) do
+        if release["draft"]
+          github_api(
+            path: "repos/#{REPOSITORY}/releases/#{release.fetch("id")}",
+            api_bearer: github_token,
+            http_method: "PATCH",
+            body: { draft: false }
+          )
+        end
+      end
+    ensure
+      FileUtils.rm_rf(download_directory)
+    end
+  end
+end

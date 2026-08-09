@@ -65,14 +65,14 @@ private doorway; it does not add a second application-level authorization layer.
 
 ## Current status
 
-Portico is in active development and is not yet packaged as a public release.
+Portico is in active development. The latest release is
+[`v0.0.2`](https://github.com/chrisbanes/portico/releases/tag/v0.0.2).
 The repository is the source of truth for the current executable, helper, and
-MVP behavior. The planned release and installation flow will be documented when
-it is ready.
+MVP behavior.
 
 You will need:
 
-- An Apple silicon Mac running macOS 14 or later.
+- A Mac running macOS 14 or later.
 - A Tailscale tailnet with MagicDNS and HTTPS certificates enabled.
 - A web service reachable from the Mac.
 
@@ -102,43 +102,62 @@ open .build/xcode/Build/Products/Debug/Portico.app
 Run the Swift unit tests, native UI tests, and Go helper tests:
 
 ```shell
-xcodebuild \
-  -project Portico.xcodeproj \
-  -scheme Portico \
-  -destination 'platform=macOS' \
-  -derivedDataPath .build/xcode-unit \
-  test
-xcodebuild \
-  -project Portico.xcodeproj \
-  -scheme 'Portico UI Tests' \
-  -destination 'platform=macOS' \
-  -derivedDataPath .build/xcode-ui \
-  test
+bundle install
+bundle exec fastlane mac test
 (cd helper && go build ./cmd/portico-helper && go test ./...)
 ```
 
 For the generated-project check and local app smoke test, see the scripts in
 [`Scripts/`](Scripts/).
 
-## Release candidates
+## Releases
 
-Release candidates are built as universal macOS 14+ applications. The helper
-is built for arm64 and x86_64, embedded in Portico.app, signed before the app,
-and distributed in a notarized DMG. The credentialed release command is:
+Each release is a universal macOS 14+ application. The helper is built for
+arm64 and x86_64, embedded in Portico.app, signed before the app, and
+distributed in one notarized DMG. The direct download and Homebrew cask use
+that same DMG; Portico does not check for, download, or install updates itself.
+Homebrew users can install or update it with:
 
 ```shell
-DEVELOPER_ID_APPLICATION='Developer ID Application: …' \
-APPLE_NOTARY_KEY_PATH=/path/to/AuthKey_….p8 \
+brew install --cask chrisbanes/tap/portico
+```
+
+The **Publish release** workflow is the only publishing path. It runs the
+Fastlane `mac release` lane and must be dispatched from `main` manually with a
+`0.x.y` version. It always releases `main`'s current commit. Before it creates a
+public GitHub Release or changes the tap, the workflow runs the Swift and Go
+suites, builds, signs, notarizes, staples, mounts, and verifies the exact DMG.
+It then verifies the uploaded draft asset and audits the generated cask before
+publishing the normal GitHub Release. It clean-installs the cask before
+committing its version, URL, and SHA-256 to `chrisbanes/homebrew-tap`; a retry
+for the same version and `main` commit resumes a release whose tap update did
+not complete.
+
+Keep these repository secrets outside the repository. The `public-release`
+environment still protects the manual publishing job:
+
+- `APPLE_SIGNING_CERTIFICATE_BASE64`
+- `APPLE_SIGNING_CERTIFICATE_PASSWORD`
+- `APPLE_NOTARY_KEY_BASE64`
+- `APPLE_NOTARY_KEY_ID`
+- `APPLE_NOTARY_ISSUER_ID`
+- `HOMEBREW_TAP_TOKEN` — an expiring fine-grained token with Contents write
+  access only to `chrisbanes/homebrew-tap`
+
+The Fastlane `mac build` lane can create the same credentialed release material
+locally without publishing it:
+
+```shell
+bundle install
+APPLE_NOTARY_KEY_BASE64="$(base64 < /path/to/AuthKey_….p8)" \
 APPLE_NOTARY_KEY_ID=… \
 APPLE_NOTARY_ISSUER_ID=… \
-./Scripts/build-release-candidate.sh 0.1.0 .build/release
+bundle exec fastlane mac build version:0.1.0
 ```
 
 Keep the Developer ID certificate and App Store Connect team API key outside
-the repository. The **Release candidate** workflow reconstructs them from
-repository secrets and uploads its notarized DMG only to that workflow run; it
-does not create a GitHub Release or update Homebrew. Before configuring
-credentials, the universal helper build can be verified locally with:
+the repository. Before configuring credentials, the universal helper build can
+be verified locally with:
 
 ```shell
 ./Scripts/verify-universal-helper.sh
