@@ -9,6 +9,7 @@ ROOT = Path(__file__).parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 RELEASE = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
 FASTFILE = (ROOT / "fastlane" / "Fastfile").read_text(encoding="utf-8")
+HOMEBREW_TAP = (ROOT / "fastlane" / "homebrew_tap.rb").read_text(encoding="utf-8")
 SMOKE_TEST = (ROOT / "Scripts" / "smoke-test-local-app.sh").read_text(encoding="utf-8")
 
 assert "workflow_dispatch:" in RELEASE
@@ -30,11 +31,6 @@ for required in (
     "run_tests(",
     "set_github_release(",
     'script("verify-release-artifact.sh")',
-    "https://github.com/chrisbanes/portico/releases/download/v\\#{version}/Portico-\\#{version}.dmg",
-    '"brew", "audit", "--cask", "--strict"',
-    '"operationalLogging":"disabled"',
-    'script("smoke-test-local-app.sh")',
-    '"push", "origin", "HEAD:main"',
 ):
     assert required in FASTFILE, required
 
@@ -42,13 +38,28 @@ ordered = (
     "build(version: version",
     "set_github_release(",
     "verify-release-artifact.sh",
-    '"brew", "audit", "--cask", "--strict"',
+    "update_homebrew_tap(",
     'body: { draft: false }',
-    "smoke-test-local-app.sh",
-    '"push", "origin", "HEAD:main"',
 )
 positions = [FASTFILE.index(marker, FASTFILE.index('lane :release')) for marker in ordered]
 assert positions == sorted(positions)
+
+for required in (
+    "https://github.com/chrisbanes/portico/releases/download/v\\#{version}/Portico-\\#{version}.dmg",
+    '"brew", "audit", "--cask", "--strict"',
+    '"operationalLogging":"disabled"',
+    '"push", "origin", "HEAD:main"',
+):
+    assert required in HOMEBREW_TAP, required
+
+tap_ordered = (
+    '"brew", "audit", "--cask", "--strict"',
+    "publish_release.call",
+    '"Scripts/smoke-test-local-app.sh"',
+    '"push", "origin", "HEAD:main"',
+)
+tap_positions = [HOMEBREW_TAP.index(marker) for marker in tap_ordered]
+assert tap_positions == sorted(tap_positions)
 assert 'pgrep -P "$app_pid" -x portico-helper' in SMOKE_TEST
 
 print("Portico release contract passed")
