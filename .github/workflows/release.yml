@@ -121,34 +121,27 @@ jobs:
       - name: Test release contract
         run: python3 Scripts/test-release.py
 
-      - name: Import signing certificate and notarization key
+      - name: Import signing certificate
+        if: env.RELEASE_HAS_ASSET != 'true'
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466
+        with:
+          keychain: portico-release
+          p12-file-base64: ${{ secrets.APPLE_SIGNING_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD }}
+
+      - name: Prepare notarization key and signing identity
         if: env.RELEASE_HAS_ASSET != 'true'
         env:
-          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-          APPLE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.APPLE_SIGNING_CERTIFICATE_BASE64 }}
-          APPLE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
-          certificate_path="$RUNNER_TEMP/portico-signing.p12"
-          keychain_path="$RUNNER_TEMP/portico-release.keychain-db"
-          keychain_password="$(openssl rand -hex 32)"
           notary_key_path="$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
 
-          printf '%s' "$APPLE_SIGNING_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
           printf '%s' "$APPLE_NOTARY_KEY_BASE64" | base64 -D > "$notary_key_path"
-          chmod 600 "$certificate_path" "$notary_key_path"
+          chmod 600 "$notary_key_path"
 
-          security create-keychain -p "$keychain_password" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain -p "$keychain_password" "$keychain_path"
-          security list-keychains -d user -s "$keychain_path"
-          security default-keychain -s "$keychain_path"
-          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_SIGNING_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
-
-          signing_identity="$(security find-identity -v -p codesigning "$keychain_path" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)"
+          signing_identity="$(security find-identity -v -p codesigning portico-release.keychain | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)"
           if [[ -z "$signing_identity" ]]; then
             echo "Imported certificate does not provide a Developer ID Application identity" >&2
             exit 1
@@ -303,10 +296,9 @@ jobs:
           git -C "$tap_directory" commit -m "Update portico to $VERSION"
           git -C "$tap_directory" push origin HEAD:main
 
-      - name: Remove imported credentials
+      - name: Remove temporary release state
         if: always()
         run: |
-          security delete-keychain "$RUNNER_TEMP/portico-release.keychain-db" || true
-          rm -f "$RUNNER_TEMP/portico-signing.p12" "$RUNNER_TEMP"/AuthKey_*.p8
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8
           brew untap chrisbanes/tap || true
           rm -rf "$RUNNER_TEMP/release-download"
