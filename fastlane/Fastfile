@@ -6,7 +6,13 @@ opt_out_usage
 
 REPOSITORY = "chrisbanes/portico"
 TAP = "chrisbanes/tap"
+ROOT = File.expand_path("..", __dir__)
+PROJECT = File.join(ROOT, "Portico.xcodeproj")
 ENV["HOMEBREW_NO_AUTO_UPDATE"] ||= "1"
+
+def script(name)
+  File.join(ROOT, "Scripts", name)
+end
 
 def require_environment(name)
   value = ENV[name]
@@ -23,6 +29,24 @@ def validate_source_commit(source_commit)
 end
 
 platform :mac do
+  desc "Run the Swift unit and native UI tests"
+  lane :test do
+    output_root = File.expand_path(ENV["RUNNER_TEMP"] || File.join(ROOT, ".build"))
+    sh(script("generate-xcode-project.sh"))
+    {
+      "Portico" => "xcode-unit",
+      "Portico UI Tests" => "xcode-ui"
+    }.each do |scheme, directory|
+      run_tests(
+        project: PROJECT,
+        scheme: scheme,
+        destination: "platform=macOS",
+        derived_data_path: File.join(output_root, directory),
+        output_directory: File.join(output_root, "test-results", directory)
+      )
+    end
+  end
+
   desc "Build, sign, notarize, and verify a release DMG"
   lane :build do |options|
     version = options[:version] || ENV["VERSION"]
@@ -32,7 +56,7 @@ platform :mac do
     key_id = require_environment("APPLE_NOTARY_KEY_ID")
     issuer_id = require_environment("APPLE_NOTARY_ISSUER_ID")
     key_content = require_environment("APPLE_NOTARY_KEY_BASE64")
-    output_directory = File.expand_path(options[:output_directory] || ".build/release")
+    output_directory = File.expand_path(options[:output_directory] || File.join(ROOT, ".build/release"))
     identity_output = sh("security", "find-identity", "-v", "-p", "codesigning")
     signing_identity = identity_output[/"(Developer ID Application: [^"]+)"/, 1]
     UI.user_error!("No Developer ID Application signing identity is available") if signing_identity.nil?
@@ -50,22 +74,18 @@ platform :mac do
     FileUtils.rm_f(dmg_path)
     FileUtils.mkdir_p(staging_directory)
 
-    sh("./Scripts/generate-xcode-project.sh")
-    sh(
-      "xcodebuild",
-      "-project", "Portico.xcodeproj",
-      "-scheme", "Portico",
-      "-configuration", "Release",
-      "-destination", "generic/platform=macOS",
-      "-archivePath", archive_path,
-      "-derivedDataPath", derived_data_path,
-      "ARCHS=arm64 x86_64",
-      "MARKETING_VERSION=#{version}",
-      "CURRENT_PROJECT_VERSION=1",
-      "ONLY_ACTIVE_ARCH=NO",
-      "CODE_SIGNING_ALLOWED=NO",
-      "CODE_SIGNING_REQUIRED=NO",
-      "archive"
+    sh(script("generate-xcode-project.sh"))
+    build_mac_app(
+      project: PROJECT,
+      scheme: "Portico",
+      configuration: "Release",
+      destination: "generic/platform=macOS",
+      archive_path: archive_path,
+      derived_data_path: derived_data_path,
+      output_directory: File.join(output_directory, "gym-output"),
+      skip_codesigning: true,
+      skip_package_pkg: true,
+      xcargs: "ARCHS='arm64 x86_64' MARKETING_VERSION=#{version} CURRENT_PROJECT_VERSION=1 ONLY_ACTIVE_ARCH=NO"
     )
 
     UI.user_error!("Packaged app executable is missing") unless File.executable?(app_executable)
@@ -94,7 +114,7 @@ platform :mac do
       set_spaceship_token: false
     )
     notarize(package: dmg_path, bundle_id: "dev.chrisbanes.Portico", api_key: api_key, print_log: true)
-    sh("./Scripts/verify-release-artifact.sh", version, dmg_path)
+    sh(script("verify-release-artifact.sh"), version, dmg_path)
     dmg_path
   end
 
@@ -162,7 +182,7 @@ platform :mac do
     else
       sh("cmp", "--silent", dmg_path, downloaded_dmg)
     end
-    sh("./Scripts/verify-release-artifact.sh", version, dmg_path)
+    sh(script("verify-release-artifact.sh"), version, dmg_path)
 
     checksum = Digest::SHA256.file(dmg_path).hexdigest
     cask = <<~CASK
@@ -221,7 +241,7 @@ platform :mac do
         '{"version":4,"portals":[],"alerts":[],"operationalLogging":"disabled","launchAtLoginOffer":"notOffered"}'
       )
       FastlaneCore::Helper.with_env_values("PORTICO_APP_PATH" => File.join(app_directory, "Portico.app")) do
-        sh("./Scripts/smoke-test-local-app.sh")
+        sh(script("smoke-test-local-app.sh"))
       end
 
       sh("git", "-C", tap_directory, "add", "--", "Casks/portico.rb")

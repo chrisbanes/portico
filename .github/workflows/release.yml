@@ -53,25 +53,11 @@ jobs:
       - name: Run prerequisite Swift and Go suites
         run: |
           set -euo pipefail
-          ./Scripts/generate-xcode-project.sh
-          xcodebuild \
-            -project Portico.xcodeproj \
-            -scheme Portico \
-            -destination 'platform=macOS' \
-            -derivedDataPath "$RUNNER_TEMP/xcode-unit" \
-            test
-          xcodebuild \
-            -project Portico.xcodeproj \
-            -scheme 'Portico UI Tests' \
-            -destination 'platform=macOS' \
-            -derivedDataPath "$RUNNER_TEMP/xcode-ui" \
-            test
+          bundle exec fastlane mac test
           (cd helper && go test ./...)
 
-      - name: Test release configuration
-        run: |
-          ruby -c fastlane/Fastfile
-          python3 Scripts/test-release.py
+      - name: Test release contract
+        run: python3 Scripts/test-release.py
 
       - name: Import signing certificate
         uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466

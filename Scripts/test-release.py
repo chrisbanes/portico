@@ -25,13 +25,15 @@ for required in (
     r"/\A0\.(0|[1-9]\d*)\.(0|[1-9]\d*)\z/",
     r"/\A[0-9a-f]{40}\z/",
     "app_store_connect_api_key(",
+    "build_mac_app(",
     "notarize(package:",
+    "run_tests(",
     "set_github_release(",
-    "./Scripts/verify-release-artifact.sh",
+    'script("verify-release-artifact.sh")',
     "https://github.com/chrisbanes/portico/releases/download/v\\#{version}/Portico-\\#{version}.dmg",
     '"brew", "audit", "--cask", "--strict"',
     '"operationalLogging":"disabled"',
-    "./Scripts/smoke-test-local-app.sh",
+    'script("smoke-test-local-app.sh")',
     '"push", "origin", "HEAD:main"',
 ):
     assert required in FASTFILE, required
@@ -42,7 +44,7 @@ ordered = (
     "verify-release-artifact.sh",
     '"brew", "audit", "--cask", "--strict"',
     'body: { draft: false }',
-    "./Scripts/smoke-test-local-app.sh",
+    "smoke-test-local-app.sh",
     '"push", "origin", "HEAD:main"',
 )
 positions = [FASTFILE.index(marker, FASTFILE.index('lane :release')) for marker in ordered]

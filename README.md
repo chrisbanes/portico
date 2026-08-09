@@ -102,18 +102,8 @@ open .build/xcode/Build/Products/Debug/Portico.app
 Run the Swift unit tests, native UI tests, and Go helper tests:
 
 ```shell
-xcodebuild \
-  -project Portico.xcodeproj \
-  -scheme Portico \
-  -destination 'platform=macOS' \
-  -derivedDataPath .build/xcode-unit \
-  test
-xcodebuild \
-  -project Portico.xcodeproj \
-  -scheme 'Portico UI Tests' \
-  -destination 'platform=macOS' \
-  -derivedDataPath .build/xcode-ui \
-  test
+bundle install
+bundle exec fastlane mac test
 (cd helper && go build ./cmd/portico-helper && go test ./...)
 ```
 
