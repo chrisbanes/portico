@@ -29,78 +29,28 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       VERSION: ${{ inputs.version }}
       SOURCE_COMMIT: ${{ inputs.source_commit }}
-      RELEASE_TAG: v${{ inputs.version }}
+      FASTLANE_SKIP_UPDATE_CHECK: 'true'
+      GH_TOKEN: ${{ github.token }}
+      HOMEBREW_NO_AUTO_UPDATE: '1'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ inputs.source_commit }}
-          fetch-depth: 0
 
-      - name: Validate immutable release inputs
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          [[ "$VERSION" =~ ^0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
-            echo "Version must be a 0.x.y release, such as 0.1.0" >&2
-            exit 1
-          }
-          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "Source commit must be a lowercase 40-character Git commit ID" >&2
-            exit 1
-          }
-          {
-            echo "RELEASE_EXISTS=false"
-            echo "RELEASE_IS_DRAFT=false"
-            echo "RELEASE_HAS_ASSET=false"
-          } >> "$GITHUB_ENV"
-          [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]] || {
-            echo "Checkout did not resolve to the requested source commit" >&2
-            exit 1
-          }
-          if release_info="$(gh release view "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json targetCommitish,isDraft,assets \
-            --template '{{.targetCommitish}}{{"\n"}}{{.isDraft}}{{"\n"}}{{range .assets}}{{.name}}{{"\n"}}{{end}}' \
-            2>/dev/null)"; then
-            release_target="${release_info%%$'\n'*}"
-            release_info="${release_info#*$'\n'}"
-            release_is_draft="${release_info%%$'\n'*}"
-            release_assets="${release_info#*$'\n'}"
-            [[ "$release_target" == "$SOURCE_COMMIT" ]] || {
-              echo "Existing GitHub Release does not target the requested source commit" >&2
-              exit 1
-            }
-            {
-              echo "RELEASE_EXISTS=true"
-              echo "RELEASE_IS_DRAFT=$release_is_draft"
-              if grep -Fxq "Portico-$VERSION.dmg" <<< "$release_assets"; then
-                echo "RELEASE_HAS_ASSET=true"
-              else
-                echo "RELEASE_HAS_ASSET=false"
-              fi
-            } >> "$GITHUB_ENV"
-          elif git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null; then
-            echo "Release tag exists without a GitHub Release and cannot be resumed safely: $RELEASE_TAG" >&2
-            exit 1
-          fi
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
 
-      - name: Set up Go 1.26.5 for embedded helper
-        if: env.RELEASE_HAS_ASSET != 'true'
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version: '1.26.5'
           cache: false
 
       - name: Install XcodeGen with Homebrew
-        if: env.RELEASE_HAS_ASSET != 'true'
-        run: |
-          set -euo pipefail
-          brew install xcodegen
-          xcodegen --version
+        run: brew install xcodegen
 
       - name: Run prerequisite Swift and Go suites
-        if: env.RELEASE_HAS_ASSET != 'true'
         run: |
           set -euo pipefail
           ./Scripts/generate-xcode-project.sh
@@ -118,187 +68,22 @@ jobs:
             test
           (cd helper && go test ./...)
 
-      - name: Test release contract
-        run: python3 Scripts/test-release.py
+      - name: Test release configuration
+        run: |
+          ruby -c fastlane/Fastfile
+          python3 Scripts/test-release.py
 
       - name: Import signing certificate
-        if: env.RELEASE_HAS_ASSET != 'true'
         uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466
         with:
           keychain: portico-release
           p12-file-base64: ${{ secrets.APPLE_SIGNING_CERTIFICATE_BASE64 }}
           p12-password: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD }}
 
-      - name: Prepare notarization key and signing identity
-        if: env.RELEASE_HAS_ASSET != 'true'
+      - name: Run release process
         env:
           APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-        run: |
-          set -euo pipefail
-          notary_key_path="$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
-
-          printf '%s' "$APPLE_NOTARY_KEY_BASE64" | base64 -D > "$notary_key_path"
-          chmod 600 "$notary_key_path"
-
-          signing_identity="$(security find-identity -v -p codesigning portico-release.keychain | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)"
-          if [[ -z "$signing_identity" ]]; then
-            echo "Imported certificate does not provide a Developer ID Application identity" >&2
-            exit 1
-          fi
-
-          {
-            echo "APPLE_NOTARY_KEY_PATH=$notary_key_path"
-            echo "DEVELOPER_ID_APPLICATION=$signing_identity"
-          } >> "$GITHUB_ENV"
-
-      - name: Build, sign, notarize, and verify DMG
-        if: env.RELEASE_HAS_ASSET != 'true'
-        env:
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-        run: ./Scripts/build-release.sh "$VERSION" "$RUNNER_TEMP/release"
-
-      - name: Create private draft release with verified DMG
-        if: env.RELEASE_EXISTS != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh release create "$RELEASE_TAG" "$RUNNER_TEMP/release/Portico-$VERSION.dmg" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$SOURCE_COMMIT" \
-            --draft \
-            --title "Portico $VERSION" \
-            --notes "Portico $VERSION is a release. Portico is a selected working name and has not yet been legally cleared."
-
-      - name: Upload missing DMG to existing release
-        if: env.RELEASE_EXISTS == 'true' && env.RELEASE_HAS_ASSET != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/release/Portico-$VERSION.dmg" \
-            --repo "$GITHUB_REPOSITORY"
-
-      - name: Verify the uploaded release asset
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          download_directory="$RUNNER_TEMP/release-download"
-          mkdir -p "$download_directory"
-          gh release download "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "Portico-$VERSION.dmg" \
-            --dir "$download_directory"
-          [[ "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" == "$SOURCE_COMMIT" ]] || {
-            echo "GitHub Release does not target the requested source commit" >&2
-            exit 1
-          }
-          if [[ "$RELEASE_HAS_ASSET" == true ]]; then
-            mkdir -p "$RUNNER_TEMP/release"
-            cp "$download_directory/Portico-$VERSION.dmg" "$RUNNER_TEMP/release/Portico-$VERSION.dmg"
-          else
-            cmp --silent \
-              "$RUNNER_TEMP/release/Portico-$VERSION.dmg" \
-              "$download_directory/Portico-$VERSION.dmg"
-          fi
-          ./Scripts/verify-release-artifact.sh "$VERSION" "$RUNNER_TEMP/release/Portico-$VERSION.dmg"
-
-      - name: Generate cask from verified DMG
-        run: |
-          set -euo pipefail
-          checksum="$(shasum -a 256 "$RUNNER_TEMP/release/Portico-$VERSION.dmg" | awk '{print $1}')"
-          printf '%s\n' \
-            'cask "portico" do' \
-            "  version \"$VERSION\"" \
-            "  sha256 \"$checksum\"" \
-            '' \
-            '  url "https://github.com/chrisbanes/portico/releases/download/v#{version}/Portico-#{version}.dmg"' \
-            '  name "Portico"' \
-            '  desc "Make a web service on your Mac reachable on your tailnet"' \
-            '  homepage "https://github.com/chrisbanes/portico"' \
-            '' \
-            '  depends_on macos: :sonoma' \
-            '' \
-            '  app "Portico.app"' \
-            'end' > "$RUNNER_TEMP/release/portico.rb"
-
-      - name: Audit generated Homebrew cask
-        env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          set -euo pipefail
-          HOMEBREW_NO_AUTO_UPDATE=1 brew tap --custom-remote chrisbanes/tap \
-            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/chrisbanes/homebrew-tap.git"
-          tap_directory="$(brew --repository chrisbanes/tap)"
-          cask_path="$tap_directory/Casks/portico.rb"
-          mkdir -p "$(dirname -- "$cask_path")"
-          cp "$RUNNER_TEMP/release/portico.rb" "$cask_path"
-          HOMEBREW_NO_AUTO_UPDATE=1 brew audit --cask --strict chrisbanes/tap/portico
-
-      - name: Publish verified GitHub Release
-        if: env.RELEASE_EXISTS != 'true' || env.RELEASE_IS_DRAFT == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
-
-      - name: Install and publish the Homebrew cask
-        run: |
-          set -euo pipefail
-          tap_directory="$(brew --repository chrisbanes/tap)"
-          app_directory="$RUNNER_TEMP/Applications"
-          installed=false
-          state_root="$HOME/Library/Application Support/Portico"
-          cleanup_cask() {
-            rm -rf "$state_root"
-            if [[ "$installed" == true ]]; then
-              HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall --cask --force chrisbanes/tap/portico || true
-            fi
-          }
-          trap cleanup_cask EXIT
-          for attempt in 1 2 3; do
-            if HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask --appdir="$app_directory" chrisbanes/tap/portico; then
-              installed=true
-              break
-            fi
-            HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall --cask --force chrisbanes/tap/portico || true
-            if [[ "$attempt" -lt 3 ]]; then
-              sleep 15
-            fi
-          done
-          [[ "$installed" == true ]] || {
-            echo "Homebrew could not install the published cask after three attempts" >&2
-            exit 1
-          }
-          rm -rf "$state_root"
-          mkdir -p "$state_root"
-          printf '%s' '{"version":4,"portals":[],"alerts":[],"operationalLogging":"disabled","launchAtLoginOffer":"notOffered"}' > "$state_root/installation-v4.json"
-          PORTICO_APP_PATH="$app_directory/Portico.app" ./Scripts/smoke-test-local-app.sh
-          rm -rf "$state_root"
-          HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall --cask --force chrisbanes/tap/portico
-          installed=false
-          trap - EXIT
-          git -C "$tap_directory" add -- Casks/portico.rb
-          git -C "$tap_directory" diff --cached --check
-          changed_paths="$(git -C "$tap_directory" diff --cached --name-only)"
-          if [[ -z "$changed_paths" ]]; then
-            echo "Homebrew cask already matches the published release"
-            exit 0
-          fi
-          [[ "$changed_paths" == "Casks/portico.rb" ]] || {
-            echo "Tap update must change only Casks/portico.rb" >&2
-            exit 1
-          }
-          git -C "$tap_directory" config user.name "github-actions[bot]"
-          git -C "$tap_directory" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C "$tap_directory" commit -m "Update portico to $VERSION"
-          git -C "$tap_directory" push origin HEAD:main
-
-      - name: Remove temporary release state
-        if: always()
-        run: |
-          rm -f "$RUNNER_TEMP"/AuthKey_*.p8
-          brew untap chrisbanes/tap || true
-          rm -rf "$RUNNER_TEMP/release-download"
+        run: bundle exec fastlane mac release version:"$VERSION" source_commit:"$SOURCE_COMMIT"

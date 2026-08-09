@@ -1,0 +1,250 @@
+require "digest"
+require "fileutils"
+
+default_platform(:mac)
+opt_out_usage
+
+REPOSITORY = "chrisbanes/portico"
+TAP = "chrisbanes/tap"
+ENV["HOMEBREW_NO_AUTO_UPDATE"] ||= "1"
+
+def require_environment(name)
+  value = ENV[name]
+  UI.user_error!("#{name} must be set") if value.nil? || value.empty?
+  value
+end
+
+def validate_version(version)
+  UI.user_error!("Version must be a 0.x.y release, such as 0.1.0") unless version.match?(/\A0\.(0|[1-9]\d*)\.(0|[1-9]\d*)\z/)
+end
+
+def validate_source_commit(source_commit)
+  UI.user_error!("Source commit must be a lowercase 40-character Git commit ID") unless source_commit.match?(/\A[0-9a-f]{40}\z/)
+end
+
+platform :mac do
+  desc "Build, sign, notarize, and verify a release DMG"
+  lane :build do |options|
+    version = options[:version] || ENV["VERSION"]
+    UI.user_error!("Pass version:<0.x.y> or set VERSION") if version.nil?
+    validate_version(version)
+
+    key_id = require_environment("APPLE_NOTARY_KEY_ID")
+    issuer_id = require_environment("APPLE_NOTARY_ISSUER_ID")
+    key_content = require_environment("APPLE_NOTARY_KEY_BASE64")
+    output_directory = File.expand_path(options[:output_directory] || ".build/release")
+    identity_output = sh("security", "find-identity", "-v", "-p", "codesigning")
+    signing_identity = identity_output[/"(Developer ID Application: [^"]+)"/, 1]
+    UI.user_error!("No Developer ID Application signing identity is available") if signing_identity.nil?
+
+    FileUtils.mkdir_p(output_directory)
+    archive_path = File.join(output_directory, "Portico.xcarchive")
+    app_path = File.join(archive_path, "Products/Applications/Portico.app")
+    app_executable = File.join(app_path, "Contents/MacOS/Portico")
+    helper_path = File.join(app_path, "Contents/Helpers/portico-helper")
+    derived_data_path = File.join(output_directory, "DerivedData")
+    staging_directory = File.join(output_directory, "dmg-root")
+    dmg_path = File.join(output_directory, "Portico-#{version}.dmg")
+
+    FileUtils.rm_rf([archive_path, derived_data_path, staging_directory])
+    FileUtils.rm_f(dmg_path)
+    FileUtils.mkdir_p(staging_directory)
+
+    sh("./Scripts/generate-xcode-project.sh")
+    sh(
+      "xcodebuild",
+      "-project", "Portico.xcodeproj",
+      "-scheme", "Portico",
+      "-configuration", "Release",
+      "-destination", "generic/platform=macOS",
+      "-archivePath", archive_path,
+      "-derivedDataPath", derived_data_path,
+      "ARCHS=arm64 x86_64",
+      "MARKETING_VERSION=#{version}",
+      "CURRENT_PROJECT_VERSION=1",
+      "ONLY_ACTIVE_ARCH=NO",
+      "CODE_SIGNING_ALLOWED=NO",
+      "CODE_SIGNING_REQUIRED=NO",
+      "archive"
+    )
+
+    UI.user_error!("Packaged app executable is missing") unless File.executable?(app_executable)
+    UI.user_error!("Packaged helper is missing") unless File.executable?(helper_path)
+    packaged_version = sh("/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", File.join(app_path, "Contents/Info.plist")).strip
+    UI.user_error!("Expected app version #{version}, found #{packaged_version}") unless packaged_version == version
+
+    [app_executable, helper_path].each do |binary|
+      architectures = sh("lipo", "-archs", binary)
+      UI.user_error!("Expected universal binary at #{binary}, found: #{architectures.strip}") unless architectures.include?("arm64") && architectures.include?("x86_64")
+    end
+
+    sh("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", signing_identity, helper_path)
+    sh("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", signing_identity, app_path)
+    sh("codesign", "--verify", "--deep", "--strict", "--verbose=2", app_path)
+
+    FileUtils.cp_r(app_path, File.join(staging_directory, "Portico.app"))
+    sh("hdiutil", "create", "-volname", "Portico", "-srcfolder", staging_directory, "-ov", "-format", "UDZO", dmg_path)
+    sh("hdiutil", "verify", dmg_path)
+
+    api_key = app_store_connect_api_key(
+      key_id: key_id,
+      issuer_id: issuer_id,
+      key_content: key_content,
+      is_key_content_base64: true,
+      set_spaceship_token: false
+    )
+    notarize(package: dmg_path, bundle_id: "dev.chrisbanes.Portico", api_key: api_key, print_log: true)
+    sh("./Scripts/verify-release-artifact.sh", version, dmg_path)
+    dmg_path
+  end
+
+  desc "Publish a GitHub release and its Homebrew cask"
+  lane :release do |options|
+    version = options[:version] || ENV["VERSION"]
+    source_commit = options[:source_commit] || ENV["SOURCE_COMMIT"]
+    UI.user_error!("Pass version:<0.x.y> or set VERSION") if version.nil?
+    UI.user_error!("Pass source_commit:<sha> or set SOURCE_COMMIT") if source_commit.nil?
+    validate_version(version)
+    validate_source_commit(source_commit)
+    UI.user_error!("Checkout did not resolve to the requested source commit") unless sh("git", "rev-parse", "HEAD").strip == source_commit
+
+    github_token = require_environment("GH_TOKEN")
+    tap_token = require_environment("HOMEBREW_TAP_TOKEN")
+    tag = "v#{version}"
+    asset_name = "Portico-#{version}.dmg"
+    output_directory = File.join(require_environment("RUNNER_TEMP"), "release")
+    download_directory = File.join(require_environment("RUNNER_TEMP"), "release-download")
+
+    release_response = github_api(
+      path: "repos/#{REPOSITORY}/releases/tags/#{tag}",
+      api_bearer: github_token,
+      error_handlers: { 404 => proc {} }
+    )
+    release = release_response[:status] == 200 ? release_response[:json] : nil
+    if release
+      UI.user_error!("Existing GitHub Release does not target the requested source commit") unless release["target_commitish"] == source_commit
+    else
+      tag_response = github_api(
+        path: "repos/#{REPOSITORY}/git/ref/tags/#{tag}",
+        api_bearer: github_token,
+        error_handlers: { 404 => proc {} }
+      )
+      UI.user_error!("Release tag exists without a GitHub Release and cannot be resumed safely: #{tag}") if tag_response[:status] == 200
+    end
+
+    has_asset = !release.nil? && release.fetch("assets", []).any? { |asset| asset["name"] == asset_name }
+    dmg_path = if has_asset
+                 FileUtils.mkdir_p(output_directory)
+                 File.join(output_directory, asset_name)
+               else
+                 build(version: version, output_directory: output_directory)
+               end
+
+    if release.nil?
+      release = set_github_release(
+        repository_name: REPOSITORY,
+        api_bearer: github_token,
+        tag_name: tag,
+        name: "Portico #{version}",
+        commitish: source_commit,
+        description: "Portico #{version} is a release. Portico is a selected working name and has not yet been legally cleared.",
+        is_draft: true
+      )
+    end
+    sh("gh", "release", "upload", tag, dmg_path, "--repo", REPOSITORY) unless has_asset
+
+    FileUtils.rm_rf(download_directory)
+    FileUtils.mkdir_p(download_directory)
+    sh("gh", "release", "download", tag, "--repo", REPOSITORY, "--pattern", asset_name, "--dir", download_directory)
+    downloaded_dmg = File.join(download_directory, asset_name)
+    if has_asset
+      FileUtils.cp(downloaded_dmg, dmg_path)
+    else
+      sh("cmp", "--silent", dmg_path, downloaded_dmg)
+    end
+    sh("./Scripts/verify-release-artifact.sh", version, dmg_path)
+
+    checksum = Digest::SHA256.file(dmg_path).hexdigest
+    cask = <<~CASK
+      cask "portico" do
+        version "#{version}"
+        sha256 "#{checksum}"
+
+        url "https://github.com/chrisbanes/portico/releases/download/v\#{version}/Portico-\#{version}.dmg"
+        name "Portico"
+        desc "Make a web service on your Mac reachable on your tailnet"
+        homepage "https://github.com/chrisbanes/portico"
+
+        depends_on macos: :sonoma
+
+        app "Portico.app"
+      end
+    CASK
+    cask_path = File.join(output_directory, "portico.rb")
+    File.write(cask_path, cask)
+
+    installed = false
+    state_root = File.expand_path("~/Library/Application Support/Portico")
+    begin
+      sh("brew", "tap", TAP)
+      tap_directory = sh("brew", "--repository", TAP).strip
+      tap_cask_path = File.join(tap_directory, "Casks/portico.rb")
+      FileUtils.mkdir_p(File.dirname(tap_cask_path))
+      FileUtils.cp(cask_path, tap_cask_path)
+      sh("brew", "audit", "--cask", "--strict", "#{TAP}/portico")
+
+      if release["draft"]
+        github_api(
+          path: "repos/#{REPOSITORY}/releases/#{release.fetch("id")}",
+          api_bearer: github_token,
+          http_method: "PATCH",
+          body: { draft: false }
+        )
+      end
+
+      app_directory = File.join(require_environment("RUNNER_TEMP"), "Applications")
+      3.times do |attempt|
+        installed = sh("brew", "install", "--cask", "--appdir=#{app_directory}", "#{TAP}/portico") do |status, _result, _command|
+          status.success?
+        end
+        break if installed
+
+        sh("brew", "uninstall", "--cask", "--force", "#{TAP}/portico") { |_status, _result, _command| nil }
+        sleep(15) if attempt < 2
+      end
+      UI.user_error!("Homebrew could not install the published cask after three attempts") unless installed
+
+      FileUtils.rm_rf(state_root)
+      FileUtils.mkdir_p(state_root)
+      File.write(
+        File.join(state_root, "installation-v4.json"),
+        '{"version":4,"portals":[],"alerts":[],"operationalLogging":"disabled","launchAtLoginOffer":"notOffered"}'
+      )
+      FastlaneCore::Helper.with_env_values("PORTICO_APP_PATH" => File.join(app_directory, "Portico.app")) do
+        sh("./Scripts/smoke-test-local-app.sh")
+      end
+
+      sh("git", "-C", tap_directory, "add", "--", "Casks/portico.rb")
+      sh("git", "-C", tap_directory, "diff", "--cached", "--check")
+      changed_paths = sh("git", "-C", tap_directory, "diff", "--cached", "--name-only").strip
+      unless changed_paths.empty?
+        UI.user_error!("Tap update must change only Casks/portico.rb") unless changed_paths == "Casks/portico.rb"
+        sh("git", "-C", tap_directory, "config", "user.name", "github-actions[bot]")
+        sh("git", "-C", tap_directory, "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
+        sh("git", "-C", tap_directory, "commit", "-m", "Update portico to #{version}")
+
+        FastlaneCore::Helper.with_env_values("GH_TOKEN" => tap_token) do
+          sh("gh", "auth", "setup-git")
+          sh("git", "-C", tap_directory, "push", "origin", "HEAD:main")
+        end
+      end
+    ensure
+      FileUtils.rm_rf(state_root)
+      if installed
+        sh("brew", "uninstall", "--cask", "--force", "#{TAP}/portico") { |_status, _result, _command| nil }
+      end
+      sh("brew", "untap", TAP) { |_status, _result, _command| nil }
+      FileUtils.rm_rf(download_directory)
+    end
+  end
+end

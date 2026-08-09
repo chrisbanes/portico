@@ -132,10 +132,11 @@ Homebrew users can install or update it with:
 brew install --cask chrisbanes/tap/portico
 ```
 
-The **Publish release** workflow is the only publishing path. It must be
-dispatched manually with a `0.x.y` version and the full 40-character commit ID
-to release. This allows a release to be validated end to end from a PR before it
-lands; retain that commit on `main` when merging the PR. Before it creates a
+The **Publish release** workflow is the only publishing path. It runs the
+Fastlane `mac release` lane and must be dispatched manually with a `0.x.y`
+version and the full 40-character commit ID to release. This allows a release
+to be validated end to end from a PR before it lands; retain that commit on
+`main` when merging the PR. Before it creates a
 public GitHub Release or changes the tap, the workflow runs the Swift and Go
 suites, builds, signs, notarizes, staples, mounts, and verifies the exact DMG.
 It then verifies the uploaded draft asset and audits the generated cask before
@@ -155,15 +156,15 @@ environment still protects the manual publishing job:
 - `HOMEBREW_TAP_TOKEN` — an expiring fine-grained token with Contents write
   access only to `chrisbanes/homebrew-tap`
 
-The local credentialed build remains useful for verifying release material
-before dispatching the workflow:
+The Fastlane `mac build` lane can create the same credentialed release material
+locally without publishing it:
 
 ```shell
-DEVELOPER_ID_APPLICATION='Developer ID Application: …' \
-APPLE_NOTARY_KEY_PATH=/path/to/AuthKey_….p8 \
+bundle install
+APPLE_NOTARY_KEY_BASE64="$(base64 < /path/to/AuthKey_….p8)" \
 APPLE_NOTARY_KEY_ID=… \
 APPLE_NOTARY_ISSUER_ID=… \
-./Scripts/build-release.sh 0.1.0 .build/release
+bundle exec fastlane mac build version:0.1.0
 ```
 
 Keep the Developer ID certificate and App Store Connect team API key outside
