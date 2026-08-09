@@ -65,7 +65,8 @@ private doorway; it does not add a second application-level authorization layer.
 
 ## Current status
 
-Portico is in active development and no public preview has been published yet.
+Portico is in active development. The latest release is
+[`v0.0.1`](https://github.com/chrisbanes/portico/releases/tag/v0.0.1).
 The repository is the source of truth for the current executable, helper, and
 MVP behavior.
 
@@ -119,26 +120,24 @@ xcodebuild \
 For the generated-project check and local app smoke test, see the scripts in
 [`Scripts/`](Scripts/).
 
-## Public previews
+## Releases
 
-A public preview is a universal macOS 14+ application. The helper is built for
+Each release is a universal macOS 14+ application. The helper is built for
 arm64 and x86_64, embedded in Portico.app, signed before the app, and
 distributed in one notarized DMG. The direct download and Homebrew cask use
 that same DMG; Portico does not check for, download, or install updates itself.
-After the first public preview exists, Homebrew users can install or update it
-with:
+Homebrew users can install or update it with:
 
 ```shell
 brew install --cask chrisbanes/tap/portico
 ```
 
-The **Publish public preview** workflow is the only publishing path. It must be
+The **Publish release** workflow is the only publishing path. It must be
 dispatched manually with a `0.x.y` version and the full 40-character commit ID
-to release. This allows the first public preview to be validated end to end from
-a PR before it lands; retain that commit on `main` when merging the PR. Before
-it creates a public GitHub Release or changes the tap, the workflow runs the
-Swift and Go suites, builds, signs, notarizes, staples, mounts, and verifies the
-exact DMG.
+to release. This allows a release to be validated end to end from a PR before it
+lands; retain that commit on `main` when merging the PR. Before it creates a
+public GitHub Release or changes the tap, the workflow runs the Swift and Go
+suites, builds, signs, notarizes, staples, mounts, and verifies the exact DMG.
 It then verifies the uploaded draft asset and audits the generated cask before
 publishing the normal GitHub Release. It clean-installs the cask before
 committing its version, URL, and SHA-256 to `chrisbanes/homebrew-tap`; a retry
@@ -164,7 +163,7 @@ DEVELOPER_ID_APPLICATION='Developer ID Application: …' \
 APPLE_NOTARY_KEY_PATH=/path/to/AuthKey_….p8 \
 APPLE_NOTARY_KEY_ID=… \
 APPLE_NOTARY_ISSUER_ID=… \
-./Scripts/build-release-candidate.sh 0.1.0 .build/release
+./Scripts/build-release.sh 0.1.0 .build/release
 ```
 
 Keep the Developer ID certificate and App Store Connect team API key outside

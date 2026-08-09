@@ -11,40 +11,40 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).with_name("preview-release.py")
+SCRIPT = Path(__file__).with_name("release.py")
 REPOSITORY_ROOT = SCRIPT.parents[1]
-SPEC = importlib.util.spec_from_file_location("preview_release", SCRIPT)
+SPEC = importlib.util.spec_from_file_location("release", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
-preview_release = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(preview_release)
+release = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(release)
 
 
-class PreviewReleaseTests(unittest.TestCase):
+class ReleaseTests(unittest.TestCase):
     source_commit = "0123456789abcdef0123456789abcdef01234567"
 
-    def test_accepts_public_preview_and_immutable_commit(self) -> None:
-        preview_release.validate_preview("0.12.3", self.source_commit)
+    def test_accepts_release_and_immutable_commit(self) -> None:
+        release.validate_release("0.12.3", self.source_commit)
 
-    def test_rejects_non_preview_versions(self) -> None:
+    def test_rejects_invalid_versions(self) -> None:
         for version in ("1.0.0", "0.1", "0.01.0", "0.1.00", "0.1.0-rc1"):
             with self.subTest(version=version):
                 with self.assertRaises(ValueError):
-                    preview_release.validate_preview(version, self.source_commit)
+                    release.validate_release(version, self.source_commit)
 
     def test_rejects_non_immutable_commit(self) -> None:
         for commit in ("main", self.source_commit[:12], self.source_commit.upper()):
             with self.subTest(commit=commit):
                 with self.assertRaises(ValueError):
-                    preview_release.validate_preview("0.1.0", commit)
+                    release.validate_release("0.1.0", commit)
 
     def test_prepared_cask_matches_the_verified_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             dmg = root / "Portico-0.1.0.dmg"
             cask = root / "Casks" / "portico.rb"
-            dmg.write_bytes(b"verified public preview")
+            dmg.write_bytes(b"verified release")
 
-            metadata = preview_release.prepare("0.1.0", self.source_commit, dmg, cask)
+            metadata = release.prepare("0.1.0", self.source_commit, dmg, cask)
 
             self.assertEqual(metadata["asset_name"], "Portico-0.1.0.dmg")
             self.assertEqual(
@@ -53,13 +53,13 @@ class PreviewReleaseTests(unittest.TestCase):
             )
             self.assertEqual(
                 metadata["sha256"],
-                "f8d2d0201c39e002979da88b6b368b946a35062f61e85d0c96b7ce41922eafcf",
+                "1ce4572138ddacf54f7b7834f96aef9b61cc975676daa26fef2fbdf5c7a2d4bf",
             )
             self.assertEqual(
                 cask.read_text(encoding="utf-8"),
                 '''cask "portico" do
   version "0.1.0"
-  sha256 "f8d2d0201c39e002979da88b6b368b946a35062f61e85d0c96b7ce41922eafcf"
+  sha256 "1ce4572138ddacf54f7b7834f96aef9b61cc975676daa26fef2fbdf5c7a2d4bf"
 
   url "https://github.com/chrisbanes/portico/releases/download/v#{version}/Portico-#{version}.dmg"
   name "Portico"
@@ -77,14 +77,14 @@ end
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with self.assertRaises(ValueError):
-                preview_release.prepare("0.1.0", self.source_commit, root / "missing.dmg", root / "portico.rb")
+                release.prepare("0.1.0", self.source_commit, root / "missing.dmg", root / "portico.rb")
             with self.assertRaises(ValueError):
-                preview_release.write_cask("0.1.0", "not-a-checksum", root / "portico.rb")
+                release.write_cask("0.1.0", "not-a-checksum", root / "portico.rb")
             with self.assertRaises(ValueError):
-                preview_release.write_cask("1.0.0", "0" * 64, root / "portico.rb")
+                release.write_cask("1.0.0", "0" * 64, root / "portico.rb")
 
     def test_incomplete_draft_is_rebuilt_and_uploaded_on_retry(self) -> None:
-        state = preview_release.release_state("0.1.0", {"isDraft": True, "assets": []})
+        state = release.release_state("0.1.0", {"isDraft": True, "assets": []})
 
         self.assertEqual(
             state,
@@ -98,7 +98,7 @@ end
     def test_existing_release_asset_is_reused(self) -> None:
         for is_draft in (True, False):
             with self.subTest(is_draft=is_draft):
-                state = preview_release.release_state(
+                state = release.release_state(
                     "0.1.0",
                     {"isDraft": is_draft, "assets": [{"name": "Portico-0.1.0.dmg"}]},
                 )

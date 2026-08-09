@@ -1,4 +1,4 @@
-name: Publish public preview
+name: Publish release
 
 on:
   workflow_dispatch:
@@ -16,12 +16,12 @@ permissions:
   contents: write
 
 concurrency:
-  group: public-preview-release
+  group: release
   cancel-in-progress: false
 
 jobs:
-  publish-preview:
-    name: Build and publish preview DMG
+  publish-release:
+    name: Build and publish release DMG
     runs-on: macos-26
     timeout-minutes: 90
     environment: public-release
@@ -36,12 +36,12 @@ jobs:
           ref: ${{ inputs.source_commit }}
           fetch-depth: 0
 
-      - name: Validate immutable preview inputs
+      - name: Validate immutable release inputs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 Scripts/preview-release.py validate \
+          python3 Scripts/release.py validate \
             --version "$VERSION" \
             --source-commit "$SOURCE_COMMIT"
           {
@@ -59,7 +59,7 @@ jobs:
               exit 1
             }
             gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets |
-              python3 Scripts/preview-release.py release-state --version "$VERSION" >> "$GITHUB_ENV"
+              python3 Scripts/release.py release-state --version "$VERSION" >> "$GITHUB_ENV"
           elif git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null; then
             echo "Release tag exists without a GitHub Release and cannot be resumed safely: $RELEASE_TAG" >&2
             exit 1
@@ -98,8 +98,8 @@ jobs:
             test
           (cd helper && go test ./...)
 
-      - name: Run deterministic preview release contract checks
-        run: python3 Scripts/test-preview-release.py
+      - name: Run deterministic release contract checks
+        run: python3 Scripts/test-release.py
 
       - name: Import signing certificate and notarization key
         if: env.RELEASE_HAS_ASSET != 'true'
@@ -144,7 +144,7 @@ jobs:
         env:
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-        run: ./Scripts/build-release-candidate.sh "$VERSION" "$RUNNER_TEMP/release"
+        run: ./Scripts/build-release.sh "$VERSION" "$RUNNER_TEMP/release"
 
       - name: Create private draft release
         if: env.RELEASE_EXISTS != 'true'
@@ -157,7 +157,7 @@ jobs:
             --target "$SOURCE_COMMIT" \
             --draft \
             --title "Portico $VERSION" \
-            --notes "Portico $VERSION is a public preview. Portico is a selected working name and has not yet been legally cleared."
+            --notes "Portico $VERSION is a release. Portico is a selected working name and has not yet been legally cleared."
 
       - name: Upload the verified DMG to the draft release
         if: env.RELEASE_HAS_ASSET != 'true'
@@ -196,7 +196,7 @@ jobs:
       - name: Generate cask from verified DMG
         run: |
           set -euo pipefail
-          python3 Scripts/preview-release.py prepare \
+          python3 Scripts/release.py prepare \
             --version "$VERSION" \
             --source-commit "$SOURCE_COMMIT" \
             --dmg "$RUNNER_TEMP/release/Portico-$VERSION.dmg" \

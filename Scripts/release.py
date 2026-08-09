@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Validate public preview inputs and generate the matching Homebrew cask."""
+"""Validate release inputs and generate the matching Homebrew cask."""
 
 from __future__ import annotations
 
@@ -12,18 +12,18 @@ import sys
 from pathlib import Path
 
 
-PREVIEW_VERSION = re.compile(r"0\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+RELEASE_VERSION = re.compile(r"0\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 SOURCE_COMMIT = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 REPOSITORY = "https://github.com/chrisbanes/portico"
 
 
 def validate_version(version: str) -> None:
-    if not PREVIEW_VERSION.fullmatch(version):
-        raise ValueError("Version must be a public 0.x.y preview, such as 0.1.0")
+    if not RELEASE_VERSION.fullmatch(version):
+        raise ValueError("Version must be a 0.x.y release, such as 0.1.0")
 
 
-def validate_preview(version: str, source_commit: str) -> None:
+def validate_release(version: str, source_commit: str) -> None:
     validate_version(version)
     if not SOURCE_COMMIT.fullmatch(source_commit):
         raise ValueError("Source commit must be a lowercase 40-character Git commit ID")
@@ -73,7 +73,7 @@ def write_cask(version: str, checksum: str, output: Path) -> None:
 
 
 def prepare(version: str, source_commit: str, dmg: Path, cask: Path) -> dict[str, str]:
-    validate_preview(version, source_commit)
+    validate_release(version, source_commit)
     if not dmg.is_file():
         raise ValueError(f"DMG does not exist: {dmg}")
 
@@ -139,7 +139,7 @@ def main() -> None:
     arguments = parse_arguments()
     try:
         if arguments.command == "validate":
-            validate_preview(arguments.version, arguments.source_commit)
+            validate_release(arguments.version, arguments.source_commit)
         elif arguments.command == "write-cask":
             write_cask(arguments.version, arguments.sha256, arguments.output)
         elif arguments.command == "release-state":
