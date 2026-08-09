@@ -7,10 +7,6 @@ on:
         description: Public 0.x.y version to publish (for example, 0.1.0)
         required: true
         type: string
-      source_commit:
-        description: Full 40-character commit ID to build and publish
-        required: true
-        type: string
 
 permissions:
   contents: write
@@ -22,20 +18,20 @@ concurrency:
 jobs:
   publish-release:
     name: Build and publish release DMG
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: macos-26
     timeout-minutes: 90
     environment: public-release
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       VERSION: ${{ inputs.version }}
-      SOURCE_COMMIT: ${{ inputs.source_commit }}
       FASTLANE_SKIP_UPDATE_CHECK: 'true'
       GH_TOKEN: ${{ github.token }}
       HOMEBREW_NO_AUTO_UPDATE: '1'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ inputs.source_commit }}
+          ref: main
 
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
         with:
@@ -72,4 +68,4 @@ jobs:
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: bundle exec fastlane mac release version:"$VERSION" source_commit:"$SOURCE_COMMIT"
+        run: bundle exec fastlane mac release version:"$VERSION"

@@ -15,6 +15,10 @@ SMOKE_TEST = (ROOT / "Scripts" / "smoke-test-local-app.sh").read_text(encoding="
 assert "workflow_dispatch:" in RELEASE
 assert not any(f"  {trigger}:" in RELEASE for trigger in ("pull_request", "push"))
 assert "environment: public-release" in RELEASE
+assert "github.ref == 'refs/heads/main'" in RELEASE
+assert "ref: main" in RELEASE
+assert "source_commit:" not in RELEASE
+assert "SOURCE_COMMIT" not in RELEASE
 assert "bundle exec fastlane mac release" in RELEASE
 assert all(
     "HOMEBREW_TAP_TOKEN" not in workflow.read_text(encoding="utf-8")
@@ -24,7 +28,7 @@ assert all(
 
 for required in (
     r"/\A0\.(0|[1-9]\d*)\.(0|[1-9]\d*)\z/",
-    r"/\A[0-9a-f]{40}\z/",
+    'source_commit = sh("git", "rev-parse", "HEAD").strip',
     "app_store_connect_api_key(",
     "build_mac_app(",
     "notarize(package:",

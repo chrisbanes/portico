@@ -24,10 +24,6 @@ def validate_version(version)
   UI.user_error!("Version must be a 0.x.y release, such as 0.1.0") unless version.match?(/\A0\.(0|[1-9]\d*)\.(0|[1-9]\d*)\z/)
 end
 
-def validate_source_commit(source_commit)
-  UI.user_error!("Source commit must be a lowercase 40-character Git commit ID") unless source_commit.match?(/\A[0-9a-f]{40}\z/)
-end
-
 platform :mac do
   desc "Run the Swift unit and native UI tests"
   lane :test do
@@ -121,12 +117,9 @@ platform :mac do
   desc "Publish a GitHub release and its Homebrew cask"
   lane :release do |options|
     version = options[:version] || ENV["VERSION"]
-    source_commit = options[:source_commit] || ENV["SOURCE_COMMIT"]
     UI.user_error!("Pass version:<0.x.y> or set VERSION") if version.nil?
-    UI.user_error!("Pass source_commit:<sha> or set SOURCE_COMMIT") if source_commit.nil?
     validate_version(version)
-    validate_source_commit(source_commit)
-    UI.user_error!("Checkout did not resolve to the requested source commit") unless sh("git", "rev-parse", "HEAD").strip == source_commit
+    source_commit = sh("git", "rev-parse", "HEAD").strip
 
     github_token = require_environment("GH_TOKEN")
     tap_token = require_environment("HOMEBREW_TAP_TOKEN")

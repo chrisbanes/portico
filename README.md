@@ -66,7 +66,7 @@ private doorway; it does not add a second application-level authorization layer.
 ## Current status
 
 Portico is in active development. The latest release is
-[`v0.0.1`](https://github.com/chrisbanes/portico/releases/tag/v0.0.1).
+[`v0.0.2`](https://github.com/chrisbanes/portico/releases/tag/v0.0.2).
 The repository is the source of truth for the current executable, helper, and
 MVP behavior.
 
@@ -123,16 +123,14 @@ brew install --cask chrisbanes/tap/portico
 ```
 
 The **Publish release** workflow is the only publishing path. It runs the
-Fastlane `mac release` lane and must be dispatched manually with a `0.x.y`
-version and the full 40-character commit ID to release. This allows a release
-to be validated end to end from a PR before it lands; retain that commit on
-`main` when merging the PR. Before it creates a
+Fastlane `mac release` lane and must be dispatched from `main` manually with a
+`0.x.y` version. It always releases `main`'s current commit. Before it creates a
 public GitHub Release or changes the tap, the workflow runs the Swift and Go
 suites, builds, signs, notarizes, staples, mounts, and verifies the exact DMG.
 It then verifies the uploaded draft asset and audits the generated cask before
 publishing the normal GitHub Release. It clean-installs the cask before
 committing its version, URL, and SHA-256 to `chrisbanes/homebrew-tap`; a retry
-for the same version and source commit resumes a release whose tap update did
+for the same version and `main` commit resumes a release whose tap update did
 not complete.
 
 Keep these repository secrets outside the repository. The `public-release`
