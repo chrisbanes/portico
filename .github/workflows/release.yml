@@ -41,9 +41,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python3 Scripts/release.py validate \
-            --version "$VERSION" \
-            --source-commit "$SOURCE_COMMIT"
+          [[ "$VERSION" =~ ^0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "Version must be a 0.x.y release, such as 0.1.0" >&2
+            exit 1
+          }
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Source commit must be a lowercase 40-character Git commit ID" >&2
+            exit 1
+          }
           {
             echo "RELEASE_EXISTS=false"
             echo "RELEASE_IS_DRAFT=false"
@@ -53,13 +58,28 @@ jobs:
             echo "Checkout did not resolve to the requested source commit" >&2
             exit 1
           }
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            [[ "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish)" == "$SOURCE_COMMIT" ]] || {
+          if release_info="$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json targetCommitish,isDraft,assets \
+            --template '{{.targetCommitish}}{{"\n"}}{{.isDraft}}{{"\n"}}{{range .assets}}{{.name}}{{"\n"}}{{end}}' \
+            2>/dev/null)"; then
+            release_target="${release_info%%$'\n'*}"
+            release_info="${release_info#*$'\n'}"
+            release_is_draft="${release_info%%$'\n'*}"
+            release_assets="${release_info#*$'\n'}"
+            [[ "$release_target" == "$SOURCE_COMMIT" ]] || {
               echo "Existing GitHub Release does not target the requested source commit" >&2
               exit 1
             }
-            gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets |
-              python3 Scripts/release.py release-state --version "$VERSION" >> "$GITHUB_ENV"
+            {
+              echo "RELEASE_EXISTS=true"
+              echo "RELEASE_IS_DRAFT=$release_is_draft"
+              if grep -Fxq "Portico-$VERSION.dmg" <<< "$release_assets"; then
+                echo "RELEASE_HAS_ASSET=true"
+              else
+                echo "RELEASE_HAS_ASSET=false"
+              fi
+            } >> "$GITHUB_ENV"
           elif git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null; then
             echo "Release tag exists without a GitHub Release and cannot be resumed safely: $RELEASE_TAG" >&2
             exit 1
@@ -98,7 +118,7 @@ jobs:
             test
           (cd helper && go test ./...)
 
-      - name: Run deterministic release contract checks
+      - name: Test release contract
         run: python3 Scripts/test-release.py
 
       - name: Import signing certificate and notarization key
@@ -146,21 +166,21 @@ jobs:
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
         run: ./Scripts/build-release.sh "$VERSION" "$RUNNER_TEMP/release"
 
-      - name: Create private draft release
+      - name: Create private draft release with verified DMG
         if: env.RELEASE_EXISTS != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "$RELEASE_TAG" \
+          gh release create "$RELEASE_TAG" "$RUNNER_TEMP/release/Portico-$VERSION.dmg" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$SOURCE_COMMIT" \
             --draft \
             --title "Portico $VERSION" \
             --notes "Portico $VERSION is a release. Portico is a selected working name and has not yet been legally cleared."
 
-      - name: Upload the verified DMG to the draft release
-        if: env.RELEASE_HAS_ASSET != 'true'
+      - name: Upload missing DMG to existing release
+        if: env.RELEASE_EXISTS == 'true' && env.RELEASE_HAS_ASSET != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -196,11 +216,21 @@ jobs:
       - name: Generate cask from verified DMG
         run: |
           set -euo pipefail
-          python3 Scripts/release.py prepare \
-            --version "$VERSION" \
-            --source-commit "$SOURCE_COMMIT" \
-            --dmg "$RUNNER_TEMP/release/Portico-$VERSION.dmg" \
-            --cask "$RUNNER_TEMP/release/portico.rb"
+          checksum="$(shasum -a 256 "$RUNNER_TEMP/release/Portico-$VERSION.dmg" | awk '{print $1}')"
+          printf '%s\n' \
+            'cask "portico" do' \
+            "  version \"$VERSION\"" \
+            "  sha256 \"$checksum\"" \
+            '' \
+            '  url "https://github.com/chrisbanes/portico/releases/download/v#{version}/Portico-#{version}.dmg"' \
+            '  name "Portico"' \
+            '  desc "Make a web service on your Mac reachable on your tailnet"' \
+            '  homepage "https://github.com/chrisbanes/portico"' \
+            '' \
+            '  depends_on macos: :sonoma' \
+            '' \
+            '  app "Portico.app"' \
+            'end' > "$RUNNER_TEMP/release/portico.rb"
 
       - name: Audit generated Homebrew cask
         env:
@@ -227,32 +257,9 @@ jobs:
           tap_directory="$(brew --repository chrisbanes/tap)"
           app_directory="$RUNNER_TEMP/Applications"
           installed=false
-          state_prepared=false
           state_root="$HOME/Library/Application Support/Portico"
-          state_backup_directory=""
-          state_backup=""
-          prepare_smoke_state() {
-            state_backup_directory="$(mktemp -d "$RUNNER_TEMP/portico-smoke-state.XXXXXX")"
-            state_backup="$state_backup_directory/Portico"
-            if [[ -e "$state_root" ]]; then
-              mv "$state_root" "$state_backup"
-            fi
-            mkdir -p "$state_root"
-            printf '%s' '{"version":4,"portals":[],"alerts":[],"operationalLogging":"disabled","launchAtLoginOffer":"notOffered"}' > "$state_root/installation-v4.json"
-            state_prepared=true
-          }
-          restore_smoke_state() {
-            if [[ "$state_prepared" == true ]]; then
-              rm -rf "$state_root"
-              if [[ -e "$state_backup" ]]; then
-                mv "$state_backup" "$state_root"
-              fi
-              rmdir "$state_backup_directory" || true
-              state_prepared=false
-            fi
-          }
           cleanup_cask() {
-            restore_smoke_state
+            rm -rf "$state_root"
             if [[ "$installed" == true ]]; then
               HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall --cask --force chrisbanes/tap/portico || true
             fi
@@ -272,9 +279,11 @@ jobs:
             echo "Homebrew could not install the published cask after three attempts" >&2
             exit 1
           }
-          prepare_smoke_state
+          rm -rf "$state_root"
+          mkdir -p "$state_root"
+          printf '%s' '{"version":4,"portals":[],"alerts":[],"operationalLogging":"disabled","launchAtLoginOffer":"notOffered"}' > "$state_root/installation-v4.json"
           PORTICO_APP_PATH="$app_directory/Portico.app" ./Scripts/smoke-test-local-app.sh
-          restore_smoke_state
+          rm -rf "$state_root"
           HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall --cask --force chrisbanes/tap/portico
           installed=false
           trap - EXIT
