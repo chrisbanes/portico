@@ -2,13 +2,14 @@
 
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  echo "Usage: $0 <version> <dmg-path>" >&2
+if [[ $# -ne 3 ]]; then
+  echo "Usage: $0 <version> <architecture> <dmg-path>" >&2
   exit 64
 fi
 
 version="$1"
-dmg_path="$2"
+architecture="$2"
+dmg_path="$3"
 mounted_volume=""
 
 cleanup() {
@@ -22,6 +23,10 @@ if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Version must be numeric semantic versioning, such as 0.1.0" >&2
   exit 1
 fi
+case "$architecture" in
+  arm64|x86_64) ;;
+  *) echo "Unsupported architecture: $architecture" >&2; exit 1 ;;
+esac
 [[ -f "$dmg_path" ]] || { echo "DMG is missing: $dmg_path" >&2; exit 1; }
 
 hdiutil verify "$dmg_path"
@@ -47,8 +52,8 @@ packaged_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionStrin
 
 for binary in "$app_executable" "$helper_path"; do
   architectures="$(lipo -archs "$binary")"
-  [[ "$architectures" == *arm64* && "$architectures" == *x86_64* ]] || {
-    echo "Expected universal binary at $binary, found: $architectures" >&2
+  [[ "$architectures" == "$architecture" ]] || {
+    echo "Expected $architecture binary at $binary, found: $architectures" >&2
     exit 1
   }
   codesign --verify --strict --verbose=2 "$binary"

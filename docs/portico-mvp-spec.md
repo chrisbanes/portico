@@ -538,7 +538,7 @@ registers a login item, or opens an external URL.
 
 ### Packaging
 
-- arm64 and x86_64 helper slices combine into a universal binary;
+- arm64 and x86_64 builds each embed a helper with the matching architecture;
 - helper and app signatures verify strictly with the hardened runtime;
 - the helper is present at the expected bundle path; and
 - a packaged app starts and shuts down without leaving a helper process.
@@ -589,20 +589,20 @@ stable test identities.
 
 ## Distribution
 
-The first supported artifact is a macOS 14+ universal app distributed outside
-the Mac App Store. Build arm64 and x86_64 helper binaries, combine them,
-embed and sign the helper before signing the outer app, enable the hardened
-runtime, verify both signatures, notarize the final ZIP or DMG, and staple the
-ticket where supported. Issue #11 owns this signed-app work, including the
-production `SMAppService.mainApp` registration smoke check.
+The first supported artifacts are macOS 14+ arm64 and x86_64 apps distributed
+outside the Mac App Store in separate DMGs. Build each helper for its matching
+app architecture, embed and sign the helper before signing the outer app,
+enable the hardened runtime, verify both signatures, notarize each DMG, and
+staple its ticket where supported. Issue #11 owns this signed-app work,
+including the production `SMAppService.mainApp` registration smoke check.
 
 The initial Homebrew cask will live in
 [`chrisbanes/homebrew-tap`](https://github.com/chrisbanes/homebrew-tap) and
-consume the same notarized versioned artifact. It must retain a concrete
-version and SHA-256 checksum; the tap is an installation channel, not a second
-build or release pipeline. Mac App Store sandbox feasibility is a separate
-investigation; it must not change the MVP process boundary until proven
-practical.
+consume the matching notarized versioned artifact. It must retain a concrete
+version, architecture-specific URL, and SHA-256 checksum; the tap is an
+installation channel, not a second build or release pipeline. Mac App Store
+sandbox feasibility is a separate investigation; it must not change the MVP
+process boundary until proven practical.
 
 ## Unresolved risks
 

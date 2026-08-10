@@ -11,12 +11,15 @@ RELEASE = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
 FASTFILE = (ROOT / "fastlane" / "Fastfile").read_text(encoding="utf-8")
 HOMEBREW_TAP = (ROOT / "fastlane" / "homebrew_tap.rb").read_text(encoding="utf-8")
 SMOKE_TEST = (ROOT / "Scripts" / "smoke-test-local-app.sh").read_text(encoding="utf-8")
+ARTIFACT_VERIFIER = (ROOT / "Scripts" / "verify-release-artifact.sh").read_text(encoding="utf-8")
+HELPER_VERIFIER = (ROOT / "Scripts" / "verify-helper-architectures.sh").read_text(encoding="utf-8")
 
 assert "workflow_dispatch:" in RELEASE
 assert not any(f"  {trigger}:" in RELEASE for trigger in ("pull_request", "push"))
 assert "environment: public-release" in RELEASE
 assert "github.ref == 'refs/heads/main'" in RELEASE
 assert "ref: main" in RELEASE
+assert "timeout-minutes: 180" in RELEASE
 assert "source_commit:" not in RELEASE
 assert "SOURCE_COMMIT" not in RELEASE
 assert "bundle exec fastlane mac release" in RELEASE
@@ -35,6 +38,9 @@ for required in (
     "run_tests(",
     "set_github_release(",
     'script("verify-release-artifact.sh")',
+    'ARCHITECTURES = %w[arm64 x86_64].freeze',
+    '"Portico-#{version}-#{architecture}.dmg"',
+    "architectures: missing_architectures",
 ):
     assert required in FASTFILE, required
 
@@ -49,7 +55,9 @@ positions = [FASTFILE.index(marker, FASTFILE.index('lane :release')) for marker 
 assert positions == sorted(positions)
 
 for required in (
-    "https://github.com/chrisbanes/portico/releases/download/v\\#{version}/Portico-\\#{version}.dmg",
+    'arch arm: "arm64", intel: "x86_64"',
+    "sha256 arm:",
+    "https://github.com/chrisbanes/portico/releases/download/v\\#{version}/Portico-\\#{version}-\\#{arch}.dmg",
     '"brew", "audit", "--cask", "--strict"',
     '"operationalLogging":"disabled"',
     '"push", "origin", "HEAD:main"',
@@ -65,5 +73,9 @@ tap_ordered = (
 tap_positions = [HOMEBREW_TAP.index(marker) for marker in tap_ordered]
 assert tap_positions == sorted(tap_positions)
 assert 'pgrep -P "$app_pid" -x portico-helper' in SMOKE_TEST
+assert "Usage: $0 <version> <architecture> <dmg-path>" in ARTIFACT_VERIFIER
+assert '[[ "$architectures" == "$architecture" ]]' in ARTIFACT_VERIFIER
+assert 'ARCHS="$architecture"' in HELPER_VERIFIER
+assert '[[ "$architectures" == "$architecture" ]]' in HELPER_VERIFIER
 
 print("Portico release contract passed")

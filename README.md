@@ -120,21 +120,23 @@ For the generated-project check and local app smoke test, see the scripts in
 
 ## Releases
 
-Each release is a universal macOS 14+ application. The helper is built for
-arm64 and x86_64, embedded in Portico.app, signed before the app, and
-distributed in one notarized DMG. The direct download and Homebrew cask use
-that same DMG; Portico does not check for, download, or install updates itself.
+Each release has two macOS 14+ DMGs: `Portico-<version>-arm64.dmg` for Apple
+Silicon and `Portico-<version>-x86_64.dmg` for Intel Macs. Each DMG contains an
+app and embedded helper built for that architecture, signed, notarized, and
+stapled independently. The direct download provides both DMGs, and the
+Homebrew cask selects the matching one; Portico does not check for, download,
+or install updates itself.
 
 The **Publish release** workflow is the only publishing path. It runs the
 Fastlane `mac release` lane and must be dispatched from `main` manually with a
 `0.x.y` version. It always releases `main`'s current commit. Before it creates a
 public GitHub Release or changes the tap, the workflow runs the Swift and Go
-suites, builds, signs, notarizes, staples, mounts, and verifies the exact DMG.
-It then verifies the uploaded draft asset and audits the generated cask before
+suites, builds, signs, notarizes, staples, mounts, and verifies both DMGs. It
+then verifies the uploaded draft assets and audits the generated cask before
 publishing the normal GitHub Release. It clean-installs the cask before
-committing its version, URL, and SHA-256 to `chrisbanes/homebrew-tap`; a retry
-for the same version and `main` commit resumes a release whose tap update did
-not complete.
+committing its version, architecture-specific URLs, and SHA-256 values to
+`chrisbanes/homebrew-tap`; a retry for the same version and `main` commit
+resumes a release whose asset or tap update did not complete.
 
 Keep these repository secrets outside the repository. The `public-release`
 environment still protects the manual publishing job:
@@ -159,11 +161,11 @@ bundle exec fastlane mac build version:0.1.0
 ```
 
 Keep the Developer ID certificate and App Store Connect team API key outside
-the repository. Before configuring credentials, the universal helper build can
-be verified locally with:
+the repository. Before configuring credentials, the architecture-specific
+helper builds can be verified locally with:
 
 ```shell
-./Scripts/verify-universal-helper.sh
+./Scripts/verify-helper-architectures.sh
 ```
 
 ## Learn more

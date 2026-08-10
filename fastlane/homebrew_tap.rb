@@ -3,8 +3,11 @@ require "fileutils"
 HOMEBREW_TAP = "chrisbanes/tap"
 PORTICO_ROOT = File.expand_path("..", __dir__)
 
-def update_homebrew_tap(version:, checksum:, tap_token:, app_directory:, &publish_release)
+def update_homebrew_tap(version:, checksums:, tap_token:, app_directory:, &publish_release)
   UI.user_error!("Homebrew tap update requires a release publication block") if publish_release.nil?
+
+  arm64_checksum = checksums.fetch("arm64")
+  x86_64_checksum = checksums.fetch("x86_64")
 
   installed = false
   state_root = File.expand_path("~/Library/Application Support/Portico")
@@ -14,10 +17,13 @@ def update_homebrew_tap(version:, checksum:, tap_token:, app_directory:, &publis
   FileUtils.mkdir_p(File.dirname(cask_path))
   File.write(cask_path, <<~CASK)
     cask "portico" do
-      version "#{version}"
-      sha256 "#{checksum}"
+      arch arm: "arm64", intel: "x86_64"
 
-      url "https://github.com/chrisbanes/portico/releases/download/v\#{version}/Portico-\#{version}.dmg"
+      version "#{version}"
+      sha256 arm:   "#{arm64_checksum}",
+             intel: "#{x86_64_checksum}"
+
+      url "https://github.com/chrisbanes/portico/releases/download/v\#{version}/Portico-\#{version}-\#{arch}.dmg"
       name "Portico"
       desc "Make a web service on your Mac reachable on your tailnet"
       homepage "https://github.com/chrisbanes/portico"

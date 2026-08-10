@@ -8,6 +8,7 @@ opt_out_usage
 REPOSITORY = "chrisbanes/portico"
 ROOT = File.expand_path("..", __dir__)
 PROJECT = File.join(ROOT, "Portico.xcodeproj")
+ARCHITECTURES = %w[arm64 x86_64].freeze
 ENV["HOMEBREW_NO_AUTO_UPDATE"] ||= "1"
 
 def script(name)
@@ -22,6 +23,65 @@ end
 
 def validate_version(version)
   UI.user_error!("Version must be a 0.x.y release, such as 0.1.0") unless version.match?(/\A0\.(0|[1-9]\d*)\.(0|[1-9]\d*)\z/)
+end
+
+def validate_architectures(architectures)
+  requested = Array(architectures).map(&:to_s).uniq
+  UI.user_error!("Build at least one supported architecture: #{ARCHITECTURES.join(", ")}") if requested.empty? || (requested - ARCHITECTURES).any?
+  requested
+end
+
+def release_asset_name(version, architecture)
+  "Portico-#{version}-#{architecture}.dmg"
+end
+
+def build_release_dmg(version:, architecture:, output_directory:, signing_identity:, api_key:)
+  architecture_output_directory = File.join(output_directory, architecture)
+  archive_path = File.join(architecture_output_directory, "Portico.xcarchive")
+  app_path = File.join(archive_path, "Products/Applications/Portico.app")
+  app_executable = File.join(app_path, "Contents/MacOS/Portico")
+  helper_path = File.join(app_path, "Contents/Helpers/portico-helper")
+  derived_data_path = File.join(architecture_output_directory, "DerivedData")
+  staging_directory = File.join(architecture_output_directory, "dmg-root")
+  dmg_path = File.join(output_directory, release_asset_name(version, architecture))
+
+  FileUtils.rm_rf([archive_path, derived_data_path, staging_directory])
+  FileUtils.rm_f(dmg_path)
+  FileUtils.mkdir_p(staging_directory)
+
+  build_mac_app(
+    project: PROJECT,
+    scheme: "Portico",
+    configuration: "Release",
+    destination: "generic/platform=macOS",
+    archive_path: archive_path,
+    derived_data_path: derived_data_path,
+    output_directory: File.join(architecture_output_directory, "gym-output"),
+    skip_codesigning: true,
+    skip_package_pkg: true,
+    xcargs: "ARCHS=#{architecture} MARKETING_VERSION=#{version} CURRENT_PROJECT_VERSION=1 ONLY_ACTIVE_ARCH=NO"
+  )
+
+  UI.user_error!("Packaged app executable is missing") unless File.executable?(app_executable)
+  UI.user_error!("Packaged helper is missing") unless File.executable?(helper_path)
+  packaged_version = sh("/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", File.join(app_path, "Contents/Info.plist")).strip
+  UI.user_error!("Expected app version #{version}, found #{packaged_version}") unless packaged_version == version
+
+  [app_executable, helper_path].each do |binary|
+    binary_architecture = sh("lipo", "-archs", binary).strip
+    UI.user_error!("Expected #{architecture} binary at #{binary}, found: #{binary_architecture}") unless binary_architecture == architecture
+  end
+
+  sh("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", signing_identity, helper_path)
+  sh("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", signing_identity, app_path)
+  sh("codesign", "--verify", "--deep", "--strict", "--verbose=2", app_path)
+
+  FileUtils.cp_r(app_path, File.join(staging_directory, "Portico.app"))
+  sh("hdiutil", "create", "-volname", "Portico", "-srcfolder", staging_directory, "-ov", "-format", "UDZO", dmg_path)
+  sh("hdiutil", "verify", dmg_path)
+  notarize(package: dmg_path, bundle_id: "dev.chrisbanes.Portico", api_key: api_key, print_log: true)
+  sh(script("verify-release-artifact.sh"), version, architecture, dmg_path)
+  dmg_path
 end
 
 platform :mac do
@@ -43,7 +103,7 @@ platform :mac do
     end
   end
 
-  desc "Build, sign, notarize, and verify a release DMG"
+  desc "Build, sign, notarize, and verify architecture-specific release DMGs"
   lane :build do |options|
     version = options[:version] || ENV["VERSION"]
     UI.user_error!("Pass version:<0.x.y> or set VERSION") if version.nil?
@@ -57,50 +117,7 @@ platform :mac do
     signing_identity = identity_output[/"(Developer ID Application: [^"]+)"/, 1]
     UI.user_error!("No Developer ID Application signing identity is available") if signing_identity.nil?
 
-    FileUtils.mkdir_p(output_directory)
-    archive_path = File.join(output_directory, "Portico.xcarchive")
-    app_path = File.join(archive_path, "Products/Applications/Portico.app")
-    app_executable = File.join(app_path, "Contents/MacOS/Portico")
-    helper_path = File.join(app_path, "Contents/Helpers/portico-helper")
-    derived_data_path = File.join(output_directory, "DerivedData")
-    staging_directory = File.join(output_directory, "dmg-root")
-    dmg_path = File.join(output_directory, "Portico-#{version}.dmg")
-
-    FileUtils.rm_rf([archive_path, derived_data_path, staging_directory])
-    FileUtils.rm_f(dmg_path)
-    FileUtils.mkdir_p(staging_directory)
-
     sh(script("generate-xcode-project.sh"))
-    build_mac_app(
-      project: PROJECT,
-      scheme: "Portico",
-      configuration: "Release",
-      destination: "generic/platform=macOS",
-      archive_path: archive_path,
-      derived_data_path: derived_data_path,
-      output_directory: File.join(output_directory, "gym-output"),
-      skip_codesigning: true,
-      skip_package_pkg: true,
-      xcargs: "ARCHS='arm64 x86_64' MARKETING_VERSION=#{version} CURRENT_PROJECT_VERSION=1 ONLY_ACTIVE_ARCH=NO"
-    )
-
-    UI.user_error!("Packaged app executable is missing") unless File.executable?(app_executable)
-    UI.user_error!("Packaged helper is missing") unless File.executable?(helper_path)
-    packaged_version = sh("/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", File.join(app_path, "Contents/Info.plist")).strip
-    UI.user_error!("Expected app version #{version}, found #{packaged_version}") unless packaged_version == version
-
-    [app_executable, helper_path].each do |binary|
-      architectures = sh("lipo", "-archs", binary)
-      UI.user_error!("Expected universal binary at #{binary}, found: #{architectures.strip}") unless architectures.include?("arm64") && architectures.include?("x86_64")
-    end
-
-    sh("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", signing_identity, helper_path)
-    sh("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", signing_identity, app_path)
-    sh("codesign", "--verify", "--deep", "--strict", "--verbose=2", app_path)
-
-    FileUtils.cp_r(app_path, File.join(staging_directory, "Portico.app"))
-    sh("hdiutil", "create", "-volname", "Portico", "-srcfolder", staging_directory, "-ov", "-format", "UDZO", dmg_path)
-    sh("hdiutil", "verify", dmg_path)
 
     api_key = app_store_connect_api_key(
       key_id: key_id,
@@ -109,9 +126,19 @@ platform :mac do
       is_key_content_base64: true,
       set_spaceship_token: false
     )
-    notarize(package: dmg_path, bundle_id: "dev.chrisbanes.Portico", api_key: api_key, print_log: true)
-    sh(script("verify-release-artifact.sh"), version, dmg_path)
-    dmg_path
+    FileUtils.mkdir_p(output_directory)
+    validate_architectures(options[:architectures] || ARCHITECTURES).to_h do |architecture|
+      [
+        architecture,
+        build_release_dmg(
+          version: version,
+          architecture: architecture,
+          output_directory: output_directory,
+          signing_identity: signing_identity,
+          api_key: api_key
+        )
+      ]
+    end
   end
 
   desc "Publish a GitHub release and its Homebrew cask"
@@ -124,7 +151,7 @@ platform :mac do
     github_token = require_environment("GH_TOKEN")
     tap_token = require_environment("HOMEBREW_TAP_TOKEN")
     tag = "v#{version}"
-    asset_name = "Portico-#{version}.dmg"
+    asset_names = ARCHITECTURES.to_h { |architecture| [architecture, release_asset_name(version, architecture)] }
     output_directory = File.join(require_environment("RUNNER_TEMP"), "release")
     download_directory = File.join(require_environment("RUNNER_TEMP"), "release-download")
 
@@ -145,13 +172,15 @@ platform :mac do
       UI.user_error!("Release tag exists without a GitHub Release and cannot be resumed safely: #{tag}") if tag_response[:status] == 200
     end
 
-    has_asset = !release.nil? && release.fetch("assets", []).any? { |asset| asset["name"] == asset_name }
-    dmg_path = if has_asset
-                 FileUtils.mkdir_p(output_directory)
-                 File.join(output_directory, asset_name)
-               else
-                 build(version: version, output_directory: output_directory)
-               end
+    existing_asset_names = release.nil? ? [] : release.fetch("assets", []).map { |asset| asset.fetch("name") }
+    missing_architectures = asset_names.filter_map do |architecture, asset_name|
+      architecture unless existing_asset_names.include?(asset_name)
+    end
+    built_dmgs = if missing_architectures.empty?
+                   {}
+                 else
+                   build(version: version, output_directory: output_directory, architectures: missing_architectures)
+                 end
 
     if release.nil?
       release = set_github_release(
@@ -164,25 +193,26 @@ platform :mac do
         is_draft: true
       )
     end
-    sh("gh", "release", "upload", tag, dmg_path, "--repo", REPOSITORY) unless has_asset
+    built_dmgs.each_value do |dmg_path|
+      sh("gh", "release", "upload", tag, dmg_path, "--repo", REPOSITORY)
+    end
 
     FileUtils.rm_rf(download_directory)
     FileUtils.mkdir_p(download_directory)
-    sh("gh", "release", "download", tag, "--repo", REPOSITORY, "--pattern", asset_name, "--dir", download_directory)
-    downloaded_dmg = File.join(download_directory, asset_name)
-    if has_asset
-      FileUtils.cp(downloaded_dmg, dmg_path)
-    else
-      sh("cmp", "--silent", dmg_path, downloaded_dmg)
+    downloaded_dmgs = asset_names.to_h do |architecture, asset_name|
+      sh("gh", "release", "download", tag, "--repo", REPOSITORY, "--pattern", asset_name, "--dir", download_directory)
+      downloaded_dmg = File.join(download_directory, asset_name)
+      built_dmg = built_dmgs[architecture]
+      sh("cmp", "--silent", built_dmg, downloaded_dmg) unless built_dmg.nil?
+      sh(script("verify-release-artifact.sh"), version, architecture, downloaded_dmg)
+      [architecture, downloaded_dmg]
     end
-    sh(script("verify-release-artifact.sh"), version, dmg_path)
-
-    checksum = Digest::SHA256.file(dmg_path).hexdigest
+    checksums = downloaded_dmgs.transform_values { |dmg_path| Digest::SHA256.file(dmg_path).hexdigest }
     begin
       app_directory = File.join(require_environment("RUNNER_TEMP"), "Applications")
       update_homebrew_tap(
         version: version,
-        checksum: checksum,
+        checksums: checksums,
         tap_token: tap_token,
         app_directory: app_directory
       ) do
