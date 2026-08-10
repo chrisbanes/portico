@@ -114,6 +114,7 @@ private struct OverviewView: View {
     @State private var removalCandidate: PortalConfiguration?
     @State private var removalCompletionFocusID: UUID?
     @State private var removalCancelFocusPortalID: UUID?
+    @State private var authenticationFocusPortalID: UUID?
     @AccessibilityFocusState private var accessibilityFocus: AccessibilityFocusTarget?
 
     var body: some View {
@@ -182,6 +183,7 @@ private struct OverviewView: View {
                     },
                     didPersistPortal: { portal in
                         selection = .portal(portal.id)
+                        authenticationFocusPortalID = portal.id
                         showingAddPortal = false
                     }
                 )
@@ -368,13 +370,16 @@ private struct OverviewView: View {
             SelectedPortalView(
                 controller: controller,
                 portal: portal,
+                authenticationFocusRequestID: authenticationFocusPortalID == portal.id &&
+                    controller.actionAvailability(for: portal).authenticate ? portal.id : nil,
                 removalFocusRequestID: removalCancelFocusPortalID == portal.id
                     ? portal.id
-                    : nil
-            ) {
-                removalCancelFocusPortalID = nil
-                removalCandidate = portal
-            }
+                    : nil,
+                onRemove: {
+                    removalCancelFocusPortalID = nil
+                    removalCandidate = portal
+                }
+            )
         case .pendingRemoval:
             RemovingPortalView(controller: controller, portal: portal)
         case .pendingTailnetRejection:
@@ -440,6 +445,7 @@ private struct SelectedPortalView: View {
     @Environment(\.openWindow) private var openWindow
     @ObservedObject var controller: PortalController
     let portal: PortalConfiguration
+    let authenticationFocusRequestID: UUID?
     let removalFocusRequestID: UUID?
     let onRemove: () -> Void
     @State private var destinationEdit: PortalDestinationEdit
@@ -447,11 +453,13 @@ private struct SelectedPortalView: View {
     init(
         controller: PortalController,
         portal: PortalConfiguration,
+        authenticationFocusRequestID: UUID?,
         removalFocusRequestID: UUID?,
         onRemove: @escaping () -> Void
     ) {
         self.controller = controller
         self.portal = portal
+        self.authenticationFocusRequestID = authenticationFocusRequestID
         self.removalFocusRequestID = removalFocusRequestID
         self.onRemove = onRemove
         _destinationEdit = State(initialValue: PortalDestinationEdit(destination: portal.destination))
@@ -561,7 +569,7 @@ private struct SelectedPortalView: View {
                 }
             }
             Section("Actions") {
-                if status?.state == .authenticating {
+                if portalActions.authenticate {
                     Label("Next, sign in with Tailscale in your browser.", systemImage: "key.fill")
                         .font(.headline)
                         .padding(8)
@@ -571,9 +579,14 @@ private struct SelectedPortalView: View {
                 }
                 WrappingHStack {
                     if status?.state == .authenticating {
-                        Button("Authenticate") { controller.authenticate(id: portal.id) }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(!portalActions.authenticate)
+                        FocusRestoringButton(
+                            title: "Authenticate",
+                            isEnabled: portalActions.authenticate,
+                            isProminent: true,
+                            focusRequestID: authenticationFocusRequestID
+                        ) {
+                            controller.authenticate(id: portal.id)
+                        }
                             .accessibilityIdentifier("selected-authenticate")
                     }
                     FocusRestoringButton(
@@ -760,6 +773,7 @@ private struct FocusRestoringButton: NSViewRepresentable {
     let title: String
     let isEnabled: Bool
     var isDestructive = false
+    var isProminent = false
     var focusRequestID: UUID?
     let action: () -> Void
 
@@ -771,6 +785,10 @@ private struct FocusRestoringButton: NSViewRepresentable {
         let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.performAction))
         button.bezelStyle = .rounded
         button.controlSize = .small
+        button.bezelColor = isProminent ? .controlAccentColor : nil
+        if context.coordinator.focusRequestID != nil {
+            context.coordinator.restoreFocus(afterSheetDismissal: button)
+        }
         return button
     }
 
@@ -780,6 +798,7 @@ private struct FocusRestoringButton: NSViewRepresentable {
         button.title = title
         button.isEnabled = isEnabled
         button.contentTintColor = isDestructive ? .systemRed : nil
+        button.bezelColor = isProminent ? .controlAccentColor : nil
         let focusRequested = context.coordinator.focusRequestID != focusRequestID
         context.coordinator.focusRequestID = focusRequestID
         guard titleChanged || (focusRequested && focusRequestID != nil) else { return }
@@ -809,6 +828,7 @@ private struct FocusRestoringButton: NSViewRepresentable {
                 guard let self, let button, let window = button.window else { return }
                 self.removeSheetObserver()
                 guard window.attachedSheet != nil else {
+                    button.scrollToVisible(button.bounds)
                     window.makeFirstResponder(button)
                     return
                 }
@@ -819,6 +839,7 @@ private struct FocusRestoringButton: NSViewRepresentable {
                 ) { [weak self, weak button, weak window] _ in
                     self?.removeSheetObserver()
                     guard let button, let window else { return }
+                    button.scrollToVisible(button.bounds)
                     window.makeFirstResponder(button)
                 }
             }

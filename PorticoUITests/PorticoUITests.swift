@@ -154,7 +154,20 @@ final class PorticoUITests: XCTestCase {
         app.buttons["management-sidebar-portal-portal-one"].click()
         XCTAssertTrue(app.buttons["selected-authenticate"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["selected-authenticate"].isEnabled)
+        XCTAssertTrue(app.staticTexts["selected-authentication-guidance"].exists)
         XCTAssertFalse(app.buttons["selected-open-portal-url"].isEnabled)
+
+        app = launch(scenario: "stale-authenticating")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-portal-one"].click()
+        XCTAssertTrue(waitForValue(
+            "Authentication required — Last Known",
+            element: app.staticTexts["selected-tailscale-state"],
+            timeout: 3
+        ))
+        XCTAssertTrue(app.buttons["selected-authenticate"].exists)
+        XCTAssertFalse(app.buttons["selected-authenticate"].isEnabled)
+        XCTAssertFalse(app.staticTexts["selected-authentication-guidance"].exists)
 
         app = launch(scenario: "awaiting-approval")
         app.typeKey("o", modifierFlags: [.command, .shift])
@@ -306,7 +319,13 @@ final class PorticoUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 3))
         XCTAssertTrue(waitForValue("manual-portal", element: app.staticTexts["selected-portal-name"], timeout: 3))
         XCTAssertTrue(app.staticTexts["selected-authentication-guidance"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["selected-authenticate"].isEnabled)
+        let authenticate = app.buttons["selected-authenticate"]
+        XCTAssertTrue(authenticate.isEnabled)
+        let focusedAuthenticate = app.buttons.matching(
+            NSPredicate(format: "identifier == %@ AND hasKeyboardFocus == true", "selected-authenticate")
+        ).firstMatch
+        XCTAssertTrue(focusedAuthenticate.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(authenticate.isHittable, app.debugDescription)
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(root)/helper-enrollment.txt"))
     }
 

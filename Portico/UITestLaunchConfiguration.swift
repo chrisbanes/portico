@@ -15,6 +15,7 @@ enum UITestScenario: String {
     case authenticating
     case awaitingApproval = "awaiting-approval"
     case stale
+    case staleAuthenticating = "stale-authenticating"
     case restarting
     case terminalFailure = "terminal-failure"
     case removing
@@ -167,7 +168,7 @@ struct UITestLaunchConfiguration {
                 operationalLogging: .enabled,
                 launchAtLoginOffer: .declined
             ))
-        case .online, .stopped, .authenticating, .awaitingApproval, .stale, .restarting, .terminalFailure:
+        case .online, .stopped, .authenticating, .awaitingApproval, .stale, .staleAuthenticating, .restarting, .terminalFailure:
             try store.save(InstallationRecord(
                 tailnetBinding: Self.tailnetBinding,
                 portals: [Self.portal(desiredState: scenario == .stopped ? .stopped : .enabled)],
@@ -273,7 +274,7 @@ final class UITestHelperLauncher: HelperLaunching {
         onEOF: @escaping () -> Void,
         onExit: @escaping (Int32) -> Void
     ) throws -> HelperProcess {
-        if scenario == .terminalFailure || (scenario == .stale && launchCount > 0) {
+        if scenario == .terminalFailure || ([.stale, .staleAuthenticating].contains(scenario) && launchCount > 0) {
             throw UITestHelperLaunchBlocked()
         }
         launchCount += 1
@@ -410,12 +411,12 @@ private final class UITestHelperProcess: HelperProcess {
     }
 
     private func emitStatuses(for portals: [ReconcilePortalPayload]) {
-        guard [.online, .stopped, .remoteOnline, .authenticating, .awaitingApproval, .stale, .restarting, .loginOffer, .loginOfferApproval, .loginOfferError, .management, .durableManagement, .creation].contains(scenario) else { return }
+        guard [.online, .stopped, .remoteOnline, .authenticating, .awaitingApproval, .stale, .staleAuthenticating, .restarting, .loginOffer, .loginOfferApproval, .loginOfferError, .management, .durableManagement, .creation].contains(scenario) else { return }
         for portal in portals {
             let state: PortalTailscaleState
             if scenario == .stopped {
                 state = .stopped
-            } else if scenario == .authenticating || scenario == .creation {
+            } else if [.authenticating, .creation, .staleAuthenticating].contains(scenario) {
                 state = .authenticating
             } else if scenario == .awaitingApproval {
                 state = .awaitingApproval
@@ -439,7 +440,7 @@ private final class UITestHelperProcess: HelperProcess {
                 )
             ), delay: 0.01)
         }
-        guard scenario == .stale, !staleFailureScheduled else { return }
+        guard [.stale, .staleAuthenticating].contains(scenario), !staleFailureScheduled else { return }
         staleFailureScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
             guard self?.isRunning == true else { return }
