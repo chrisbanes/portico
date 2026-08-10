@@ -326,7 +326,7 @@ final class PorticoUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(focusedAuthenticate.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertTrue(authenticate.isHittable, app.debugDescription)
-        app.buttons["management-sidebar-overview"].click()
+        app.descendants(matching: .any)["management-sidebar-overview"].click()
         app.buttons["management-sidebar-portal-manual-portal"].click()
         XCTAssertFalse(focusedAuthenticate.waitForExistence(timeout: 1), app.debugDescription)
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(root)/helper-enrollment.txt"))
@@ -703,7 +703,7 @@ final class PorticoUITests: XCTestCase {
 
         app.buttons["login-offer-reminder"].click()
 
-        XCTAssertTrue(app.staticTexts["No Portals"].waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Connect Your Tailnet"].waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["overview-launch-at-login-offer"].exists)
         app.buttons["overview-login-offer-decline"].click()
         XCTAssertFalse(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 2))
