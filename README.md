@@ -78,6 +78,14 @@ You will need:
 
 Portico is a selected working name and has not yet been legally cleared.
 
+## Install with Homebrew
+
+Install Portico on macOS 14 or later with:
+
+```shell
+brew install --cask chrisbanes/tap/portico
+```
+
 ## Build from source
 
 Prerequisites:
@@ -116,11 +124,6 @@ Each release is a universal macOS 14+ application. The helper is built for
 arm64 and x86_64, embedded in Portico.app, signed before the app, and
 distributed in one notarized DMG. The direct download and Homebrew cask use
 that same DMG; Portico does not check for, download, or install updates itself.
-Homebrew users can install or update it with:
-
-```shell
-brew install --cask chrisbanes/tap/portico
-```
 
 The **Publish release** workflow is the only publishing path. It runs the
 Fastlane `mac release` lane and must be dispatched from `main` manually with a
