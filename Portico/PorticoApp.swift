@@ -180,7 +180,10 @@ private struct OverviewView: View {
                         controller.discardPortalDraft()
                         showingAddPortal = false
                     },
-                    dismissAfterPersistence: { showingAddPortal = false }
+                    didPersistPortal: { portal in
+                        selection = .portal(portal.id)
+                        showingAddPortal = false
+                    }
                 )
             }
             .onChange(of: controller.portals) { _, portals in
@@ -270,14 +273,15 @@ private struct OverviewView: View {
                   !hasRecoveryContent {
             VStack(spacing: 16) {
                 ContentUnavailableView {
-                    Label("No Portals", systemImage: "door.left.hand.open")
+                    Label("Connect Your Tailnet", systemImage: "door.left.hand.open")
                 } description: {
-                    Text("Add a Portal to give a Local App a private tailnet doorway.")
+                    Text("Create your first Portal. Next, you’ll sign in with Tailscale in your browser.")
+                        .accessibilityIdentifier("overview-first-portal-authentication-guidance")
                 }
                 if launchAtLogin.isOffering {
                     launchAtLoginOffer
                 }
-                Button("Add Portal") { showingAddPortal = true }
+                Button("Create Your First Portal") { showingAddPortal = true }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("overview-empty-add-portal")
             }
@@ -557,6 +561,14 @@ private struct SelectedPortalView: View {
                 }
             }
             Section("Actions") {
+                if status?.state == .authenticating {
+                    Label("Next, sign in with Tailscale in your browser.", systemImage: "key.fill")
+                        .font(.headline)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                        .accessibilityIdentifier("selected-authentication-guidance")
+                }
                 WrappingHStack {
                     if status?.state == .authenticating {
                         Button("Authenticate") { controller.authenticate(id: portal.id) }
@@ -966,7 +978,7 @@ private struct AddPortalSheet: View {
 
     @ObservedObject var controller: PortalController
     let cancel: () -> Void
-    let dismissAfterPersistence: () -> Void
+    let didPersistPortal: (PortalConfiguration) -> Void
     @FocusState private var inputFocus: FocusTarget?
     @AccessibilityFocusState private var accessibilityFocus: FocusTarget?
     @State private var step = Step.destination
@@ -1149,8 +1161,8 @@ private struct AddPortalSheet: View {
         case .validationError(.invalidRemoteHost):
             inputFocus = .remoteAppHost
             accessibilityFocus = .remoteAppHost
-        case .persisted:
-            dismissAfterPersistence()
+        case let .persisted(portal):
+            didPersistPortal(portal)
         case .persistenceFailure, nil:
             break
         }

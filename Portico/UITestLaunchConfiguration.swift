@@ -410,12 +410,12 @@ private final class UITestHelperProcess: HelperProcess {
     }
 
     private func emitStatuses(for portals: [ReconcilePortalPayload]) {
-        guard [.online, .stopped, .remoteOnline, .authenticating, .awaitingApproval, .stale, .restarting, .loginOffer, .loginOfferApproval, .loginOfferError, .management, .durableManagement].contains(scenario) else { return }
+        guard [.online, .stopped, .remoteOnline, .authenticating, .awaitingApproval, .stale, .restarting, .loginOffer, .loginOfferApproval, .loginOfferError, .management, .durableManagement, .creation].contains(scenario) else { return }
         for portal in portals {
             let state: PortalTailscaleState
             if scenario == .stopped {
                 state = .stopped
-            } else if scenario == .authenticating {
+            } else if scenario == .authenticating || scenario == .creation {
                 state = .authenticating
             } else if scenario == .awaitingApproval {
                 state = .awaitingApproval

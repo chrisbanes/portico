@@ -14,7 +14,11 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(app.buttons["overview-logging-disabled"].exists)
 
         app.buttons["overview-logging-enabled"].click()
-        XCTAssertTrue(app.staticTexts["No Portals"].waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Connect Your Tailnet"].waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(
+            app.staticTexts["overview-first-portal-authentication-guidance"].waitForExistence(timeout: 3),
+            app.debugDescription
+        )
         XCTAssertTrue(app.buttons["overview-add-portal"].isEnabled)
         let emptyStateAddPortal = app.buttons["overview-empty-add-portal"]
         XCTAssertTrue(emptyStateAddPortal.waitForExistence(timeout: 3), app.debugDescription)
@@ -36,7 +40,7 @@ final class PorticoUITests: XCTestCase {
         let overview = app.descendants(matching: .any)["management-overview"]
         XCTAssertTrue(overview.waitForExistence(timeout: 3), app.debugDescription)
         app.buttons["overview-logging-enabled"].click()
-        XCTAssertTrue(app.staticTexts["No Portals"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Connect Your Tailnet"].waitForExistence(timeout: 3))
         app.buttons["overview-add-portal"].click()
         XCTAssertTrue(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 3))
         app.buttons["add-portal-next"].click()
@@ -249,7 +253,7 @@ final class PorticoUITests: XCTestCase {
         let root = makeRoot()
         let app = launch(scenario: "creation", root: root)
         app.typeKey("o", modifierFlags: [.command, .shift])
-        XCTAssertTrue(app.staticTexts["No Portals"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Connect Your Tailnet"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["overview-add-portal"].waitForExistence(timeout: 3))
         app.buttons["overview-add-portal"].click()
         XCTAssertTrue(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 3))
@@ -300,7 +304,9 @@ final class PorticoUITests: XCTestCase {
         app.buttons["add-portal"].click()
 
         XCTAssertFalse(app.descendants(matching: .any)["add-portal-sheet"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["overview-portal-manual-portal"].waitForExistence(timeout: 3))
+        XCTAssertTrue(waitForValue("manual-portal", element: app.staticTexts["selected-portal-name"], timeout: 3))
+        XCTAssertTrue(app.staticTexts["selected-authentication-guidance"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["selected-authenticate"].isEnabled)
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(root)/helper-enrollment.txt"))
     }
 
