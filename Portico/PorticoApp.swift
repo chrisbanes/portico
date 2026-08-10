@@ -114,6 +114,7 @@ private struct OverviewView: View {
     @State private var removalCandidate: PortalConfiguration?
     @State private var removalCompletionFocusID: UUID?
     @State private var removalCancelFocusPortalID: UUID?
+    @State private var authenticationFocusPortalID: UUID?
     @AccessibilityFocusState private var accessibilityFocus: AccessibilityFocusTarget?
 
     var body: some View {
@@ -180,7 +181,11 @@ private struct OverviewView: View {
                         controller.discardPortalDraft()
                         showingAddPortal = false
                     },
-                    dismissAfterPersistence: { showingAddPortal = false }
+                    didPersistPortal: { portal in
+                        selection = .portal(portal.id)
+                        authenticationFocusPortalID = portal.id
+                        showingAddPortal = false
+                    }
                 )
             }
             .onChange(of: controller.portals) { _, portals in
@@ -270,14 +275,15 @@ private struct OverviewView: View {
                   !hasRecoveryContent {
             VStack(spacing: 16) {
                 ContentUnavailableView {
-                    Label("No Portals", systemImage: "door.left.hand.open")
+                    Label("Connect Your Tailnet", systemImage: "door.left.hand.open")
                 } description: {
-                    Text("Add a Portal to give a Local App a private tailnet doorway.")
+                    Text("Create your first Portal. Next, you’ll sign in with Tailscale in your browser.")
+                        .accessibilityIdentifier("overview-first-portal-authentication-guidance")
                 }
                 if launchAtLogin.isOffering {
                     launchAtLoginOffer
                 }
-                Button("Add Portal") { showingAddPortal = true }
+                Button("Create Your First Portal") { showingAddPortal = true }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("overview-empty-add-portal")
             }
@@ -364,13 +370,24 @@ private struct OverviewView: View {
             SelectedPortalView(
                 controller: controller,
                 portal: portal,
+                authenticationFocusRequestID: authenticationFocusPortalID == portal.id &&
+                    controller.actionAvailability(for: portal).authenticate ? portal.id : nil,
                 removalFocusRequestID: removalCancelFocusPortalID == portal.id
                     ? portal.id
-                    : nil
-            ) {
-                removalCancelFocusPortalID = nil
-                removalCandidate = portal
-            }
+                    : nil,
+                onFocusRestored: { id in
+                    if authenticationFocusPortalID == id {
+                        authenticationFocusPortalID = nil
+                    }
+                    if removalCancelFocusPortalID == id {
+                        removalCancelFocusPortalID = nil
+                    }
+                },
+                onRemove: {
+                    removalCancelFocusPortalID = nil
+                    removalCandidate = portal
+                }
+            )
         case .pendingRemoval:
             RemovingPortalView(controller: controller, portal: portal)
         case .pendingTailnetRejection:
@@ -436,19 +453,25 @@ private struct SelectedPortalView: View {
     @Environment(\.openWindow) private var openWindow
     @ObservedObject var controller: PortalController
     let portal: PortalConfiguration
+    let authenticationFocusRequestID: UUID?
     let removalFocusRequestID: UUID?
+    let onFocusRestored: (UUID) -> Void
     let onRemove: () -> Void
     @State private var destinationEdit: PortalDestinationEdit
 
     init(
         controller: PortalController,
         portal: PortalConfiguration,
+        authenticationFocusRequestID: UUID?,
         removalFocusRequestID: UUID?,
+        onFocusRestored: @escaping (UUID) -> Void,
         onRemove: @escaping () -> Void
     ) {
         self.controller = controller
         self.portal = portal
+        self.authenticationFocusRequestID = authenticationFocusRequestID
         self.removalFocusRequestID = removalFocusRequestID
+        self.onFocusRestored = onFocusRestored
         self.onRemove = onRemove
         _destinationEdit = State(initialValue: PortalDestinationEdit(destination: portal.destination))
     }
@@ -557,11 +580,25 @@ private struct SelectedPortalView: View {
                 }
             }
             Section("Actions") {
+                if portalActions.authenticate {
+                    Label("Next, sign in with Tailscale in your browser.", systemImage: "key.fill")
+                        .font(.headline)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                        .accessibilityIdentifier("selected-authentication-guidance")
+                }
                 WrappingHStack {
                     if status?.state == .authenticating {
-                        Button("Authenticate") { controller.authenticate(id: portal.id) }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(!portalActions.authenticate)
+                        FocusRestoringButton(
+                            title: "Authenticate",
+                            isEnabled: portalActions.authenticate,
+                            isProminent: true,
+                            focusRequestID: authenticationFocusRequestID,
+                            onFocusRestored: onFocusRestored
+                        ) {
+                            controller.authenticate(id: portal.id)
+                        }
                             .accessibilityIdentifier("selected-authenticate")
                     }
                     FocusRestoringButton(
@@ -588,6 +625,7 @@ private struct SelectedPortalView: View {
                         isEnabled: portalActions.remove,
                         isDestructive: true,
                         focusRequestID: removalFocusRequestID,
+                        onFocusRestored: onFocusRestored,
                         action: onRemove
                     )
                         .accessibilityIdentifier("selected-remove-portal")
@@ -748,26 +786,38 @@ private struct FocusRestoringButton: NSViewRepresentable {
     let title: String
     let isEnabled: Bool
     var isDestructive = false
+    var isProminent = false
     var focusRequestID: UUID?
+    var onFocusRestored: ((UUID) -> Void)?
     let action: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(action: action, focusRequestID: focusRequestID)
+        Coordinator(
+            action: action,
+            focusRequestID: focusRequestID,
+            onFocusRestored: onFocusRestored
+        )
     }
 
     func makeNSView(context: Context) -> NSButton {
         let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.performAction))
         button.bezelStyle = .rounded
         button.controlSize = .small
+        button.bezelColor = isProminent ? .controlAccentColor : nil
+        if context.coordinator.focusRequestID != nil {
+            context.coordinator.restoreFocus(afterSheetDismissal: button)
+        }
         return button
     }
 
     func updateNSView(_ button: NSButton, context: Context) {
         let titleChanged = button.title != title
         context.coordinator.action = action
+        context.coordinator.onFocusRestored = onFocusRestored
         button.title = title
         button.isEnabled = isEnabled
         button.contentTintColor = isDestructive ? .systemRed : nil
+        button.bezelColor = isProminent ? .controlAccentColor : nil
         let focusRequested = context.coordinator.focusRequestID != focusRequestID
         context.coordinator.focusRequestID = focusRequestID
         guard titleChanged || (focusRequested && focusRequestID != nil) else { return }
@@ -781,11 +831,17 @@ private struct FocusRestoringButton: NSViewRepresentable {
     final class Coordinator: NSObject {
         var action: () -> Void
         var focusRequestID: UUID?
+        var onFocusRestored: ((UUID) -> Void)?
         private var sheetObserver: NSObjectProtocol?
 
-        init(action: @escaping () -> Void, focusRequestID: UUID?) {
+        init(
+            action: @escaping () -> Void,
+            focusRequestID: UUID?,
+            onFocusRestored: ((UUID) -> Void)?
+        ) {
             self.action = action
             self.focusRequestID = focusRequestID
+            self.onFocusRestored = onFocusRestored
         }
 
         deinit {
@@ -793,11 +849,12 @@ private struct FocusRestoringButton: NSViewRepresentable {
         }
 
         func restoreFocus(afterSheetDismissal button: NSButton) {
+            let requestedFocusID = focusRequestID
             DispatchQueue.main.async { [weak self, weak button] in
                 guard let self, let button, let window = button.window else { return }
                 self.removeSheetObserver()
                 guard window.attachedSheet != nil else {
-                    window.makeFirstResponder(button)
+                    self.focus(button, in: window, for: requestedFocusID)
                     return
                 }
                 self.sheetObserver = NotificationCenter.default.addObserver(
@@ -805,10 +862,19 @@ private struct FocusRestoringButton: NSViewRepresentable {
                     object: window,
                     queue: .main
                 ) { [weak self, weak button, weak window] _ in
-                    self?.removeSheetObserver()
-                    guard let button, let window else { return }
-                    window.makeFirstResponder(button)
+                    guard let self, let button, let window else { return }
+                    self.removeSheetObserver()
+                    self.focus(button, in: window, for: requestedFocusID)
                 }
+            }
+        }
+
+        private func focus(_ button: NSButton, in window: NSWindow, for focusRequestID: UUID?) {
+            guard focusRequestID == nil || self.focusRequestID == focusRequestID else { return }
+            button.scrollToVisible(button.bounds)
+            window.makeFirstResponder(button)
+            if let focusRequestID {
+                onFocusRestored?(focusRequestID)
             }
         }
 
@@ -966,7 +1032,7 @@ private struct AddPortalSheet: View {
 
     @ObservedObject var controller: PortalController
     let cancel: () -> Void
-    let dismissAfterPersistence: () -> Void
+    let didPersistPortal: (PortalConfiguration) -> Void
     @FocusState private var inputFocus: FocusTarget?
     @AccessibilityFocusState private var accessibilityFocus: FocusTarget?
     @State private var step = Step.destination
@@ -1149,8 +1215,8 @@ private struct AddPortalSheet: View {
         case .validationError(.invalidRemoteHost):
             inputFocus = .remoteAppHost
             accessibilityFocus = .remoteAppHost
-        case .persisted:
-            dismissAfterPersistence()
+        case let .persisted(portal):
+            didPersistPortal(portal)
         case .persistenceFailure, nil:
             break
         }
