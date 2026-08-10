@@ -326,6 +326,9 @@ final class PorticoUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(focusedAuthenticate.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertTrue(authenticate.isHittable, app.debugDescription)
+        app.buttons["management-sidebar-overview"].click()
+        app.buttons["management-sidebar-portal-manual-portal"].click()
+        XCTAssertFalse(focusedAuthenticate.waitForExistence(timeout: 1), app.debugDescription)
         XCTAssertTrue(FileManager.default.fileExists(atPath: "\(root)/helper-enrollment.txt"))
     }
 

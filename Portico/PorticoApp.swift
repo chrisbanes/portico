@@ -375,6 +375,14 @@ private struct OverviewView: View {
                 removalFocusRequestID: removalCancelFocusPortalID == portal.id
                     ? portal.id
                     : nil,
+                onFocusRestored: { id in
+                    if authenticationFocusPortalID == id {
+                        authenticationFocusPortalID = nil
+                    }
+                    if removalCancelFocusPortalID == id {
+                        removalCancelFocusPortalID = nil
+                    }
+                },
                 onRemove: {
                     removalCancelFocusPortalID = nil
                     removalCandidate = portal
@@ -447,6 +455,7 @@ private struct SelectedPortalView: View {
     let portal: PortalConfiguration
     let authenticationFocusRequestID: UUID?
     let removalFocusRequestID: UUID?
+    let onFocusRestored: (UUID) -> Void
     let onRemove: () -> Void
     @State private var destinationEdit: PortalDestinationEdit
 
@@ -455,12 +464,14 @@ private struct SelectedPortalView: View {
         portal: PortalConfiguration,
         authenticationFocusRequestID: UUID?,
         removalFocusRequestID: UUID?,
+        onFocusRestored: @escaping (UUID) -> Void,
         onRemove: @escaping () -> Void
     ) {
         self.controller = controller
         self.portal = portal
         self.authenticationFocusRequestID = authenticationFocusRequestID
         self.removalFocusRequestID = removalFocusRequestID
+        self.onFocusRestored = onFocusRestored
         self.onRemove = onRemove
         _destinationEdit = State(initialValue: PortalDestinationEdit(destination: portal.destination))
     }
@@ -583,7 +594,8 @@ private struct SelectedPortalView: View {
                             title: "Authenticate",
                             isEnabled: portalActions.authenticate,
                             isProminent: true,
-                            focusRequestID: authenticationFocusRequestID
+                            focusRequestID: authenticationFocusRequestID,
+                            onFocusRestored: onFocusRestored
                         ) {
                             controller.authenticate(id: portal.id)
                         }
@@ -613,6 +625,7 @@ private struct SelectedPortalView: View {
                         isEnabled: portalActions.remove,
                         isDestructive: true,
                         focusRequestID: removalFocusRequestID,
+                        onFocusRestored: onFocusRestored,
                         action: onRemove
                     )
                         .accessibilityIdentifier("selected-remove-portal")
@@ -775,10 +788,15 @@ private struct FocusRestoringButton: NSViewRepresentable {
     var isDestructive = false
     var isProminent = false
     var focusRequestID: UUID?
+    var onFocusRestored: ((UUID) -> Void)?
     let action: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(action: action, focusRequestID: focusRequestID)
+        Coordinator(
+            action: action,
+            focusRequestID: focusRequestID,
+            onFocusRestored: onFocusRestored
+        )
     }
 
     func makeNSView(context: Context) -> NSButton {
@@ -795,6 +813,7 @@ private struct FocusRestoringButton: NSViewRepresentable {
     func updateNSView(_ button: NSButton, context: Context) {
         let titleChanged = button.title != title
         context.coordinator.action = action
+        context.coordinator.onFocusRestored = onFocusRestored
         button.title = title
         button.isEnabled = isEnabled
         button.contentTintColor = isDestructive ? .systemRed : nil
@@ -812,11 +831,17 @@ private struct FocusRestoringButton: NSViewRepresentable {
     final class Coordinator: NSObject {
         var action: () -> Void
         var focusRequestID: UUID?
+        var onFocusRestored: ((UUID) -> Void)?
         private var sheetObserver: NSObjectProtocol?
 
-        init(action: @escaping () -> Void, focusRequestID: UUID?) {
+        init(
+            action: @escaping () -> Void,
+            focusRequestID: UUID?,
+            onFocusRestored: ((UUID) -> Void)?
+        ) {
             self.action = action
             self.focusRequestID = focusRequestID
+            self.onFocusRestored = onFocusRestored
         }
 
         deinit {
@@ -824,12 +849,12 @@ private struct FocusRestoringButton: NSViewRepresentable {
         }
 
         func restoreFocus(afterSheetDismissal button: NSButton) {
+            let requestedFocusID = focusRequestID
             DispatchQueue.main.async { [weak self, weak button] in
                 guard let self, let button, let window = button.window else { return }
                 self.removeSheetObserver()
                 guard window.attachedSheet != nil else {
-                    button.scrollToVisible(button.bounds)
-                    window.makeFirstResponder(button)
+                    self.focus(button, in: window, for: requestedFocusID)
                     return
                 }
                 self.sheetObserver = NotificationCenter.default.addObserver(
@@ -837,11 +862,19 @@ private struct FocusRestoringButton: NSViewRepresentable {
                     object: window,
                     queue: .main
                 ) { [weak self, weak button, weak window] _ in
-                    self?.removeSheetObserver()
-                    guard let button, let window else { return }
-                    button.scrollToVisible(button.bounds)
-                    window.makeFirstResponder(button)
+                    guard let self, let button, let window else { return }
+                    self.removeSheetObserver()
+                    self.focus(button, in: window, for: requestedFocusID)
                 }
+            }
+        }
+
+        private func focus(_ button: NSButton, in window: NSWindow, for focusRequestID: UUID?) {
+            guard focusRequestID == nil || self.focusRequestID == focusRequestID else { return }
+            button.scrollToVisible(button.bounds)
+            window.makeFirstResponder(button)
+            if let focusRequestID {
+                onFocusRestored?(focusRequestID)
             }
         }
 
