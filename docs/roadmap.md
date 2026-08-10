@@ -28,8 +28,8 @@
   validation.
 - Complete accessibility, keyboard navigation, VoiceOver, localization
   readiness, and polished error recovery.
-- Automate universal helper builds, inside-out signing, notarization, release
-  verification, and versioned DMG or ZIP publication.
+- Automate architecture-specific helper builds, inside-out signing,
+  notarization, release verification, and versioned DMG or ZIP publication.
 - Publish the initial Homebrew cask in
   [`chrisbanes/homebrew-tap`](https://github.com/chrisbanes/homebrew-tap) and a
   support/troubleshooting guide.
