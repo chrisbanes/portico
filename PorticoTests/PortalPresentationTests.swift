@@ -94,4 +94,14 @@ final class PortalPresentationTests: XCTestCase {
         XCTAssertEqual(PorticoAnnouncement.text(for: .preferenceRestartCompleted), "Logging preference restart completed.")
         XCTAssertEqual(PorticoAnnouncement.text(for: .preferenceRestartFailed), "Logging preference restart failed.")
     }
+
+    func testUnavailableInstallationOverridesConnectingHelperPresentation() {
+        let presentation = HelperStatusPresentation(
+            isInstallationAvailable: false,
+            helperAvailability: .connecting
+        )
+
+        XCTAssertEqual(presentation.title, "Saved configuration unavailable")
+        XCTAssertEqual(presentation.symbolName, "exclamationmark.triangle")
+    }
 }

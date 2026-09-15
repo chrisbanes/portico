@@ -115,6 +115,33 @@ final class PortalStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.installationURL.path))
     }
 
+    func testInvalidHistoricalRecordsDoNotCreateVersionFourOrRemoveTheirSource() throws {
+        let records: [(KeyPath<PortalStore, URL>, Data)] = [
+            (\.legacyConfigurationURL, Data(
+                #"{"version":1,"portal":{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"Invalid Name","localAppPort":8787,"createdAt":807692800}}"#.utf8
+            )),
+            (\.versionTwoInstallationURL, Data(
+                #"{"version":2,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"lifecycle":"active"},{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"atlas","localAppPort":8788,"createdAt":807692801,"lifecycle":"active"}],"alerts":[]}"#.utf8
+            )),
+            (\.versionThreeInstallationURL, Data(
+                #"{"version":3,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"Invalid Name","localAppPort":8787,"createdAt":807692800,"lifecycle":"active"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#.utf8
+            )),
+            (\.versionThreeInstallationURL, Data(
+                #"{"version":3,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"lifecycle":"pendingTailnetRejection"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#.utf8
+            )),
+        ]
+
+        for (path, source) in records {
+            let store = PortalStore(rootURL: temporaryRoot())
+            try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
+            try source.write(to: store[keyPath: path])
+
+            XCTAssertThrowsError(try store.loadInstallation())
+            XCTAssertEqual(try Data(contentsOf: store[keyPath: path]), source)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: store.installationURL.path))
+        }
+    }
+
     func testNonPristineVersionTwoMigrationsPreserveExistingLoggingBehavior() throws {
         let records = [
             #"{"version":2,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"lifecycle":"active"}],"alerts":[]}"#,
@@ -393,6 +420,31 @@ final class PortalStoreTests: XCTestCase {
         ).write(to: store.installationURL)
 
         XCTAssertThrowsError(try store.loadInstallation())
+    }
+
+    func testInvalidVersionFourRecordsFailClosedBeforeOlderCleanup() throws {
+        let records = [
+            #"{"version":4,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","destination":{"kind":"localApp","port":8787},"createdAt":807692800,"lifecycle":"active"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#,
+            #"{"version":4,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","destination":{"kind":"localApp","port":8787},"createdAt":807692800,"desiredState":"enabled","lifecycle":"active"},{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"atlas","destination":{"kind":"localApp","port":8788},"createdAt":807692801,"desiredState":"enabled","lifecycle":"active"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#,
+            #"{"version":4,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"Invalid Name","destination":{"kind":"localApp","port":8787},"createdAt":807692800,"desiredState":"enabled","lifecycle":"active"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#,
+            #"{"version":4,"tailnetBinding":{"name":"opaque-tailnet-id","magicDNSSuffix":"not a suffix"},"portals":[],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#,
+            #"{"version":4,"tailnetBinding":{"name":"","magicDNSSuffix":"example.ts.net"},"portals":[],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#,
+            #"{"version":4,"portals":[],"alerts":[{"id":"1F93E456-69EC-445A-8374-D7FC5558D0C7","kind":"crossTailnetRejection","portalName":"hermes","assignedName":"not a name","createdAt":807692800}],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#,
+            #"{"version":4,"portals":[],"alerts":[{"id":"1F93E456-69EC-445A-8374-D7FC5558D0C7","kind":"crossTailnetRejection","portalName":"hermes","createdAt":807692800},{"id":"1F93E456-69EC-445A-8374-D7FC5558D0C7","kind":"crossTailnetRejection","portalName":"atlas","createdAt":807692801}],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#,
+            #"{"version":4,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","destination":{"kind":"localApp","port":8787},"createdAt":807692800,"desiredState":"enabled","lifecycle":"active","removalAssignedName":"hermes-1"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#,
+        ]
+
+        for record in records {
+            let store = PortalStore(rootURL: temporaryRoot())
+            let authoritative = Data(record.utf8)
+            try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
+            try authoritative.write(to: store.installationURL)
+            try Data(#"{"version":2,"portals":[],"alerts":[]}"#.utf8).write(to: store.versionTwoInstallationURL)
+
+            XCTAssertThrowsError(try store.loadInstallation())
+            XCTAssertEqual(try Data(contentsOf: store.installationURL), authoritative)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: store.versionTwoInstallationURL.path))
+        }
     }
 
     func testSavingFirstPortalPreservesInstallationBindingAndAlerts() throws {

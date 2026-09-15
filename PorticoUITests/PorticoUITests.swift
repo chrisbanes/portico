@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 
 final class PorticoUITests: XCTestCase {
@@ -60,6 +61,30 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(app.textFields["portal-name-field"].waitForExistence(timeout: 3))
         XCTAssertEqual(app.textFields["portal-name-field"].value as? String, "")
         XCTAssertEqual(app.textFields["local-app-port-field"].value as? String, "")
+    }
+
+    func testCorruptInstallationShowsPersistenceFailureWithoutStartingHelper() {
+        let root = makeRoot()
+        let app = launch(scenario: "corrupt-installation", root: root)
+
+        openMenuBarExtra(app)
+        XCTAssertTrue(waitForText(
+            "Saved configuration unavailable",
+            element: app.descendants(matching: .any)["helper-state"],
+            timeout: 3
+        ))
+        XCTAssertFalse(app.descendants(matching: .any)["helper-state"].label.contains("Connecting"))
+        app.buttons["compact-attention"].click()
+        XCTAssertTrue(
+            waitForText(
+                "Saved Portal configuration could not be loaded.",
+                element: app.staticTexts["overview-message"],
+                timeout: 3
+            ),
+            app.debugDescription
+        )
+        XCTAssertFalse(app.buttons["overview-retry-helper"].exists)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: "\(root)/helper-started"))
     }
 
     func testManagementSidebarOrdersAndSelectsActivePortals() {

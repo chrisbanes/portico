@@ -21,6 +21,137 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(controller.message, "Choose an operational-support logging setting before adding a Portal.")
     }
 
+    func testUnavailableInstallationDoesNotPublishStartHelperWorkOrPersistSettings() throws {
+        let root = temporaryRoot()
+        let store = PortalStore(rootURL: root)
+        let authoritative = Data("not-json".utf8)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try authoritative.write(to: store.installationURL)
+        let client = FakePortalHelperClient()
+
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        XCTAssertFalse(controller.isInstallationAvailable)
+        XCTAssertTrue(controller.portals.isEmpty)
+        XCTAssertTrue(controller.alerts.isEmpty)
+        XCTAssertEqual(controller.operationalLogging, .undecided)
+        XCTAssertEqual(controller.launchAtLoginOffer, .notOffered)
+        XCTAssertEqual(controller.message, "Saved Portal configuration could not be loaded.")
+        XCTAssertTrue(client.reconciliations.isEmpty)
+        XCTAssertTrue(client.discoveryCompletions.isEmpty)
+
+        controller.setOperationalLogging(.enabled)
+        XCTAssertFalse(controller.commitLaunchAtLoginOffer(.presented))
+        controller.portalName = "hermes"
+        controller.localAppPort = "8787"
+        XCTAssertNil(controller.addPortal())
+        client.disconnect(as: .failed)
+        client.connect()
+        controller.retryHelper()
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .online,
+            stableNodeId: nil,
+            assignedName: "hermes-1",
+            portalURL: URL(string: "https://hermes-1.example.ts.net/"),
+            addresses: [],
+            magicDNSSuffix: "example.ts.net"
+        )))
+
+        XCTAssertEqual(controller.message, "Saved Portal configuration could not be loaded.")
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), authoritative)
+        XCTAssertTrue(client.restartedWith.isEmpty)
+        XCTAssertTrue(client.reconciliations.isEmpty)
+        XCTAssertTrue(client.discoveryCompletions.isEmpty)
+        XCTAssertEqual(client.retryCount, 0)
+    }
+
+    func testPendingTailnetRejectionWithoutBindingFailsClosedBeforeHelperCleanup() throws {
+        let root = temporaryRoot()
+        let store = PortalStore(rootURL: root)
+        let authoritative = Data(
+            #"{"version":4,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","destination":{"kind":"localApp","port":8787},"createdAt":807692800,"desiredState":"enabled","lifecycle":"pendingTailnetRejection"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#.utf8
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try authoritative.write(to: store.installationURL)
+
+        XCTAssertThrowsError(try store.loadInstallation())
+        let client = FakePortalHelperClient(availability: .connected)
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        XCTAssertFalse(controller.isInstallationAvailable)
+        XCTAssertTrue(client.cleaned.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), authoritative)
+    }
+
+    func testUnreadableInstallationFailsClosedWithoutOverwritingSource() throws {
+        let root = temporaryRoot()
+        let store = PortalStore(rootURL: root)
+        try store.save(InstallationRecord(operationalLogging: .enabled))
+        let authoritative = try Data(contentsOf: store.installationURL)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: root.path)
+
+        XCTAssertThrowsError(try store.prepareForStartup())
+        XCTAssertThrowsError(try store.loadInstallation())
+
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+        XCTAssertFalse(controller.isInstallationAvailable)
+        controller.setOperationalLogging(.disabled)
+        controller.portalName = "hermes"
+        controller.localAppPort = "8787"
+        XCTAssertNil(controller.addPortal())
+        XCTAssertTrue(client.restartedWith.isEmpty)
+        XCTAssertTrue(client.reconciliations.isEmpty)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), authoritative)
+    }
+
+    func testUnavailableInstallationDiagnosticReportIsSanitizedAndInert() throws {
+        let root = temporaryRoot()
+        let store = PortalStore(rootURL: root)
+        let authoritative = Data("not-json".utf8)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try authoritative.write(to: store.installationURL)
+        let client = FakePortalHelperClient(availability: .connecting)
+
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+        let report = controller.diagnosticReport()
+
+        XCTAssertTrue(report.contains("Helper: saved configuration unavailable"))
+        XCTAssertTrue(report.contains("Portals: unavailable"))
+        for excluded in [root.path, "not-json", "DecodingError", "Helper: connecting"] {
+            XCTAssertFalse(report.contains(excluded), excluded)
+        }
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), authoritative)
+        XCTAssertTrue(client.reconciliations.isEmpty)
+        XCTAssertTrue(client.discoveryCompletions.isEmpty)
+    }
+
+    func testInvalidHistoricalInstallationDoesNotPublishOrStartHelper() throws {
+        let root = temporaryRoot()
+        let store = PortalStore(rootURL: root)
+        let source = Data(
+            #"{"version":2,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"lifecycle":"active"},{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"atlas","localAppPort":8788,"createdAt":807692801,"lifecycle":"active"}],"alerts":[]}"#.utf8
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try source.write(to: store.versionTwoInstallationURL)
+        let client = FakePortalHelperClient()
+
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        XCTAssertFalse(controller.isInstallationAvailable)
+        XCTAssertTrue(controller.portals.isEmpty)
+        XCTAssertEqual(controller.message, "Saved Portal configuration could not be loaded.")
+        XCTAssertEqual(try Data(contentsOf: store.versionTwoInstallationURL), source)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.installationURL.path))
+        XCTAssertTrue(client.reconciliations.isEmpty)
+        XCTAssertTrue(client.discoveryCompletions.isEmpty)
+    }
+
     func testLoggingPreferenceCommitsBeforeControlledRestartAndSameValueIsNoOp() throws {
         let store = PortalStore(rootURL: temporaryRoot())
         try store.save(InstallationRecord(operationalLogging: .enabled))
@@ -382,7 +513,10 @@ final class PortalControllerTests: XCTestCase {
             lifecycle: .pendingTailnetRejection
         )
         let store = PortalStore(rootURL: temporaryRoot())
-        try store.save(InstallationRecord(portals: [enabled, pending, stopped]))
+        try store.save(InstallationRecord(
+            tailnetBinding: TailnetBinding(name: "opaque-tailnet-id", magicDNSSuffix: "example.ts.net"),
+            portals: [enabled, pending, stopped]
+        ))
         let client = FakePortalHelperClient(availability: .connecting)
         let controller = PortalController(store: store, helper: client, openURL: { _ in })
 

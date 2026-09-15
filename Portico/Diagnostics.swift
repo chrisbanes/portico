@@ -67,6 +67,7 @@ enum DiagnosticReportRenderer {
     static func render(
         versions: DiagnosticVersions,
         helper: HelperAvailability,
+        isInstallationAvailable: Bool,
         portals: [PortalDiagnosticFacts],
         history: [DiagnosticEntry]
     ) -> String {
@@ -76,21 +77,25 @@ enum DiagnosticReportRenderer {
             lines.append("Portico \(short)\(build)")
         }
         lines.append("Helper protocol \(versions.helperProtocol)")
-        lines.append("Helper: \(describeHelper(helper))")
+        lines.append("Helper: \(isInstallationAvailable ? describeHelper(helper) : "saved configuration unavailable")")
         lines.append("")
-        lines.append("Portals")
-        for portal in portals.sorted(by: { $0.portalName < $1.portalName }) {
-            lines.append("- Portal Name: \(portal.portalName)")
-            append("  Assigned Name", portal.assignedName, to: &lines)
-            append("  Portal URL", portal.portalURL?.absoluteString, to: &lines)
-            if !portal.addresses.isEmpty {
-                lines.append("  Tailscale IPs: \(portal.addresses.joined(separator: ", "))")
+        if isInstallationAvailable {
+            lines.append("Portals")
+            for portal in portals.sorted(by: { $0.portalName < $1.portalName }) {
+                lines.append("- Portal Name: \(portal.portalName)")
+                append("  Assigned Name", portal.assignedName, to: &lines)
+                append("  Portal URL", portal.portalURL?.absoluteString, to: &lines)
+                if !portal.addresses.isEmpty {
+                    lines.append("  Tailscale IPs: \(portal.addresses.joined(separator: ", "))")
+                }
+                append("  MagicDNS suffix", portal.magicDNSSuffix, to: &lines)
+                lines.append("  Desired: \(portal.desiredState.rawValue)")
+                lines.append("  Tailscale: \(portal.tailscaleState?.rawValue ?? "unknown")")
+                lines.append("  Reachability: \(portal.reachability.rawValue)")
+                lines.append("  Facts: \(portal.isStale ? "stale" : "current")")
             }
-            append("  MagicDNS suffix", portal.magicDNSSuffix, to: &lines)
-            lines.append("  Desired: \(portal.desiredState.rawValue)")
-            lines.append("  Tailscale: \(portal.tailscaleState?.rawValue ?? "unknown")")
-            lines.append("  Reachability: \(portal.reachability.rawValue)")
-            lines.append("  Facts: \(portal.isStale ? "stale" : "current")")
+        } else {
+            lines.append("Portals: unavailable")
         }
         lines.append("")
         lines.append("History")

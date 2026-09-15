@@ -229,13 +229,20 @@ extension PortalConfiguration {
         name = try container.decode(String.self, forKey: .name)
         destination = try container.decode(PortalDestination.self, forKey: .destination)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
-        desiredState = try container.contains(.desiredState)
-            ? container.decode(PortalDesiredState.self, forKey: .desiredState)
-            : .enabled
+        desiredState = try container.decode(PortalDesiredState.self, forKey: .desiredState)
         lifecycle = try container.decode(PortalLifecycle.self, forKey: .lifecycle)
-        removalAssignedName = lifecycle == .pendingRemoval
-            ? try container.decodeIfPresent(String.self, forKey: .removalAssignedName)
-            : nil
+        if lifecycle == .pendingRemoval {
+            removalAssignedName = try container.decodeIfPresent(String.self, forKey: .removalAssignedName)
+        } else {
+            guard !container.contains(.removalAssignedName) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .removalAssignedName,
+                    in: container,
+                    debugDescription: "Only removing Portals may retain an assigned name."
+                )
+            }
+            removalAssignedName = nil
+        }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -314,6 +321,48 @@ struct InstallationRecord: Codable, Equatable {
         self.operationalLogging = operationalLogging
         self.launchAtLoginOffer = launchAtLoginOffer
     }
+}
+
+extension InstallationRecord {
+    func validateCurrentRecord() throws {
+        guard Set(portals.map(\.id)).count == portals.count else {
+            throw PortalStoreError.invalidInstallation
+        }
+        for portal in portals {
+            guard isValidDNSLabel(portal.name.utf8),
+                  portal.lifecycle != .pendingRemoval || portal.removalAssignedName.map({ isValidDNSLabel($0.utf8) }) != false
+            else {
+                throw PortalStoreError.invalidInstallation
+            }
+        }
+        guard tailnetBinding != nil || !portals.contains(where: { $0.lifecycle == .pendingTailnetRejection }) else {
+            throw PortalStoreError.invalidInstallation
+        }
+        if let tailnetBinding {
+            guard !tailnetBinding.name.isEmpty,
+                  isValidMagicDNSSuffix(tailnetBinding.magicDNSSuffix)
+            else {
+                throw PortalStoreError.invalidInstallation
+            }
+        }
+        guard Set(alerts.map(\.id)).count == alerts.count else {
+            throw PortalStoreError.invalidInstallation
+        }
+        for alert in alerts {
+            guard isValidDNSLabel(alert.portalName.utf8),
+                  alert.assignedName.map({ isValidDNSLabel($0.utf8) }) != false,
+                  alert.expectedMagicDNSSuffix.map(isValidMagicDNSSuffix) != false,
+                  alert.rejectedMagicDNSSuffix.map(isValidMagicDNSSuffix) != false
+            else {
+                throw PortalStoreError.invalidInstallation
+            }
+        }
+    }
+}
+
+private func isValidMagicDNSSuffix(_ suffix: String) -> Bool {
+    suffix.hasSuffix(".ts.net")
+        && suffix.split(separator: ".", omittingEmptySubsequences: false).allSatisfy { isValidDNSLabel($0.utf8) }
 }
 
 

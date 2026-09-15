@@ -3,6 +3,7 @@ import Foundation
 enum PortalStoreError: Error {
     case alreadyExists
     case invalidHistoricalDestination
+    case invalidInstallation
     case unsupportedVersion(Int)
 }
 
@@ -48,14 +49,7 @@ struct PortalStore {
     }
 
     func prepareForStartup() throws -> PortalStoreStartupResult {
-        let hasExistingInstallation = [
-            installationURL,
-            versionThreeInstallationURL,
-            versionTwoInstallationURL,
-            legacyConfigurationURL,
-        ].contains { FileManager.default.fileExists(atPath: $0.path) }
-        guard !hasExistingInstallation else {
-            _ = try loadInstallation()
+        if try loadStoredInstallation() != nil {
             return .existingInstallation
         }
 
@@ -73,41 +67,44 @@ struct PortalStore {
     }
 
     func loadInstallation() throws -> InstallationRecord {
-        if FileManager.default.fileExists(atPath: installationURL.path) {
-            let data = try Data(contentsOf: installationURL)
+        try loadStoredInstallation() ?? InstallationRecord()
+    }
+
+    private func loadStoredInstallation() throws -> InstallationRecord? {
+        if let data = try storedDataIfPresent(at: installationURL) {
             let installation = try JSONDecoder().decode(InstallationRecord.self, from: data)
             guard installation.version == InstallationRecord.currentVersion else {
                 throw PortalStoreError.unsupportedVersion(installation.version)
             }
+            try installation.validateCurrentRecord()
             removeOlderFiles()
             return installation
         }
-        if FileManager.default.fileExists(atPath: versionThreeInstallationURL.path) {
-            let data = try Data(contentsOf: versionThreeInstallationURL)
+        if let data = try storedDataIfPresent(at: versionThreeInstallationURL) {
             let historical = try JSONDecoder().decode(VersionThreeInstallationRecord.self, from: data)
             guard historical.version == VersionThreeInstallationRecord.currentVersion else {
                 throw PortalStoreError.unsupportedVersion(historical.version)
             }
             let installation = try historical.migrate()
+            try installation.validateCurrentRecord()
             try save(installation)
             removeOlderFiles()
             return installation
         }
-        if FileManager.default.fileExists(atPath: versionTwoInstallationURL.path) {
-            let data = try Data(contentsOf: versionTwoInstallationURL)
+        if let data = try storedDataIfPresent(at: versionTwoInstallationURL) {
             let historical = try JSONDecoder().decode(VersionTwoInstallationRecord.self, from: data)
             guard historical.version == VersionTwoInstallationRecord.currentVersion else {
                 throw PortalStoreError.unsupportedVersion(historical.version)
             }
             let installation = try historical.migrate()
+            try installation.validateCurrentRecord()
             try save(installation)
             removeOlderFiles()
             return installation
         }
-        guard FileManager.default.fileExists(atPath: legacyConfigurationURL.path) else {
-            return InstallationRecord()
+        guard let data = try storedDataIfPresent(at: legacyConfigurationURL) else {
+            return nil
         }
-        let data = try Data(contentsOf: legacyConfigurationURL)
         let envelope = try JSONDecoder().decode(LegacyPortalConfigurationEnvelope.self, from: data)
         guard envelope.version == LegacyPortalConfigurationEnvelope.currentVersion else {
             throw PortalStoreError.unsupportedVersion(envelope.version)
@@ -117,9 +114,32 @@ struct PortalStore {
             operationalLogging: .enabled,
             launchAtLoginOffer: .notOffered
         )
+        try installation.validateCurrentRecord()
         try save(installation)
         removeOlderFiles()
         return installation
+    }
+
+    private func storedDataIfPresent(at url: URL) throws -> Data? {
+        guard try itemExists(at: url) else { return nil }
+        return try Data(contentsOf: url)
+    }
+
+    private func itemExists(at url: URL) throws -> Bool {
+        do {
+            _ = try FileManager.default.attributesOfItem(atPath: url.path)
+            return true
+        } catch {
+            let nsError = error as NSError
+            if nsError.domain == NSCocoaErrorDomain &&
+                [
+                    CocoaError.Code.fileNoSuchFile.rawValue,
+                    CocoaError.Code.fileReadNoSuchFile.rawValue,
+                ].contains(nsError.code) {
+                return false
+            }
+            throw error
+        }
     }
 
     func save(_ installation: InstallationRecord) throws {
