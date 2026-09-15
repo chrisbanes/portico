@@ -65,10 +65,13 @@ private doorway; it does not add a second application-level authorization layer.
 
 ## Current status
 
-Portico is in active development. The latest release is
-[`v0.0.2`](https://github.com/chrisbanes/portico/releases/tag/v0.0.2).
-The repository is the source of truth for the current executable, helper, and
-MVP behavior.
+Portico is in active development. The repository is the source of truth for
+the current executable and helper behaviour. For current product terminology
+and direction, see the [domain language](CONTEXT.md), [roadmap](docs/roadmap.md),
+[architectural decisions](docs/adr/), and [ADR 0007: Route destination
+connections through the Mac](docs/adr/0007-route-destination-connections-through-the-mac.md).
+The [Phase 1 MVP baseline](docs/portico-mvp-spec.md) records the historical
+Local App scope.
 
 You will need:
 
@@ -171,7 +174,7 @@ helper builds can be verified locally with:
 ## Learn more
 
 - [Domain language](CONTEXT.md)
-- [MVP specification](docs/portico-mvp-spec.md)
+- [Phase 1 MVP baseline](docs/portico-mvp-spec.md)
 - [Architectural decisions](docs/adr/)
 - [Preliminary naming check](docs/naming.md)
 - [Roadmap](docs/roadmap.md)
