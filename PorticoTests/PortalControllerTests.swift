@@ -1015,10 +1015,58 @@ final class PortalControllerTests: XCTestCase {
         let emptyHostURL = try XCTUnwrap(URLComponents(string: "https://:443/a/empty-host")?.url)
         XCTAssertEqual(emptyHostURL.host, "")
         client.send(.authenticationURL(portalID, emptyHostURL, generation: client.generation))
+        XCTAssertTrue(opened.isEmpty)
+
+        controller.authenticate()
+        XCTAssertEqual(client.authenticated, [portalID, portalID, portalID])
         client.send(.authenticationURL(portalID, URL(string: "file:///Users/chris/private/auth")!, generation: client.generation))
+        XCTAssertTrue(opened.isEmpty)
+
+        controller.authenticate()
+        XCTAssertEqual(client.authenticated, [portalID, portalID, portalID, portalID])
         client.send(.authenticationURL(portalID, URL(string: "https://login.tailscale.com/a/current")!, generation: client.generation))
 
         XCTAssertEqual(opened, [URL(string: "https://login.tailscale.com/a/current")!])
+    }
+
+    func testInvalidCurrentAuthenticationURLAllowsRetryWithoutLettingStaleEventsConsumeIt() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(saved)
+        let client = FakePortalHelperClient()
+        client.completeAuthenticationImmediately = false
+        client.generation = 1
+        var opened: [URL] = []
+        let controller = PortalController(store: store, helper: client, openURL: { opened.append($0) })
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .authenticating,
+            stableNodeId: nil,
+            assignedName: nil,
+            portalURL: nil,
+            addresses: []
+        ), generation: client.generation))
+
+        controller.authenticate()
+        client.send(.authenticationURL(
+            portalID,
+            URL(string: "file:///Users/chris/private/auth")!,
+            generation: client.generation
+        ))
+        XCTAssertTrue(opened.isEmpty)
+
+        controller.authenticate()
+        XCTAssertEqual(client.authenticated, [portalID, portalID])
+
+        client.completeAuthentication(.failure(HelperClientError.deadline), at: 0)
+        client.send(.authenticationURL(
+            portalID,
+            URL(string: "https://login.tailscale.com/a/stale-generation")!,
+            generation: 0
+        ))
+        let retryURL = URL(string: "https://login.tailscale.com/a/retry")!
+        client.send(.authenticationURL(portalID, retryURL, generation: client.generation))
+
+        XCTAssertEqual(opened, [retryURL])
     }
 
     func testAuthenticationRejectsEventAfterHelperGenerationChanges() throws {

@@ -812,12 +812,13 @@ final class PortalController: ObservableObject {
     private func receiveAuthenticationURL(id: UUID, url: URL, generation: Int) {
         guard generation == helper.generation,
               authenticationPending[id]?.generation == generation,
-              installation.portals.contains(where: { $0.id == id && $0.lifecycle == .active }),
-              url.scheme?.lowercased() == "https",
+              installation.portals.contains(where: { $0.id == id && $0.lifecycle == .active })
+        else { return }
+        authenticationPending.removeValue(forKey: id)
+        guard url.scheme?.lowercased() == "https",
               let host = url.host,
               !host.isEmpty
         else { return }
-        authenticationPending.removeValue(forKey: id)
         openURL(url)
     }
 
