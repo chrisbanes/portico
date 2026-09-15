@@ -278,6 +278,7 @@ final class PortalController: ObservableObject {
         DiagnosticReportRenderer.render(
             versions: diagnosticVersions,
             helper: helper.availability,
+            isInstallationAvailable: isInstallationAvailable,
             portals: installation.portals
                 .filter { $0.lifecycle == .active }
                 .map {

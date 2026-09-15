@@ -43,6 +43,7 @@ final class DiagnosticsTests: XCTestCase {
         let report = DiagnosticReportRenderer.render(
             versions: DiagnosticVersions(porticoShort: "1.2", porticoBuild: "34", helperProtocol: 3),
             helper: .failed,
+            isInstallationAvailable: true,
             portals: [facts],
             history: history.entries
         )
@@ -60,6 +61,38 @@ final class DiagnosticsTests: XCTestCase {
             "https://login.tailscale.com/a/secret", "/Users/chris/private",
             "Authorization: Bearer secret", "Cookie: secret", "--secret-argument", "request-body-secret",
         ] {
+            XCTAssertFalse(report.contains(excluded), excluded)
+        }
+    }
+
+    func testUnavailableInstallationReportSuppressesHelperAndPortalFacts() {
+        let portal = PortalConfiguration(
+            id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date()
+        )
+        let report = DiagnosticReportRenderer.render(
+            versions: DiagnosticVersions(porticoShort: "1.2", porticoBuild: "34", helperProtocol: 3),
+            helper: .connecting,
+            isInstallationAvailable: false,
+            portals: [PortalDiagnosticFacts(
+                portalName: portal.name,
+                assignedName: "hermes-1",
+                portalURL: URL(string: "https://hermes-1.example.ts.net/"),
+                addresses: ["100.64.0.1"],
+                magicDNSSuffix: "example.ts.net",
+                desiredState: portal.desiredState,
+                tailscaleState: .online,
+                reachability: .reachable,
+                isStale: false
+            )],
+            history: []
+        )
+
+        XCTAssertTrue(report.contains("Helper: saved configuration unavailable"))
+        XCTAssertTrue(report.contains("Portals: unavailable"))
+        for excluded in ["Helper: connecting", "hermes", "100.64.0.1", "example.ts.net"] {
             XCTAssertFalse(report.contains(excluded), excluded)
         }
     }

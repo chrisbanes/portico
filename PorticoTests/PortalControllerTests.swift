@@ -65,6 +65,27 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(client.retryCount, 0)
     }
 
+    func testUnavailableInstallationDiagnosticReportIsSanitizedAndInert() throws {
+        let root = temporaryRoot()
+        let store = PortalStore(rootURL: root)
+        let authoritative = Data("not-json".utf8)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try authoritative.write(to: store.installationURL)
+        let client = FakePortalHelperClient(availability: .connecting)
+
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+        let report = controller.diagnosticReport()
+
+        XCTAssertTrue(report.contains("Helper: saved configuration unavailable"))
+        XCTAssertTrue(report.contains("Portals: unavailable"))
+        for excluded in [root.path, "not-json", "DecodingError", "Helper: connecting"] {
+            XCTAssertFalse(report.contains(excluded), excluded)
+        }
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), authoritative)
+        XCTAssertTrue(client.reconciliations.isEmpty)
+        XCTAssertTrue(client.discoveryCompletions.isEmpty)
+    }
+
     func testInvalidHistoricalInstallationDoesNotPublishOrStartHelper() throws {
         let root = temporaryRoot()
         let store = PortalStore(rootURL: root)
