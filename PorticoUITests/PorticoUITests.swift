@@ -579,7 +579,15 @@ final class PorticoUITests: XCTestCase {
         openMenuBarExtra(app)
         let compactHelperState = app.descendants(matching: .any)["helper-state"]
         XCTAssertTrue(waitForText("Restarting", element: compactHelperState, timeout: 2))
+        app.typeKey(.escape, modifierFlags: [])
+        let managementWindow = app.windows.matching(
+            NSPredicate(format: "identifier == %@", "management")
+        ).firstMatch
+        XCTAssertTrue(managementWindow.waitForExistence(timeout: 3), app.debugDescription)
+        app.activate()
         app.typeKey("r", modifierFlags: [.command, .shift])
+        XCTAssertTrue(waitForValue("Connected", element: app.staticTexts["settings-helper-state"], timeout: 5))
+        openMenuBarExtra(app)
         XCTAssertTrue(waitForText("Connected", element: compactHelperState, timeout: 5))
 
         app = launch(scenario: "terminal-failure")
