@@ -65,6 +65,27 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(client.retryCount, 0)
     }
 
+    func testInvalidHistoricalInstallationDoesNotPublishOrStartHelper() throws {
+        let root = temporaryRoot()
+        let store = PortalStore(rootURL: root)
+        let source = Data(
+            #"{"version":2,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"lifecycle":"active"},{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"atlas","localAppPort":8788,"createdAt":807692801,"lifecycle":"active"}],"alerts":[]}"#.utf8
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try source.write(to: store.versionTwoInstallationURL)
+        let client = FakePortalHelperClient()
+
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        XCTAssertFalse(controller.isInstallationAvailable)
+        XCTAssertTrue(controller.portals.isEmpty)
+        XCTAssertEqual(controller.message, "Saved Portal configuration could not be loaded.")
+        XCTAssertEqual(try Data(contentsOf: store.versionTwoInstallationURL), source)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.installationURL.path))
+        XCTAssertTrue(client.reconciliations.isEmpty)
+        XCTAssertTrue(client.discoveryCompletions.isEmpty)
+    }
+
     func testLoggingPreferenceCommitsBeforeControlledRestartAndSameValueIsNoOp() throws {
         let store = PortalStore(rootURL: temporaryRoot())
         try store.save(InstallationRecord(operationalLogging: .enabled))

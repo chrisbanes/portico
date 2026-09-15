@@ -91,6 +91,7 @@ struct PortalStore {
                 throw PortalStoreError.unsupportedVersion(historical.version)
             }
             let installation = try historical.migrate()
+            try installation.validateCurrentRecord()
             try save(installation)
             removeOlderFiles()
             return installation
@@ -102,6 +103,7 @@ struct PortalStore {
                 throw PortalStoreError.unsupportedVersion(historical.version)
             }
             let installation = try historical.migrate()
+            try installation.validateCurrentRecord()
             try save(installation)
             removeOlderFiles()
             return installation
@@ -119,6 +121,7 @@ struct PortalStore {
             operationalLogging: .enabled,
             launchAtLoginOffer: .notOffered
         )
+        try installation.validateCurrentRecord()
         try save(installation)
         removeOlderFiles()
         return installation
