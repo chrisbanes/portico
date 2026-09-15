@@ -1,8 +1,14 @@
 # Portico MVP Specification
 
-**Status:** Confirmed product and technical specification
+**Status:** Historical Phase 1 MVP baseline
 
 **Last updated:** 2026-08-04
+
+This document records the Phase 1 Local App MVP baseline, including its
+protocol-version-3 examples. For current product terminology and post-MVP
+behaviour, see the [domain language](../CONTEXT.md), [roadmap](roadmap.md),
+[architectural decisions](adr/), and [ADR 0007: Route destination connections
+through the Mac](adr/0007-route-destination-connections-through-the-mac.md).
 
 ## Product
 
@@ -230,10 +236,10 @@ as sensitive node identity material.
 
 ### Native/helper boundary
 
-Swift launches and supervises one bundled Go helper. On launch it sends the
-complete desired Portal set and reconciles helper state. The helper contains
-one serialized lifecycle owner and one `tsnet.Server` for every running
-Portal.
+Swift launches and supervises one bundled Go helper as a same-user child
+process. On launch it sends the complete desired Portal set and reconciles
+helper state. The helper contains one serialized lifecycle owner and one
+`tsnet.Server` for every running Portal.
 
 The protocol is versioned JSON Lines over standard input and output:
 
