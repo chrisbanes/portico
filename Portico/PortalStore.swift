@@ -3,6 +3,7 @@ import Foundation
 enum PortalStoreError: Error {
     case alreadyExists
     case invalidHistoricalDestination
+    case invalidInstallation
     case unsupportedVersion(Int)
 }
 
@@ -79,6 +80,7 @@ struct PortalStore {
             guard installation.version == InstallationRecord.currentVersion else {
                 throw PortalStoreError.unsupportedVersion(installation.version)
             }
+            try installation.validateCurrentRecord()
             removeOlderFiles()
             return installation
         }

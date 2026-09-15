@@ -21,6 +21,50 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(controller.message, "Choose an operational-support logging setting before adding a Portal.")
     }
 
+    func testUnavailableInstallationDoesNotPublishStartHelperWorkOrPersistSettings() throws {
+        let root = temporaryRoot()
+        let store = PortalStore(rootURL: root)
+        let authoritative = Data("not-json".utf8)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try authoritative.write(to: store.installationURL)
+        let client = FakePortalHelperClient()
+
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        XCTAssertFalse(controller.isInstallationAvailable)
+        XCTAssertTrue(controller.portals.isEmpty)
+        XCTAssertTrue(controller.alerts.isEmpty)
+        XCTAssertEqual(controller.operationalLogging, .undecided)
+        XCTAssertEqual(controller.launchAtLoginOffer, .notOffered)
+        XCTAssertEqual(controller.message, "Saved Portal configuration could not be loaded.")
+        XCTAssertTrue(client.reconciliations.isEmpty)
+        XCTAssertTrue(client.discoveryCompletions.isEmpty)
+
+        controller.setOperationalLogging(.enabled)
+        XCTAssertFalse(controller.commitLaunchAtLoginOffer(.presented))
+        controller.portalName = "hermes"
+        controller.localAppPort = "8787"
+        XCTAssertNil(controller.addPortal())
+        client.disconnect(as: .failed)
+        client.connect()
+        controller.retryHelper()
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .online,
+            stableNodeId: nil,
+            assignedName: "hermes-1",
+            portalURL: URL(string: "https://hermes-1.example.ts.net/"),
+            addresses: [],
+            magicDNSSuffix: "example.ts.net"
+        )))
+
+        XCTAssertEqual(controller.message, "Saved Portal configuration could not be loaded.")
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), authoritative)
+        XCTAssertTrue(client.restartedWith.isEmpty)
+        XCTAssertTrue(client.reconciliations.isEmpty)
+        XCTAssertTrue(client.discoveryCompletions.isEmpty)
+        XCTAssertEqual(client.retryCount, 0)
+    }
+
     func testLoggingPreferenceCommitsBeforeControlledRestartAndSameValueIsNoOp() throws {
         let store = PortalStore(rootURL: temporaryRoot())
         try store.save(InstallationRecord(operationalLogging: .enabled))

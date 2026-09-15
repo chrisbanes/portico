@@ -117,7 +117,9 @@ final class PortalController: ObservableObject {
 
     var portal: PortalConfiguration? { portals.first }
     var status: PortalStatusPayload? { portal.flatMap { statuses[$0.id] } }
-    var canResetTailnet: Bool { portals.isEmpty && installation.tailnetBinding != nil }
+    var canResetTailnet: Bool {
+        isInstallationAvailable && portals.isEmpty && installation.tailnetBinding != nil
+    }
     var pendingPortals: [PortalConfiguration] {
         portals.filter { $0.lifecycle == .pendingTailnetRejection }
     }
@@ -136,6 +138,7 @@ final class PortalController: ObservableObject {
     private let history: DiagnosticHistory
     private let diagnosticVersions: DiagnosticVersions
     private var installation = InstallationRecord()
+    private(set) var isInstallationAvailable = false
     private var authenticationPending: Set<UUID> = []
     private var cleanupInFlight: Set<UUID> = []
     private var discoveryGeneration = 0
@@ -171,6 +174,7 @@ final class PortalController: ObservableObject {
         self.history.onChange = { [weak self] entries in self?.diagnosticEntries = entries }
         self.reachability?.onChange = { [weak self] states in
             guard let self else { return }
+            guard self.isInstallationAvailable else { return }
             self.reachabilityStates = states
             for portal in self.installation.portals where portal.lifecycle == .active {
                 self.recordPortalState(portal)
@@ -178,6 +182,7 @@ final class PortalController: ObservableObject {
         }
         do {
             installation = try store.loadInstallation()
+            isInstallationAvailable = true
             publishInstallation()
             for portal in installation.portals where portal.lifecycle == .pendingRemoval {
                 queueRemovalAttempt(portal.id, schedule: false)
@@ -195,7 +200,7 @@ final class PortalController: ObservableObject {
     }
 
     func refreshLocalApps() {
-        guard actionAvailability().refreshLocalApps else { return }
+        guard requireInstallation(), actionAvailability().refreshLocalApps else { return }
         discoveryGeneration += 1
         let generation = discoveryGeneration
         isRefreshingLocalApps = true
@@ -217,6 +222,7 @@ final class PortalController: ObservableObject {
     }
 
     func retryHelper() {
+        guard requireInstallation() else { return }
         helper.retry()
     }
 
@@ -225,7 +231,8 @@ final class PortalController: ObservableObject {
     }
 
     func setOperationalLogging(_ preference: OperationalLoggingPreference) {
-        guard preference != .undecided,
+        guard requireInstallation(),
+              preference != .undecided,
               preference != installation.operationalLogging
         else { return }
         var updated = installation
@@ -253,6 +260,7 @@ final class PortalController: ObservableObject {
     }
 
     func commitLaunchAtLoginOffer(_ state: LaunchAtLoginOfferState) -> Bool {
+        guard requireInstallation() else { return false }
         guard state != installation.launchAtLoginOffer else { return true }
         var updated = installation
         updated.launchAtLoginOffer = state
@@ -308,6 +316,7 @@ final class PortalController: ObservableObject {
 
     @discardableResult
     func addPortal() -> PortalCreationOutcome? {
+        guard requireInstallation() else { return nil }
         guard operationalLogging != .undecided else {
             message = "Choose an operational-support logging setting before adding a Portal."
             return nil
@@ -385,6 +394,7 @@ final class PortalController: ObservableObject {
     }
 
     func removePortal(id: UUID) {
+        guard requireInstallation() else { return }
         guard let index = installation.portals.firstIndex(where: {
             $0.id == id && $0.lifecycle == .active
         }) else { return }
@@ -407,6 +417,7 @@ final class PortalController: ObservableObject {
     }
 
     func retryRemoval(id: UUID) {
+        guard requireInstallation() else { return }
         guard installation.portals.contains(where: {
             $0.id == id && $0.lifecycle == .pendingRemoval
         }), actionAvailability(for: installation.portals.first(where: { $0.id == id })).retryRemoval else { return }
@@ -418,6 +429,7 @@ final class PortalController: ObservableObject {
     }
 
     func updateDestination(id: UUID, edit: PortalDestinationEdit) {
+        guard requireInstallation() else { return }
         guard let index = installation.portals.firstIndex(where: {
             $0.id == id && $0.lifecycle == .active
         }) else { return }
@@ -440,7 +452,8 @@ final class PortalController: ObservableObject {
     }
 
     func authenticate(id: UUID) {
-        guard let portal = portals.first(where: { $0.id == id && $0.lifecycle == .active }),
+        guard requireInstallation(),
+              let portal = portals.first(where: { $0.id == id && $0.lifecycle == .active }),
               actionAvailability(for: portal).authenticate,
               authenticationPending.insert(id).inserted
         else { return }
@@ -453,6 +466,7 @@ final class PortalController: ObservableObject {
     }
 
     func dismissAlert(id: UUID) {
+        guard requireInstallation() else { return }
         guard installation.alerts.contains(where: { $0.id == id }) else { return }
         var updated = installation
         updated.alerts.removeAll { $0.id == id }
@@ -466,6 +480,7 @@ final class PortalController: ObservableObject {
     }
 
     func resetTailnet(confirmed: Bool) {
+        guard requireInstallation() else { return }
         guard confirmed else { return }
         guard portals.isEmpty else {
             message = "Reset Tailnet is available only when no Portals remain."
@@ -488,6 +503,13 @@ final class PortalController: ObservableObject {
         for portal: PortalConfiguration? = nil,
         editedDestination: PortalDestinationEdit? = nil
     ) -> PortalActionAvailability {
+        guard isInstallationAvailable else {
+            return PortalActionAvailability(context: PortalActionContext(
+                loggingPreference: .undecided,
+                inputsValid: false,
+                helperAvailability: .failed
+            ))
+        }
         let addInputsValid = portal == nil && (try? newPortalDestination()) != nil
         let editedDestinationValid: Bool
         if let portal, let editedDestination,
@@ -553,6 +575,7 @@ final class PortalController: ObservableObject {
     }
 
     private func helperConnected() {
+        guard isInstallationAvailable else { return }
         reachability?.helperRecovered()
         refreshLocalApps()
         scheduleReconciliation()
@@ -564,6 +587,7 @@ final class PortalController: ObservableObject {
     }
 
     private func helperAvailabilityChanged(_ availability: HelperAvailability) {
+        guard isInstallationAvailable else { return }
         if availability == .connected {
             let event: PorticoAnnouncementEvent = loggingRestartPending
                 ? .preferenceRestartCompleted
@@ -585,6 +609,7 @@ final class PortalController: ObservableObject {
     }
 
     private func updateDesiredState(id: UUID, desiredState: PortalDesiredState) {
+        guard requireInstallation() else { return }
         guard let index = installation.portals.firstIndex(where: {
             $0.id == id && $0.lifecycle == .active
         }), installation.portals[index].desiredState != desiredState else { return }
@@ -596,6 +621,7 @@ final class PortalController: ObservableObject {
     }
 
     private func savePortalOperation(_ updated: InstallationRecord) -> Bool {
+        guard requireInstallation() else { return false }
         do {
             try store.save(updated)
             installation = updated
@@ -620,6 +646,7 @@ final class PortalController: ObservableObject {
     }
 
     private func scheduleReconciliation() {
+        guard isInstallationAvailable else { return }
         reconciliationGeneration += 1
         let reconciliation = PortalReconciliation(
             generation: reconciliationGeneration,
@@ -634,6 +661,7 @@ final class PortalController: ObservableObject {
     }
 
     private func send(_ reconciliation: PortalReconciliation) {
+        guard isInstallationAvailable else { return }
         reconciliationInFlight = true
         let removalAttempts = removalsAwaitingReconciliation.filter { id, token in
             removalAttemptTokens[id] == token && installation.portals.contains(where: {
@@ -742,6 +770,7 @@ final class PortalController: ObservableObject {
     }
 
     private func receive(_ event: PortalHelperEvent) {
+        guard isInstallationAvailable else { return }
         switch event {
         case let .status(id, status):
             guard let portal = installation.portals.first(where: {
@@ -773,6 +802,7 @@ final class PortalController: ObservableObject {
         displayStatus: PortalStatusPayload,
         tailnetName: String
     ) {
+        guard isInstallationAvailable else { return }
         guard let binding = installation.tailnetBinding else {
             guard let suffix = displayStatus.magicDNSSuffix else { return }
             var updated = installation
@@ -815,6 +845,7 @@ final class PortalController: ObservableObject {
     }
 
     private func reject(_ portal: PortalConfiguration, evidence: RejectionEvidence) {
+        guard isInstallationAvailable else { return }
         guard let index = installation.portals.firstIndex(where: { $0.id == portal.id && $0.lifecycle == .active }) else {
             return
         }
@@ -832,6 +863,7 @@ final class PortalController: ObservableObject {
     }
 
     private func cleanupRejectedPortal(_ portal: PortalConfiguration, evidence: RejectionEvidence?) {
+        guard isInstallationAvailable else { return }
         guard helper.availability == .connected, cleanupInFlight.insert(portal.id).inserted else { return }
         helper.cleanupRejectedPortal(id: portal.id) { [weak self] result in
             guard let self else { return }
@@ -867,6 +899,7 @@ final class PortalController: ObservableObject {
     }
 
     private func publishInstallation() {
+        guard isInstallationAvailable else { return }
         portals = installation.portals
         alerts = installation.alerts
         operationalLogging = installation.operationalLogging
@@ -876,6 +909,7 @@ final class PortalController: ObservableObject {
     }
 
     private func recordPortalState(_ portal: PortalConfiguration) {
+        guard isInstallationAvailable else { return }
         history.record(.portal(
             name: portal.name,
             desired: portal.desiredState,
@@ -883,6 +917,15 @@ final class PortalController: ObservableObject {
             reachability: reachabilityStates[portal.id] ?? .unknown,
             stale: staleStatusIDs.contains(portal.id)
         ))
+    }
+
+    @discardableResult
+    private func requireInstallation() -> Bool {
+        guard isInstallationAvailable else {
+            message = "Saved Portal configuration could not be loaded."
+            return false
+        }
+        return true
     }
 }
 

@@ -199,6 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWindow.willCloseNotification,
             object: nil
         )
+        guard portalController.isInstallationAvailable else { return }
         supervisor.start(loggingPreference: portalController.operationalLogging)
     }
 

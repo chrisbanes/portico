@@ -28,6 +28,7 @@ enum UITestScenario: String {
     case loginOfferEmpty = "login-offer-empty"
     case migrated
     case initialSaveFailure = "initial-save-failure"
+    case corruptInstallation = "corrupt-installation"
     case configuredMessage = "configured-message"
 }
 
@@ -68,6 +69,9 @@ struct UITestLaunchConfiguration {
             try Data(#"{"version":2,"portals":[],"alerts":[]}"#.utf8).write(to: store.versionTwoInstallationURL)
         case .initialSaveFailure:
             try Data("fixture".utf8).write(to: rootURL)
+        case .corruptInstallation:
+            try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+            try Data("not-json".utf8).write(to: store.installationURL)
         case .configuredMessage:
             try store.save(InstallationRecord(operationalLogging: .enabled))
         case .loginApproval, .loginError:
@@ -274,6 +278,9 @@ final class UITestHelperLauncher: HelperLaunching {
         onEOF: @escaping () -> Void,
         onExit: @escaping (Int32) -> Void
     ) throws -> HelperProcess {
+        if scenario == .corruptInstallation {
+            try Data().write(to: rootURL.appendingPathComponent("helper-started", isDirectory: false))
+        }
         if scenario == .terminalFailure || ([.stale, .staleAuthenticating].contains(scenario) && launchCount > 0) {
             throw UITestHelperLaunchBlocked()
         }
