@@ -335,6 +335,9 @@ extension InstallationRecord {
                 throw PortalStoreError.invalidInstallation
             }
         }
+        guard tailnetBinding != nil || !portals.contains(where: { $0.lifecycle == .pendingTailnetRejection }) else {
+            throw PortalStoreError.invalidInstallation
+        }
         if let tailnetBinding {
             guard !tailnetBinding.name.isEmpty,
                   isValidMagicDNSSuffix(tailnetBinding.magicDNSSuffix)

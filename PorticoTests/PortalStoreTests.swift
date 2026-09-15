@@ -126,6 +126,9 @@ final class PortalStoreTests: XCTestCase {
             (\.versionThreeInstallationURL, Data(
                 #"{"version":3,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"Invalid Name","localAppPort":8787,"createdAt":807692800,"lifecycle":"active"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#.utf8
             )),
+            (\.versionThreeInstallationURL, Data(
+                #"{"version":3,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"lifecycle":"pendingTailnetRejection"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#.utf8
+            )),
         ]
 
         for (path, source) in records {

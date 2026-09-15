@@ -65,6 +65,24 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(client.retryCount, 0)
     }
 
+    func testPendingTailnetRejectionWithoutBindingFailsClosedBeforeHelperCleanup() throws {
+        let root = temporaryRoot()
+        let store = PortalStore(rootURL: root)
+        let authoritative = Data(
+            #"{"version":4,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","destination":{"kind":"localApp","port":8787},"createdAt":807692800,"desiredState":"enabled","lifecycle":"pendingTailnetRejection"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#.utf8
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try authoritative.write(to: store.installationURL)
+
+        XCTAssertThrowsError(try store.loadInstallation())
+        let client = FakePortalHelperClient(availability: .connected)
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+
+        XCTAssertFalse(controller.isInstallationAvailable)
+        XCTAssertTrue(client.cleaned.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), authoritative)
+    }
+
     func testUnreadableInstallationFailsClosedWithoutOverwritingSource() throws {
         let root = temporaryRoot()
         let store = PortalStore(rootURL: root)
@@ -495,7 +513,10 @@ final class PortalControllerTests: XCTestCase {
             lifecycle: .pendingTailnetRejection
         )
         let store = PortalStore(rootURL: temporaryRoot())
-        try store.save(InstallationRecord(portals: [enabled, pending, stopped]))
+        try store.save(InstallationRecord(
+            tailnetBinding: TailnetBinding(name: "opaque-tailnet-id", magicDNSSuffix: "example.ts.net"),
+            portals: [enabled, pending, stopped]
+        ))
         let client = FakePortalHelperClient(availability: .connecting)
         let controller = PortalController(store: store, helper: client, openURL: { _ in })
 
