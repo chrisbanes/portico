@@ -1,7 +1,6 @@
 # Portico MVP Specification
 
-**Status:** Historical Phase 1 MVP baseline, confirmed product and technical
-specification as of 2026-08-04
+**Status:** Historical Phase 1 MVP baseline
 
 **Last updated:** 2026-08-04
 
