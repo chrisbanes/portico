@@ -259,6 +259,13 @@ private struct OverviewView: View {
         }
     }
 
+    private var helperStatus: HelperStatusPresentation {
+        HelperStatusPresentation(
+            isInstallationAvailable: controller.isInstallationAvailable,
+            helperAvailability: supervisor.availability
+        )
+    }
+
     @ViewBuilder
     private var managementContent: some View {
         if selection == .settings {
@@ -291,7 +298,7 @@ private struct OverviewView: View {
         } else {
             Form {
                 Section("Overview") {
-                    LabeledContent("Helper", value: supervisor.availability.title)
+                    LabeledContent("Helper", value: helperStatus.title)
                         .accessibilityIdentifier("overview-helper-state")
                     LabeledContent("Tailnet", value: controller.tailnetDisplaySuffix ?? "Not connected")
                         .accessibilityIdentifier("overview-tailnet")
@@ -397,10 +404,10 @@ private struct OverviewView: View {
 
     @ViewBuilder
     private var recoverySections: some View {
-        if supervisor.availability == .failed || !controller.pendingPortals.isEmpty ||
+        if (controller.isInstallationAvailable && supervisor.availability == .failed) || !controller.pendingPortals.isEmpty ||
             !controller.removalNotices.isEmpty || !controller.alerts.isEmpty || controller.canResetTailnet {
             Section("Recovery") {
-                if supervisor.availability == .failed {
+                if controller.isInstallationAvailable && supervisor.availability == .failed {
                     Button("Retry Helper") { controller.retryHelper() }
                         .buttonStyle(.borderedProminent)
                         .accessibilityIdentifier("overview-retry-helper")
@@ -426,7 +433,7 @@ private struct OverviewView: View {
     }
 
     private var hasRecoveryContent: Bool {
-        supervisor.availability == .failed || !controller.pendingPortals.isEmpty ||
+        (controller.isInstallationAvailable && supervisor.availability == .failed) || !controller.pendingPortals.isEmpty ||
             !controller.removalNotices.isEmpty || !controller.alerts.isEmpty ||
             controller.canResetTailnet || controller.message != nil
     }
@@ -903,7 +910,7 @@ private struct PortalView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(supervisor.availability.title, systemImage: supervisor.availability.symbolName)
+            Label(helperStatus.title, systemImage: helperStatus.symbolName)
                 .accessibilityIdentifier("helper-state")
             LabeledContent("Tailnet", value: controller.tailnetDisplaySuffix ?? "Not connected")
                 .accessibilityIdentifier("tailnet-state")
@@ -976,7 +983,7 @@ private struct PortalView: View {
     }
 
     private var requiresAttention: Bool {
-        supervisor.availability == .failed
+        (controller.isInstallationAvailable && supervisor.availability == .failed)
             || !controller.pendingPortals.isEmpty
             || !controller.pendingRemovalPortals.isEmpty
             || !controller.alerts.isEmpty
@@ -994,6 +1001,13 @@ private struct PortalView: View {
         managementRouting.requestSettings()
         presentWindow(id: "management")
         dismiss()
+    }
+
+    private var helperStatus: HelperStatusPresentation {
+        HelperStatusPresentation(
+            isInstallationAvailable: controller.isInstallationAvailable,
+            helperAvailability: supervisor.availability
+        )
     }
 
     private func presentWindow(id: String) {
@@ -1407,7 +1421,7 @@ private struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 LabeledContent("Helper") {
-                    Label(supervisor.availability.title, systemImage: supervisor.availability.symbolName)
+                    Label(helperStatus.title, systemImage: helperStatus.symbolName)
                 }
                 .accessibilityIdentifier("settings-helper-state")
                 if let error = controller.operationalLoggingError {
@@ -1448,6 +1462,13 @@ private struct SettingsView: View {
             launchAtLogin.refreshStatusAfterApplicationActivation()
             headingFocused = true
         }
+    }
+
+    private var helperStatus: HelperStatusPresentation {
+        HelperStatusPresentation(
+            isInstallationAvailable: controller.isInstallationAvailable,
+            helperAvailability: supervisor.availability
+        )
     }
 }
 
@@ -1568,29 +1589,6 @@ private extension LaunchAtLoginStatus {
         case .enabled: "On"
         case .requiresApproval: "Approval required"
         case .notFound: "Unavailable"
-        }
-    }
-}
-
-private extension HelperAvailability {
-    var title: String {
-        switch self {
-        case .awaitingLoggingChoice: "Awaiting logging choice"
-        case .restarting: "Restarting"
-        case .connecting: "Connecting"
-        case let .retrying(attempt, delay): "Retry \(attempt) in \(Int(delay))s"
-        case .connected: "Connected"
-        case .failed: "Helper unavailable"
-        case .shuttingDown: "Shutting down"
-        }
-    }
-
-    var symbolName: String {
-        switch self {
-        case .awaitingLoggingChoice, .restarting, .connecting, .retrying: "ellipsis.circle"
-        case .connected: "checkmark.circle"
-        case .failed: "exclamationmark.triangle"
-        case .shuttingDown: "stop.circle"
         }
     }
 }

@@ -68,6 +68,12 @@ final class PorticoUITests: XCTestCase {
         let app = launch(scenario: "corrupt-installation", root: root)
 
         openMenuBarExtra(app)
+        XCTAssertTrue(waitForText(
+            "Saved configuration unavailable",
+            element: app.descendants(matching: .any)["helper-state"],
+            timeout: 3
+        ))
+        XCTAssertFalse(app.descendants(matching: .any)["helper-state"].label.contains("Connecting"))
         app.buttons["compact-attention"].click()
         XCTAssertTrue(
             waitForText(
@@ -77,6 +83,7 @@ final class PorticoUITests: XCTestCase {
             ),
             app.debugDescription
         )
+        XCTAssertFalse(app.buttons["overview-retry-helper"].exists)
         XCTAssertFalse(FileManager.default.fileExists(atPath: "\(root)/helper-started"))
     }
 

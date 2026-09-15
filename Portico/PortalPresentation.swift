@@ -41,6 +41,21 @@ struct PortalPresentation {
     }
 }
 
+struct HelperStatusPresentation: Equatable {
+    let title: String
+    let symbolName: String
+
+    init(isInstallationAvailable: Bool, helperAvailability: HelperAvailability) {
+        guard isInstallationAvailable else {
+            title = "Saved configuration unavailable"
+            symbolName = "exclamationmark.triangle"
+            return
+        }
+        title = helperAvailability.title
+        symbolName = helperAvailability.symbolName
+    }
+}
+
 enum PorticoAnnouncementEvent {
     case helperConnected
     case helperTerminalFailure
@@ -93,6 +108,29 @@ extension PortalDesiredState {
         switch self {
         case .enabled: "Enabled"
         case .stopped: "Stopped"
+        }
+    }
+}
+
+extension HelperAvailability {
+    var title: String {
+        switch self {
+        case .awaitingLoggingChoice: "Awaiting logging choice"
+        case .restarting: "Restarting"
+        case .connecting: "Connecting"
+        case let .retrying(attempt, delay): "Retry \(attempt) in \(Int(delay))s"
+        case .connected: "Connected"
+        case .failed: "Helper unavailable"
+        case .shuttingDown: "Shutting down"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .awaitingLoggingChoice, .restarting, .connecting, .retrying: "ellipsis.circle"
+        case .connected: "checkmark.circle"
+        case .failed: "exclamationmark.triangle"
+        case .shuttingDown: "stop.circle"
         }
     }
 }
