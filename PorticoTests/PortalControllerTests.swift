@@ -55,7 +55,7 @@ final class PortalControllerTests: XCTestCase {
             portalURL: URL(string: "https://hermes-1.example.ts.net/"),
             addresses: [],
             magicDNSSuffix: "example.ts.net"
-        )))
+        ), generation: client.generation))
 
         XCTAssertEqual(controller.message, "Saved Portal configuration could not be loaded.")
         XCTAssertEqual(try Data(contentsOf: store.installationURL), authoritative)
@@ -198,7 +198,7 @@ final class PortalControllerTests: XCTestCase {
         controller.authenticate(id: portalID)
 
         controller.setOperationalLogging(.disabled)
-        client.send(.authenticationURL(portalID, URL(string: "https://login.example/secret")!))
+        client.send(.authenticationURL(portalID, URL(string: "https://login.example/secret")!, generation: client.generation))
 
         XCTAssertTrue(opened.isEmpty)
     }
@@ -224,7 +224,7 @@ final class PortalControllerTests: XCTestCase {
             portalURL: url,
             addresses: [],
             magicDNSSuffix: "example.ts.net"
-        )))
+        ), generation: client.generation))
 
         controller.copyPortalURL(id: portalID)
         controller.openPortalURL(id: portalID)
@@ -770,7 +770,7 @@ final class PortalControllerTests: XCTestCase {
             assignedName: "hermes-1",
             portalURL: nil,
             addresses: []
-        )))
+        ), generation: client.generation))
 
         XCTAssertEqual(
             controller.removalWarningText(for: removedPortal),
@@ -860,8 +860,8 @@ final class PortalControllerTests: XCTestCase {
             assignedName: "stale-name",
             portalURL: URL(string: "https://stale.example.ts.net/"),
             addresses: ["100.64.0.1"]
-        )))
-        client.send(.authenticationURL(portalID, URL(string: "https://login.tailscale.com/a/stale")!))
+        ), generation: client.generation))
+        client.send(.authenticationURL(portalID, URL(string: "https://login.tailscale.com/a/stale")!, generation: client.generation))
 
         XCTAssertNil(controller.statuses[portalID])
         client.completeReconciliation(.success(ReconcilePortalsResult(entries: [
@@ -946,9 +946,9 @@ final class PortalControllerTests: XCTestCase {
             magicDNSSuffix: "example.ts.net"
         )
 
-        client.send(.status(UUID(), status))
+        client.send(.status(UUID(), status, generation: client.generation))
         XCTAssertNil(controller.status)
-        client.send(.status(portalID, status))
+        client.send(.status(portalID, status, generation: client.generation))
         XCTAssertEqual(controller.status, displayStatus)
     }
 
@@ -966,20 +966,184 @@ final class PortalControllerTests: XCTestCase {
             assignedName: nil,
             portalURL: nil,
             addresses: []
-        )))
+        ), generation: client.generation))
 
-        client.send(.authenticationURL(portalID, transient))
+        client.send(.authenticationURL(portalID, transient, generation: client.generation))
         XCTAssertTrue(opened.isEmpty)
 
         controller.authenticate()
         XCTAssertEqual(client.authenticated, [portalID])
-        client.send(.authenticationURL(UUID(), transient))
+        client.send(.authenticationURL(UUID(), transient, generation: client.generation))
         XCTAssertTrue(opened.isEmpty)
-        client.send(.authenticationURL(portalID, transient))
+        client.send(.authenticationURL(portalID, transient, generation: client.generation))
         XCTAssertEqual(opened, [transient])
 
-        client.send(.authenticationURL(portalID, URL(string: "https://login.tailscale.com/a/stale")!))
+        client.send(.authenticationURL(portalID, URL(string: "https://login.tailscale.com/a/stale")!, generation: client.generation))
         XCTAssertEqual(opened, [transient])
+    }
+
+    func testAuthenticationPendingClearsOnGenerationLossAndRejectsNonHTTPSURLs() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(saved)
+        let client = FakePortalHelperClient()
+        var opened: [URL] = []
+        let controller = PortalController(store: store, helper: client, openURL: { opened.append($0) })
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .authenticating,
+            stableNodeId: nil,
+            assignedName: nil,
+            portalURL: nil,
+            addresses: []
+        ), generation: client.generation))
+
+        controller.authenticate()
+        client.disconnect(as: .connecting)
+        client.send(.authenticationURL(portalID, URL(string: "https://login.tailscale.com/a/stale")!, generation: client.generation))
+        XCTAssertTrue(opened.isEmpty)
+
+        client.connect()
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .authenticating,
+            stableNodeId: nil,
+            assignedName: nil,
+            portalURL: nil,
+            addresses: []
+        ), generation: client.generation))
+        controller.authenticate()
+        XCTAssertEqual(client.authenticated, [portalID, portalID])
+        let emptyHostURL = try XCTUnwrap(URLComponents(string: "https://:443/a/empty-host")?.url)
+        XCTAssertEqual(emptyHostURL.host, "")
+        client.send(.authenticationURL(portalID, emptyHostURL, generation: client.generation))
+        client.send(.authenticationURL(portalID, URL(string: "file:///Users/chris/private/auth")!, generation: client.generation))
+        client.send(.authenticationURL(portalID, URL(string: "https://login.tailscale.com/a/current")!, generation: client.generation))
+
+        XCTAssertEqual(opened, [URL(string: "https://login.tailscale.com/a/current")!])
+    }
+
+    func testAuthenticationRejectsEventAfterHelperGenerationChanges() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(saved)
+        let client = FakePortalHelperClient()
+        client.generation = 1
+        var opened: [URL] = []
+        let controller = PortalController(store: store, helper: client, openURL: { opened.append($0) })
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .authenticating,
+            stableNodeId: nil,
+            assignedName: nil,
+            portalURL: nil,
+            addresses: []
+        ), generation: client.generation))
+
+        controller.authenticate()
+        XCTAssertEqual(client.authenticated, [portalID])
+        client.generation = 2
+        client.send(.authenticationURL(portalID, URL(string: "https://login.tailscale.com/a/stale-generation")!, generation: client.generation))
+
+        XCTAssertTrue(opened.isEmpty)
+    }
+
+    func testAuthenticationRejectsOldProcessURLAfterNewRequestAndOpensCurrentGenerationOnce() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(saved)
+        let client = FakePortalHelperClient()
+        client.generation = 1
+        var opened: [URL] = []
+        let controller = PortalController(store: store, helper: client, openURL: { opened.append($0) })
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .authenticating,
+            stableNodeId: nil,
+            assignedName: nil,
+            portalURL: nil,
+            addresses: []
+        ), generation: client.generation))
+        controller.authenticate()
+        client.disconnect(as: .connecting)
+        client.generation = 2
+        client.connect()
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .authenticating,
+            stableNodeId: nil,
+            assignedName: nil,
+            portalURL: nil,
+            addresses: []
+        ), generation: client.generation))
+        controller.authenticate()
+
+        let oldURL = URL(string: "https://login.tailscale.com/a/old-process")!
+        let currentURL = URL(string: "https://login.tailscale.com/a/current-process")!
+        client.send(.authenticationURL(portalID, oldURL, generation: 1))
+        client.send(.authenticationURL(portalID, currentURL, generation: 2))
+        client.send(.authenticationURL(portalID, currentURL, generation: 2))
+
+        XCTAssertEqual(opened, [currentURL])
+    }
+
+    func testOldAuthenticationFailureCannotClearNewGenerationRequest() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(saved)
+        let client = FakePortalHelperClient()
+        client.completeAuthenticationImmediately = false
+        client.generation = 1
+        var opened: [URL] = []
+        let controller = PortalController(store: store, helper: client, openURL: { opened.append($0) })
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .authenticating,
+            stableNodeId: nil,
+            assignedName: nil,
+            portalURL: nil,
+            addresses: []
+        ), generation: client.generation))
+        controller.authenticate()
+        client.disconnect(as: .connecting)
+        client.generation = 2
+        client.connect()
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .authenticating,
+            stableNodeId: nil,
+            assignedName: nil,
+            portalURL: nil,
+            addresses: []
+        ), generation: client.generation))
+        controller.authenticate()
+
+        client.completeAuthentication(.failure(HelperClientError.deadline), at: 0)
+        let currentURL = URL(string: "https://login.tailscale.com/a/current-after-old-failure")!
+        client.send(.authenticationURL(portalID, currentURL, generation: 2))
+
+        XCTAssertEqual(opened, [currentURL])
+    }
+
+    func testConsumedAuthenticationFailureCannotClearNextRequestInSameGeneration() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        let saved = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
+        try store.save(saved)
+        let client = FakePortalHelperClient()
+        client.completeAuthenticationImmediately = false
+        client.generation = 1
+        var opened: [URL] = []
+        let controller = PortalController(store: store, helper: client, openURL: { opened.append($0) })
+        client.send(.status(portalID, PortalStatusPayload(
+            state: .authenticating,
+            stableNodeId: nil,
+            assignedName: nil,
+            portalURL: nil,
+            addresses: []
+        ), generation: client.generation))
+
+        let firstURL = URL(string: "https://login.tailscale.com/a/first")!
+        let secondURL = URL(string: "https://login.tailscale.com/a/second")!
+        controller.authenticate()
+        client.send(.authenticationURL(portalID, firstURL, generation: client.generation))
+        controller.authenticate()
+        client.completeAuthentication(.failure(HelperClientError.deadline), at: 0)
+        client.send(.authenticationURL(portalID, secondURL, generation: client.generation))
+
+        XCTAssertEqual(opened, [firstURL, secondURL])
     }
 
     func testAddsAndStartsSecondPortalWhileFirstRemainsEnabled() throws {
@@ -1025,15 +1189,15 @@ final class PortalControllerTests: XCTestCase {
         let client = FakePortalHelperClient()
         let controller = PortalController(store: store, helper: client, openURL: { _ in })
 
-        client.send(.status(portalID, onlineStatus(tailnetName: "opaque-first", suffix: "first.ts.net")))
+        client.send(.status(portalID, onlineStatus(tailnetName: "opaque-first", suffix: "first.ts.net"), generation: client.generation))
         XCTAssertNil(try store.loadInstallation().tailnetBinding)
-        client.send(.status(secondID, onlineStatus(tailnetName: "opaque-winner", suffix: "winner.ts.net")))
+        client.send(.status(secondID, onlineStatus(tailnetName: "opaque-winner", suffix: "winner.ts.net"), generation: client.generation))
         XCTAssertEqual(
             try store.loadInstallation().tailnetBinding,
             TailnetBinding(name: "opaque-winner", magicDNSSuffix: "winner.ts.net")
         )
         XCTAssertNil(controller.statuses[secondID]?.tailnetName)
-        client.send(.status(portalID, onlineStatus(tailnetName: "opaque-winner", suffix: "refreshed.ts.net")))
+        client.send(.status(portalID, onlineStatus(tailnetName: "opaque-winner", suffix: "refreshed.ts.net"), generation: client.generation))
         XCTAssertEqual(controller.tailnetDisplaySuffix, "refreshed.ts.net")
         XCTAssertEqual(try store.loadInstallation().tailnetBinding?.magicDNSSuffix, "refreshed.ts.net")
         XCTAssertFalse(controller.message?.contains("opaque") ?? false)
@@ -1047,7 +1211,7 @@ final class PortalControllerTests: XCTestCase {
         let client = FakePortalHelperClient()
         let controller = PortalController(store: store, helper: client, openURL: { _ in })
 
-        client.send(.status(portalID, onlineStatus(tailnetName: "", suffix: "example.ts.net")))
+        client.send(.status(portalID, onlineStatus(tailnetName: "", suffix: "example.ts.net"), generation: client.generation))
 
         XCTAssertNil(try store.loadInstallation().tailnetBinding)
         XCTAssertNil(controller.statuses[portalID]?.tailnetName)
@@ -1069,12 +1233,12 @@ final class PortalControllerTests: XCTestCase {
         client.send(.status(portalID, onlineStatus(
             tailnetName: "opaque-different",
             suffix: "shared.ts.net"
-        )))
+        ), generation: client.generation))
         client.send(.status(secondID, onlineStatus(
             tailnetName: "opaque-expected",
             suffix: "shared.ts.net",
             assignedName: "atlas-1"
-        )))
+        ), generation: client.generation))
         client.completeCleanup(.failure(NSError(domain: "expected", code: 1)))
 
         XCTAssertEqual(client.cleaned, [portalID])
@@ -1109,7 +1273,7 @@ final class PortalControllerTests: XCTestCase {
         client.send(.status(portalID, onlineStatus(
             tailnetName: "opaque-different",
             suffix: "rejected.ts.net"
-        )))
+        ), generation: client.generation))
 
         let persisted = try store.loadInstallation()
         XCTAssertEqual(persisted.portals.first(where: { $0.id == portalID })?.lifecycle, .pendingTailnetRejection)
@@ -1139,7 +1303,7 @@ final class PortalControllerTests: XCTestCase {
             tailnetName: "opaque-rejected",
             suffix: "rejected.ts.net",
             assignedName: "hermes-rejected"
-        )))
+        ), generation: client.generation))
 
         XCTAssertEqual(controller.pendingPortals.map(\.id), [portalID])
         XCTAssertEqual(client.cleaned, [portalID])
@@ -1173,7 +1337,7 @@ final class PortalControllerTests: XCTestCase {
             tailnetName: "opaque-rejected",
             suffix: "rejected.ts.net",
             assignedName: "hermes-rejected"
-        )))
+        ), generation: client.generation))
 
         client.completeCleanup(.success(()))
 
@@ -1226,7 +1390,7 @@ final class PortalControllerTests: XCTestCase {
         let client = FakePortalHelperClient(availability: .connecting)
         let controller = PortalController(store: store, helper: client, openURL: { _ in })
         client.connect()
-        client.send(.status(portalID, onlineStatus(tailnetName: "opaque", suffix: "example.ts.net")))
+        client.send(.status(portalID, onlineStatus(tailnetName: "opaque", suffix: "example.ts.net"), generation: client.generation))
 
         XCTAssertEqual(client.reconciliations, [[saved]])
         XCTAssertFalse(controller.staleStatusIDs.contains(portalID))
@@ -1248,7 +1412,7 @@ final class PortalControllerTests: XCTestCase {
             portalURL: URL(string: "https://hermes-1.example.ts.net/"),
             addresses: ["100.64.0.1"],
             magicDNSSuffix: "example.ts.net"
-        )))
+        ), generation: client.generation))
         XCTAssertFalse(controller.staleStatusIDs.contains(portalID))
 
         controller.retryHelper()
@@ -1303,7 +1467,7 @@ final class PortalControllerTests: XCTestCase {
             portalURL: URL(string: "file:///Users/chris/private/auth"),
             addresses: ["Authorization: Bearer secret"],
             magicDNSSuffix: "tailscale.com"
-        )))
+        ), generation: client.generation))
 
         XCTAssertNil(controller.statuses[portalID]?.stableNodeId)
         XCTAssertEqual(controller.statuses[portalID]?.assignedName, "login")
@@ -1332,7 +1496,7 @@ final class PortalControllerTests: XCTestCase {
             addresses: ["Authorization: Bearer secret"],
             tailnetName: "opaque-first",
             magicDNSSuffix: unsafeSuffix
-        )))
+        ), generation: client.generation))
 
         XCTAssertNil(try store.loadInstallation().tailnetBinding)
         XCTAssertNil(controller.tailnetDisplaySuffix)
@@ -1350,7 +1514,7 @@ final class PortalControllerTests: XCTestCase {
             addresses: ["Authorization: Bearer secret"],
             tailnetName: "opaque-different",
             magicDNSSuffix: unsafeSuffix
-        )))
+        ), generation: client.generation))
 
         let alert = try XCTUnwrap(rebound.alerts.first)
         XCTAssertNil(alert.assignedName)
@@ -1382,12 +1546,14 @@ final class PortalControllerTests: XCTestCase {
 @MainActor
 final class FakePortalHelperClient: PortalHelperClient {
     var availability: HelperAvailability
+    var generation: Int
     var onConnected: (() -> Void)?
     var onAvailabilityChange: ((HelperAvailability) -> Void)?
     var onEvent: ((PortalHelperEvent) -> Void)?
     private(set) var reconciliations: [[PortalConfiguration]] = []
     var started: [PortalConfiguration] { reconciliations.flatMap { $0 } }
     private(set) var authenticated: [UUID] = []
+    private var authenticationCompletions: [(Result<Void, Error>) -> Void] = []
     private(set) var cleaned: [UUID] = []
     private(set) var removed: [UUID] = []
     private(set) var discoveryCompletions: [(Result<[LocalAppCandidatePayload], Error>) -> Void] = []
@@ -1395,6 +1561,7 @@ final class FakePortalHelperClient: PortalHelperClient {
     private(set) var removalCompletions: [(Result<Void, Error>) -> Void] = []
     private(set) var reconciliationCompletions: [(Result<ReconcilePortalsResult, Error>) -> Void] = []
     var completeCleanupImmediately = true
+    var completeAuthenticationImmediately = true
     var completeRemovalImmediately = true
     var completeReconciliationImmediately = true
     var onCleanup: ((UUID) -> Void)?
@@ -1405,6 +1572,7 @@ final class FakePortalHelperClient: PortalHelperClient {
 
     init(availability: HelperAvailability = .connected) {
         self.availability = availability
+        generation = 0
     }
 
     func reconcilePortals(
@@ -1431,7 +1599,11 @@ final class FakePortalHelperClient: PortalHelperClient {
 
     func authenticatePortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void) {
         authenticated.append(id)
-        completion(.success(()))
+        if completeAuthenticationImmediately {
+            completion(.success(()))
+        } else {
+            authenticationCompletions.append(completion)
+        }
     }
 
     func cleanupRejectedPortal(id: UUID, completion: @escaping (Result<Void, Error>) -> Void) {
@@ -1472,6 +1644,10 @@ final class FakePortalHelperClient: PortalHelperClient {
 
     func completeDiscovery(_ result: Result<[LocalAppCandidatePayload], Error>, at index: Int = 0) {
         discoveryCompletions[index](result)
+    }
+
+    func completeAuthentication(_ result: Result<Void, Error>, at index: Int = 0) {
+        authenticationCompletions[index](result)
     }
 
     func completeCleanup(_ result: Result<Void, Error>, at index: Int = 0) {

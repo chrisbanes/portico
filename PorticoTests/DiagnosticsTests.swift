@@ -96,4 +96,30 @@ final class DiagnosticsTests: XCTestCase {
             XCTAssertFalse(report.contains(excluded), excluded)
         }
     }
+
+    func testProtocolMismatchDiagnosticIsSanitized() {
+        let report = DiagnosticReportRenderer.render(
+            versions: DiagnosticVersions(porticoShort: nil, porticoBuild: nil, helperProtocol: 4),
+            helper: .protocolMismatch,
+            isInstallationAvailable: true,
+            portals: [],
+            history: [.init(timestamp: Date(timeIntervalSince1970: 0), event: .helper(.protocolMismatch))]
+        )
+
+        XCTAssertTrue(report.contains("Helper: protocol mismatch"))
+        XCTAssertFalse(report.contains("request-1"))
+    }
+
+    func testOwnershipFailureDiagnosticIsSanitized() {
+        let report = DiagnosticReportRenderer.render(
+            versions: DiagnosticVersions(porticoShort: nil, porticoBuild: nil, helperProtocol: 4),
+            helper: .ownershipFailure,
+            isInstallationAvailable: true,
+            portals: [],
+            history: [.init(timestamp: Date(timeIntervalSince1970: 0), event: .helper(.ownershipFailure))]
+        )
+
+        XCTAssertTrue(report.contains("Helper: ownership failure"))
+        XCTAssertFalse(report.contains("/Applications/Portico.app"))
+    }
 }

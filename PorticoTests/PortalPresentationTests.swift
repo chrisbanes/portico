@@ -104,4 +104,34 @@ final class PortalPresentationTests: XCTestCase {
         XCTAssertEqual(presentation.title, "Saved configuration unavailable")
         XCTAssertEqual(presentation.symbolName, "exclamationmark.triangle")
     }
+
+    func testProtocolMismatchHasSafeHelperPresentation() {
+        let presentation = HelperStatusPresentation(
+            isInstallationAvailable: true,
+            helperAvailability: .protocolMismatch
+        )
+
+        XCTAssertEqual(presentation.title, "Helper protocol mismatch")
+        XCTAssertEqual(presentation.symbolName, "exclamationmark.triangle")
+    }
+
+    func testUnavailableInstallationOverridesOwnershipFailurePresentation() {
+        let presentation = HelperStatusPresentation(
+            isInstallationAvailable: false,
+            helperAvailability: .ownershipFailure
+        )
+
+        XCTAssertEqual(presentation.title, "Saved configuration unavailable")
+        XCTAssertEqual(presentation.symbolName, "exclamationmark.triangle")
+    }
+
+    func testOwnershipFailureHasSafeHelperPresentation() {
+        let presentation = HelperStatusPresentation(
+            isInstallationAvailable: true,
+            helperAvailability: .ownershipFailure
+        )
+
+        XCTAssertEqual(presentation.title, "Helper ownership failure")
+        XCTAssertEqual(presentation.symbolName, "exclamationmark.triangle")
+    }
 }

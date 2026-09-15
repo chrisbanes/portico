@@ -139,7 +139,8 @@ final class PortalController: ObservableObject {
     private let diagnosticVersions: DiagnosticVersions
     private var installation = InstallationRecord()
     private(set) var isInstallationAvailable = false
-    private var authenticationPending: Set<UUID> = []
+    private var authenticationPending: [UUID: AuthenticationRequest] = [:]
+    private var authenticationRequestIdentity = 0
     private var cleanupInFlight: Set<UUID> = []
     private var discoveryGeneration = 0
     private var reconciliationGeneration = 0
@@ -405,7 +406,7 @@ final class PortalController: ObservableObject {
         do {
             try store.save(updated)
             installation = updated
-            authenticationPending.remove(id)
+            authenticationPending.removeValue(forKey: id)
             statuses.removeValue(forKey: id)
             staleStatusIDs.remove(id)
             reachabilityStates.removeValue(forKey: id)
@@ -456,11 +457,18 @@ final class PortalController: ObservableObject {
         guard requireInstallation(),
               let portal = portals.first(where: { $0.id == id && $0.lifecycle == .active }),
               actionAvailability(for: portal).authenticate,
-              authenticationPending.insert(id).inserted
+              authenticationPending[id] == nil
         else { return }
+        authenticationRequestIdentity += 1
+        let request = AuthenticationRequest(
+            generation: helper.generation,
+            identity: authenticationRequestIdentity
+        )
+        authenticationPending[id] = request
         helper.authenticatePortal(id: id) { [weak self] result in
             if case .failure = result {
-                self?.authenticationPending.remove(id)
+                guard self?.authenticationPending[id] == request else { return }
+                self?.authenticationPending.removeValue(forKey: id)
                 self?.message = "Authentication could not be started."
             }
         }
@@ -529,7 +537,7 @@ final class PortalController: ObservableObject {
             tailscaleState: status?.state,
             hasPortalURL: status?.portalURL != nil,
             isTailscaleFactsStale: portal.map { staleStatusIDs.contains($0.id) } ?? false,
-            isAuthenticationPending: portal.map { authenticationPending.contains($0.id) } ?? false,
+            isAuthenticationPending: portal.map { authenticationPending[$0.id] != nil } ?? false,
             removalState: portal.flatMap { removalStates[$0.id] },
             hasTailnetBinding: installation.tailnetBinding != nil,
             portalCount: installation.portals.count,
@@ -603,6 +611,7 @@ final class PortalController: ObservableObject {
             announce(PorticoAnnouncement.text(for: event))
         }
         guard availability != .connected else { return }
+        authenticationPending.removeAll()
         staleStatusIDs.formUnion(statuses.keys)
         for portal in installation.portals where portal.lifecycle == .active {
             recordPortalState(portal)
@@ -749,7 +758,7 @@ final class PortalController: ObservableObject {
             try store.save(updated)
             installation = updated
             statuses.removeValue(forKey: id)
-            authenticationPending.remove(id)
+            authenticationPending.removeValue(forKey: id)
             staleStatusIDs.remove(id)
             reachabilityStates.removeValue(forKey: id)
             removalAttemptTokens.removeValue(forKey: id)
@@ -773,29 +782,43 @@ final class PortalController: ObservableObject {
     private func receive(_ event: PortalHelperEvent) {
         guard isInstallationAvailable else { return }
         switch event {
-        case let .status(id, status):
-            guard let portal = installation.portals.first(where: {
-                $0.id == id && $0.lifecycle == .active
-            }) else { return }
-            let wasFreshOnline = statuses[id]?.state == .online && !staleStatusIDs.contains(id)
-            let displayStatus = status.sanitizedForDisplay()
-            statuses[id] = displayStatus
-            staleStatusIDs.remove(id)
-            recordPortalState(portal)
-            if status.state == .online, !wasFreshOnline {
-                announce(PorticoAnnouncement.text(for: .portalOnline))
-                onFreshPortalOnline?()
-            }
-            if portal.lifecycle == .active, status.state == .online,
-               let tailnetName = status.tailnetName, !tailnetName.isEmpty {
-                receiveOnlineStatus(for: portal, displayStatus: displayStatus, tailnetName: tailnetName)
-            }
-        case let .authenticationURL(id, url):
-            guard authenticationPending.remove(id) != nil,
-                  installation.portals.contains(where: { $0.id == id && $0.lifecycle == .active })
-            else { return }
-            openURL(url)
+        case let .status(id, status, generation):
+            guard generation == helper.generation else { return }
+            receiveStatus(id: id, status: status)
+        case let .authenticationURL(id, url, generation):
+            receiveAuthenticationURL(id: id, url: url, generation: generation)
         }
+    }
+
+    private func receiveStatus(id: UUID, status: PortalStatusPayload) {
+        guard let portal = installation.portals.first(where: {
+            $0.id == id && $0.lifecycle == .active
+        }) else { return }
+        let wasFreshOnline = statuses[id]?.state == .online && !staleStatusIDs.contains(id)
+        let displayStatus = status.sanitizedForDisplay()
+        statuses[id] = displayStatus
+        staleStatusIDs.remove(id)
+        recordPortalState(portal)
+        if status.state == .online, !wasFreshOnline {
+            announce(PorticoAnnouncement.text(for: .portalOnline))
+            onFreshPortalOnline?()
+        }
+        if portal.lifecycle == .active, status.state == .online,
+           let tailnetName = status.tailnetName, !tailnetName.isEmpty {
+            receiveOnlineStatus(for: portal, displayStatus: displayStatus, tailnetName: tailnetName)
+        }
+    }
+
+    private func receiveAuthenticationURL(id: UUID, url: URL, generation: Int) {
+        guard generation == helper.generation,
+              authenticationPending[id]?.generation == generation,
+              installation.portals.contains(where: { $0.id == id && $0.lifecycle == .active }),
+              url.scheme?.lowercased() == "https",
+              let host = url.host,
+              !host.isEmpty
+        else { return }
+        authenticationPending.removeValue(forKey: id)
+        openURL(url)
     }
 
     private func receiveOnlineStatus(
@@ -938,6 +961,11 @@ private struct RejectionEvidence {
 private struct PortalReconciliation {
     let generation: Int
     let portals: [PortalConfiguration]
+}
+
+private struct AuthenticationRequest: Equatable {
+    let generation: Int
+    let identity: Int
 }
 
 private extension String {

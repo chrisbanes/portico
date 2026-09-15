@@ -36,25 +36,90 @@ final class HelperShutdownTests: XCTestCase {
         XCTAssertFalse(launcher.process.terminated)
     }
 
-    func testTerminatesOwnedProcessAfterGraceTimeout() async throws {
+    func testEscalatesGracefulShutdownToTERMThenKILLAndWaitsForConfirmedExit() throws {
         let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
         var requestIDs = ["handshake-1", "shutdown-1"]
         let supervisor = HelperSupervisor(
             helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
             launcher: launcher,
             requestIDProvider: { requestIDs.removeFirst() },
-            handshakeTimeout: 1,
-            shutdownGraceInterval: 0.01
+            scheduler: scheduler,
+            handshakeTimeout: 60
         )
         supervisor.start(loggingPreference: .enabled)
         launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
         var completionCount = 0
 
         supervisor.shutdown { completionCount += 1 }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        scheduler.run(delay: 5)
 
         XCTAssertTrue(launcher.process.terminated)
+        XCTAssertFalse(launcher.process.killed)
+        XCTAssertEqual(completionCount, 0)
+        scheduler.run(delay: 2)
+
+        XCTAssertTrue(launcher.process.killed)
+        XCTAssertEqual(completionCount, 0)
+        launcher.exit(status: 0)
+
         XCTAssertEqual(completionCount, 1)
+    }
+
+    func testUnconfirmedKillReportsTerminalOwnershipFailureWithoutReplacingChild() throws {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "shutdown-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        var completionCount = 0
+
+        supervisor.shutdown { completionCount += 1 }
+        scheduler.run(delay: 5)
+        scheduler.run(delay: 2)
+        scheduler.run(delay: 1)
+
+        XCTAssertEqual(supervisor.availability, .ownershipFailure)
+        XCTAssertEqual(completionCount, 1)
+        XCTAssertEqual(launcher.processes.count, 1)
+        supervisor.restart(loggingPreference: .disabled)
+        XCTAssertEqual(launcher.processes.count, 1)
+    }
+
+    func testShutdownCompletesImmediatelyFromExistingTerminalOwnershipFailure() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { "handshake-1" },
+            scheduler: scheduler,
+            handshakeTimeout: 3
+        )
+        supervisor.start(loggingPreference: .enabled)
+        scheduler.run(delay: 3)
+        scheduler.run(delay: 2)
+        scheduler.run(delay: 1)
+        XCTAssertEqual(supervisor.availability, .ownershipFailure)
+
+        var completionCount = 0
+        supervisor.shutdown { completionCount += 1 }
+
+        XCTAssertEqual(completionCount, 1)
+        XCTAssertEqual(supervisor.availability, .ownershipFailure)
+        XCTAssertEqual(launcher.processes.count, 1)
+
+        supervisor.shutdown { completionCount += 1 }
+
+        XCTAssertEqual(completionCount, 2)
+        XCTAssertEqual(launcher.processes.count, 1)
     }
 
     func testAlreadyExitedChildCompletesImmediately() {
@@ -98,5 +163,49 @@ final class HelperShutdownTests: XCTestCase {
         supervisor.shutdown { completionCount += 1 }
         XCTAssertEqual(completionCount, 3)
         XCTAssertEqual(launcher.process.sent.count, 2)
+    }
+
+    func testShutdownCompletesPendingRequestsWithGenerationLossExactlyOnce() {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "discover-1", "shutdown-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        var results: [Result<[LocalAppCandidatePayload], Error>] = []
+
+        supervisor.discoverLocalApps { results.append($0) }
+        supervisor.shutdown {}
+        launcher.exit(status: 0)
+
+        XCTAssertEqual(results.count, 1)
+        guard case .failure(HelperClientError.generationLost) = results[0] else {
+            return XCTFail("expected pending request generation loss")
+        }
+    }
+
+    func testShutdownCompletesAtObservedExitDuringControlledRestart() {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "shutdown-1", "shutdown-2"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        supervisor.restart(loggingPreference: .disabled)
+        var completionCount = 0
+
+        supervisor.shutdown { completionCount += 1 }
+        launcher.exit(status: 0)
+
+        XCTAssertEqual(completionCount, 1)
+        XCTAssertEqual(launcher.processes.count, 1)
     }
 }

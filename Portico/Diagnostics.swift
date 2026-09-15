@@ -122,6 +122,10 @@ enum DiagnosticReportRenderer {
             case let .retrying(attempt, delay): return "Helper retry \(attempt) in \(Int(delay))s"
             case .connected: return "Helper connected"
             case .failed: return "Helper unavailable"
+            case .requestDeadline: return "Helper request deadline exceeded"
+            case .generationLost: return "Helper generation lost"
+            case .protocolMismatch: return "Helper protocol mismatch"
+            case .ownershipFailure: return "Helper ownership failure"
             case .shuttingDown: return "Helper shutting down"
             }
         case let .portal(name, desired, tailscale, reachability, stale):
@@ -137,6 +141,10 @@ enum DiagnosticReportRenderer {
         case let .retrying(attempt, delay): return "retry \(attempt) in \(Int(delay))s"
         case .connected: return "connected"
         case .failed: return "unavailable"
+        case .requestDeadline: return "request deadline exceeded"
+        case .generationLost: return "generation lost"
+        case .protocolMismatch: return "protocol mismatch"
+        case .ownershipFailure: return "ownership failure"
         case .shuttingDown: return "shutting down"
         }
     }

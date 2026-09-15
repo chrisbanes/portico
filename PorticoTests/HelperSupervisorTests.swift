@@ -17,6 +17,19 @@ final class HelperSupervisorTests: XCTestCase {
         XCTAssertTrue(launcher.processes.isEmpty)
     }
 
+    func testExposesCurrentProcessGenerationThroughClientSeam() {
+        let launcher = FakeHelperLauncher()
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { "handshake-1" }
+        )
+
+        XCTAssertEqual(supervisor.generation, 0)
+        supervisor.start(loggingPreference: .enabled)
+        XCTAssertEqual(supervisor.generation, 1)
+    }
+
     func testControlledRestartWaitsForOldOwnershipBeforeLaunchingWithNewPreference() throws {
         let launcher = FakeHelperLauncher()
         let scheduler = FakePorticoScheduler()
@@ -76,6 +89,31 @@ final class HelperSupervisorTests: XCTestCase {
         XCTAssertEqual(launcher.processes.count, 2)
     }
 
+    func testControlledRestartReportsOwnershipFailureAfterUnconfirmedKill() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "shutdown-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+
+        supervisor.restart(loggingPreference: .disabled)
+        scheduler.run(delay: 5)
+        scheduler.run(delay: 2)
+        scheduler.run(delay: 1)
+
+        XCTAssertTrue(launcher.process.terminated)
+        XCTAssertTrue(launcher.process.killed)
+        XCTAssertEqual(supervisor.availability, .ownershipFailure)
+        XCTAssertEqual(launcher.processes.count, 1)
+    }
+
     func testControlledRestartRejectsOldEventsAndStartsFreshRecoveryBudget() {
         let launcher = FakeHelperLauncher()
         let scheduler = FakePorticoScheduler()
@@ -99,6 +137,53 @@ final class HelperSupervisorTests: XCTestCase {
         launcher.exit(status: 1)
 
         XCTAssertEqual(supervisor.availability, .retrying(attempt: 1, delay: 1))
+    }
+
+    func testRestartFencesAvailabilityBeforeFailingOldGenerationCallbacks() {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "authenticate-1", "discover-1", "shutdown-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+
+        supervisor.authenticatePortal(id: UUID()) { _ in
+            supervisor.discoverLocalApps { _ in }
+        }
+        supervisor.restart(loggingPreference: .disabled)
+
+        XCTAssertEqual(launcher.process.sent.count, 3)
+        let lastRequest = try? JSONDecoder().decode(
+            HelperRequest<EmptyPayload>.self,
+            from: launcher.process.sent.last ?? Data()
+        )
+        XCTAssertEqual(lastRequest?.command, .shutdown)
+    }
+
+    func testLateExitAfterTerminalOwnershipFailureCannotScheduleReplacement() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { "handshake-1" },
+            scheduler: scheduler,
+            handshakeTimeout: 3
+        )
+        supervisor.start(loggingPreference: .enabled)
+        scheduler.run(delay: 3)
+        scheduler.run(delay: 2)
+        scheduler.run(delay: 1)
+
+        launcher.exit(status: 1)
+        scheduler.runNext()
+
+        XCTAssertEqual(supervisor.availability, .ownershipFailure)
+        XCTAssertEqual(launcher.processes.count, 1)
     }
 
     func testRetriesUnexpectedExitWithOneChildAndFixedSharedBudget() {
@@ -218,11 +303,57 @@ final class HelperSupervisorTests: XCTestCase {
         XCTAssertTrue(launcher.process.terminated)
     }
 
+    func testExactHandshakeProtocolMismatchIsTerminalWithoutRetry() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { "request-1" },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"request-1","result":{"protocolVersion":5}}"#)
+        XCTAssertTrue(launcher.process.terminated)
+        launcher.exit(status: 1)
+
+        XCTAssertEqual(supervisor.availability, .protocolMismatch)
+        XCTAssertTrue(scheduler.pendingDelays.isEmpty)
+    }
+
+    func testExactEnvelopeProtocolMismatchIsTerminalForHandshakeAndLaterResponse() {
+        for line in [
+            #"{"version":5,"requestId":"request-1","result":{"protocolVersion":4}}"#,
+            #"{"version":5,"requestId":"reconcile-1","result":{"entries":[]}}"#,
+        ] {
+            let launcher = FakeHelperLauncher()
+            let scheduler = FakePorticoScheduler()
+            var requestIDs = ["request-1", "reconcile-1"]
+            let supervisor = HelperSupervisor(
+                helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+                launcher: launcher,
+                requestIDProvider: { requestIDs.removeFirst() },
+                scheduler: scheduler,
+                handshakeTimeout: 60
+            )
+            supervisor.start(loggingPreference: .enabled)
+            if line.contains("reconcile") {
+                launcher.receive(line: #"{"version":4,"requestId":"request-1","result":{"protocolVersion":4}}"#)
+                supervisor.reconcilePortals([]) { _ in }
+            }
+            launcher.receive(line: line)
+            launcher.exit(status: 1)
+
+            XCTAssertEqual(supervisor.availability, .protocolMismatch)
+            XCTAssertTrue(scheduler.pendingDelays.isEmpty)
+        }
+    }
+
     func testHandshakeFailuresEnterSharedRecoveryBudgetAfterChildExit() {
         let failures: [(String, Bool, (FakeHelperLauncher) -> Void)] = [
             ("malformed line", false, { $0.receive(line: "{") }),
-            ("correlated error", false, { $0.receive(line: #"{"version":4,"requestId":"request-1","error":{"code":"unsupportedVersion","message":"unsupported protocol version"}}"#) }),
-            ("unsupported response version", false, { $0.receive(line: #"{"version":5,"requestId":"request-1","result":{"protocolVersion":5}}"#) }),
             ("EOF", false, { $0.receiveEOF() }),
             ("nonzero exit", true, { $0.exit(status: 1) }),
         ]
@@ -303,7 +434,7 @@ final class HelperSupervisorTests: XCTestCase {
             ]
         )
         launcher.receive(line: #"{"version":4,"event":"portalStatus","portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","payload":{"state":"connecting","addresses":[]}}"#)
-        XCTAssertEqual(events, [.status(laterPortal.id, PortalStatusPayload(state: .connecting, stableNodeId: nil, assignedName: nil, portalURL: nil, addresses: []))])
+        XCTAssertEqual(events, [.status(laterPortal.id, PortalStatusPayload(state: .connecting, stableNodeId: nil, assignedName: nil, portalURL: nil, addresses: []), generation: 1)])
         XCTAssertNil(result)
         launcher.receive(line: #"{"version":4,"requestId":"reconcile-1","result":{"entries":[{"portalId":"5EA74329-3144-4BA2-925F-138D14D61FCC","outcome":"converged"},{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","outcome":"startFailed"}]}}"#)
         XCTAssertEqual(
@@ -331,8 +462,8 @@ final class HelperSupervisorTests: XCTestCase {
         supervisor.reconcilePortals([]) { result = $0 }
         launcher.receiveEOF()
 
-        guard case .failure(HelperClientError.protocolFailure) = result else {
-            return XCTFail("expected unresolved reconciliation to fail")
+        guard case .failure(HelperClientError.generationLost) = result else {
+            return XCTFail("expected unresolved reconciliation generation loss")
         }
     }
 
@@ -360,6 +491,208 @@ final class HelperSupervisorTests: XCTestCase {
             try result?.get(),
             [LocalAppCandidatePayload(localAppPort: 3000, processLabel: "node", suggestedPortalName: "hermes")]
         )
+    }
+
+    func testSilentDiscoveryCompletesOnceAtItsDeadline() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "discover-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        var completions: [Result<[LocalAppCandidatePayload], Error>] = []
+
+        supervisor.discoverLocalApps { completions.append($0) }
+        scheduler.run(delay: 5)
+
+        XCTAssertEqual(completions.count, 1)
+        guard case .failure = completions.first else {
+            return XCTFail("expected silent discovery deadline failure")
+        }
+        launcher.receive(line: #"{"version":4,"requestId":"discover-1","result":{"candidates":[]}}"#)
+        XCTAssertEqual(completions.count, 1)
+    }
+
+    func testAcceptedCommandsUseTheirSpecifiedDeadlines() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "authenticate-1", "discover-1", "cleanup-1", "remove-1", "reconcile-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+
+        supervisor.authenticatePortal(id: UUID()) { _ in }
+        supervisor.discoverLocalApps { _ in }
+        supervisor.cleanupRejectedPortal(id: UUID()) { _ in }
+        supervisor.removePortal(id: UUID()) { _ in }
+        supervisor.reconcilePortals([]) { _ in }
+
+        XCTAssertEqual(scheduler.pendingDelays.sorted(), [5, 5, 10, 15, 15])
+    }
+
+    func testReconciliationDeadlineUsesOnlyThePreviousSentSnapshotCount() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "reconcile-1", "reconcile-2", "reconcile-3"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        let portals = (0..<5).map {
+            PortalConfiguration(id: UUID(), name: "portal-\($0)", localAppPort: 8000 + $0, createdAt: Date())
+        }
+
+        supervisor.reconcilePortals(portals) { _ in }
+        XCTAssertTrue(scheduler.pendingDelays.contains(60))
+        launcher.receive(line: #"{"version":4,"requestId":"reconcile-1","error":{"code":"expected","message":"expected"}}"#)
+        supervisor.reconcilePortals([]) { _ in }
+        XCTAssertTrue(scheduler.pendingDelays.contains(60))
+        launcher.receive(line: #"{"version":4,"requestId":"reconcile-2","error":{"code":"expected","message":"expected"}}"#)
+        supervisor.reconcilePortals([]) { _ in }
+
+        XCTAssertEqual(scheduler.pendingDelays, [10])
+    }
+
+    func testDeadlineFailsItsCommandAndOtherPendingCommandsWithGenerationLoss() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "authenticate-1", "cleanup-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        var authenticationResult: Result<Void, Error>?
+        var cleanupResult: Result<Void, Error>?
+
+        supervisor.authenticatePortal(id: UUID()) { authenticationResult = $0 }
+        supervisor.cleanupRejectedPortal(id: UUID()) { cleanupResult = $0 }
+        scheduler.run(delay: 5)
+
+        guard case .failure(HelperClientError.deadline) = authenticationResult else {
+            return XCTFail("expected authentication deadline")
+        }
+        guard case .failure(HelperClientError.generationLost) = cleanupResult else {
+            return XCTFail("expected cleanup generation loss")
+        }
+        XCTAssertTrue(launcher.process.terminated)
+    }
+
+    func testDeadlineChangesAvailabilityBeforeCompletionCanReenter() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "discover-1", "authenticate-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+
+        supervisor.discoverLocalApps { _ in
+            supervisor.authenticatePortal(id: UUID()) { _ in }
+        }
+        scheduler.run(delay: 5)
+
+        XCTAssertEqual(launcher.process.sent.count, 2)
+        XCTAssertEqual(supervisor.availability, .requestDeadline)
+    }
+
+    func testUnhealthyGenerationEscalatesToKILLAndReportsOwnershipFailureWithoutExit() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { "handshake-1" },
+            scheduler: scheduler,
+            handshakeTimeout: 3
+        )
+        supervisor.start(loggingPreference: .enabled)
+
+        scheduler.run(delay: 3)
+        XCTAssertEqual(supervisor.availability, .requestDeadline)
+        XCTAssertTrue(launcher.process.terminated)
+        scheduler.run(delay: 2)
+        XCTAssertTrue(launcher.process.killed)
+        scheduler.run(delay: 1)
+
+        XCTAssertEqual(supervisor.availability, .ownershipFailure)
+        XCTAssertEqual(launcher.processes.count, 1)
+    }
+
+    func testLateFailedWriteInvalidatesGenerationAfterItsResponseAlreadyCompleted() {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "discover-1", "authenticate-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        launcher.process.completesWritesImmediately = false
+        var discoveryResults: [Result<[LocalAppCandidatePayload], Error>] = []
+        var authenticationResults: [Result<Void, Error>] = []
+
+        supervisor.discoverLocalApps { discoveryResults.append($0) }
+        supervisor.authenticatePortal(id: UUID()) { authenticationResults.append($0) }
+        launcher.receive(line: #"{"version":4,"requestId":"discover-1","result":{"candidates":[]}}"#)
+        launcher.process.completeNextWrite(.failure(FakeHelperWriteError.failed))
+
+        XCTAssertEqual(discoveryResults.count, 1)
+        guard authenticationResults.count == 1,
+              case .failure(HelperClientError.generationLost) = authenticationResults[0]
+        else {
+            return XCTFail("expected the remaining request to lose its generation")
+        }
+        XCTAssertEqual(supervisor.availability, .generationLost)
+    }
+
+    func testMalformedResponseFencesGenerationBeforeItsCallbackCanReenter() {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "discover-1", "authenticate-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+
+        supervisor.discoverLocalApps { _ in
+            supervisor.authenticatePortal(id: UUID()) { _ in }
+        }
+        launcher.receive(line: #"{"version":4,"requestId":"discover-1","result":{"unexpected":true}}"#)
+
+        XCTAssertEqual(launcher.process.sent.count, 2)
+        XCTAssertEqual(supervisor.availability, .generationLost)
     }
 
     func testRequestsAndCorrelatesRejectedPortalCleanup() throws {
@@ -417,8 +750,8 @@ final class HelperSupervisorTests: XCTestCase {
 
         launcher.receiveEOF()
 
-        guard case .failure(HelperClientError.protocolFailure) = result else {
-            return XCTFail("expected unresolved removal to fail after process loss")
+        guard case .failure(HelperClientError.generationLost) = result else {
+            return XCTFail("expected unresolved removal generation loss after process loss")
         }
     }
 
@@ -443,6 +776,212 @@ final class HelperSupervisorTests: XCTestCase {
         }
         XCTAssertEqual(error, HelperProtocolError(code: "discoveryFailure", message: "local app discovery failed"))
     }
+
+    func testRealSilentHelperDeadlineLosesOtherPendingRequestAndEscalatesTERMToKILL() throws {
+        let readyURL = temporaryFixtureURL(suffix: "ready")
+        let scriptURL = try makeHelperFixture("""
+        trap '' TERM
+        IFS= read -r handshake
+        printf '%s\\n' '{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}'
+        IFS= read -r discovery
+        : > '\(readyURL.path)'
+        while :; do :; done
+        """)
+        defer {
+            try? FileManager.default.removeItem(at: scriptURL)
+            try? FileManager.default.removeItem(at: readyURL)
+        }
+
+        let scheduler = FakePorticoScheduler()
+        let connected = expectation(description: "real helper connects")
+        let retried = expectation(description: "killed helper exits and schedules retry")
+        let exited = expectation(description: "TERM-resistant child exits after KILL")
+        var childExited = false
+        let launcher = RecordingHelperLauncher { _ in
+            childExited = true
+            exited.fulfill()
+        }
+        let supervisor = HelperSupervisor(
+            helperURL: scriptURL,
+            launcher: launcher,
+            requestIDProvider: sequenceProvider(["handshake-1", "discover-1", "authenticate-1", "shutdown-1"]),
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.onConnected = { connected.fulfill() }
+        supervisor.onAvailabilityChange = {
+            if case .retrying = $0 { retried.fulfill() }
+        }
+        defer {
+            if !childExited {
+                supervisor.shutdown {}
+                scheduler.run(delay: 5)
+                scheduler.run(delay: 2)
+                launcher.forceKill()
+                waitForProcessToStop(launcher)
+            }
+        }
+        supervisor.start(loggingPreference: .enabled)
+        wait(for: [connected], timeout: 2)
+
+        var discovery: Result<[LocalAppCandidatePayload], Error>?
+        var authentication: Result<Void, Error>?
+        supervisor.discoverLocalApps { discovery = $0 }
+        supervisor.authenticatePortal(id: UUID()) { authentication = $0 }
+        waitForFixture(at: readyURL)
+
+        scheduler.run(delay: 5)
+        guard case .failure(HelperClientError.deadline) = discovery else {
+            return XCTFail("expected silent discovery deadline")
+        }
+        guard case .failure(HelperClientError.generationLost) = authentication else {
+            return XCTFail("expected other pending request to lose its generation")
+        }
+        XCTAssertEqual(supervisor.availability, .requestDeadline)
+
+        scheduler.run(delay: 2)
+        wait(for: [exited, retried], timeout: 2)
+        XCTAssertEqual(supervisor.availability, .retrying(attempt: 1, delay: 1))
+    }
+
+    func testRealProtocolMismatchIsPermanentAfterTERMIgnoresUntilKILL() throws {
+        let scriptURL = try makeHelperFixture("""
+        trap '' TERM
+        IFS= read -r handshake
+        printf '%s\\n' '{"version":4,"requestId":"handshake-1","result":{"protocolVersion":5}}'
+        while :; do :; done
+        """)
+        defer { try? FileManager.default.removeItem(at: scriptURL) }
+
+        let scheduler = FakePorticoScheduler()
+        let mismatch = expectation(description: "protocol mismatch")
+        let exited = expectation(description: "TERM-resistant mismatch child exits after KILL")
+        var childExited = false
+        let launcher = RecordingHelperLauncher { _ in
+            childExited = true
+            exited.fulfill()
+        }
+        let supervisor = HelperSupervisor(
+            helperURL: scriptURL,
+            launcher: launcher,
+            requestIDProvider: { "handshake-1" },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.onAvailabilityChange = {
+            if $0 == .protocolMismatch { mismatch.fulfill() }
+        }
+        defer {
+            if !childExited {
+                supervisor.shutdown {}
+                scheduler.run(delay: 5)
+                scheduler.run(delay: 2)
+                launcher.forceKill()
+                waitForProcessToStop(launcher)
+            }
+        }
+        supervisor.start(loggingPreference: .enabled)
+        wait(for: [mismatch], timeout: 2)
+
+        scheduler.run(delay: 2)
+        wait(for: [exited], timeout: 2)
+
+        XCTAssertEqual(supervisor.availability, .protocolMismatch)
+        XCTAssertFalse(scheduler.pendingDelays.contains { $0 == 1 || $0 == 2 || $0 == 4 || $0 == 8 || $0 == 16 })
+    }
+
+    func testRealLauncherFailureEntersGenerationLossRecovery() {
+        let scheduler = FakePorticoScheduler()
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/missing/portico-helper"),
+            launcher: ProcessHelperLauncher(),
+            requestIDProvider: { "handshake-1" },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+
+        supervisor.start(loggingPreference: .enabled)
+
+        XCTAssertEqual(supervisor.availability, .retrying(attempt: 1, delay: 1))
+        XCTAssertEqual(scheduler.pendingDelays, [1])
+    }
+}
+
+private func makeHelperFixture(_ body: String) throws -> URL {
+    let url = temporaryFixtureURL(suffix: "sh")
+    try "#!/bin/sh\n\(body)\n".write(to: url, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+    return url
+}
+
+private func temporaryFixtureURL(suffix: String) -> URL {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("portico-helper-\(UUID().uuidString)")
+        .appendingPathExtension(suffix)
+}
+
+private func sequenceProvider(_ values: [String]) -> () -> String {
+    var values = values
+    return { values.removeFirst() }
+}
+
+private final class RecordingHelperLauncher: HelperLaunching {
+    private let launcher = ProcessHelperLauncher()
+    private let childDidExit: (Int32) -> Void
+    private var process: HelperProcess?
+
+    var isRunning: Bool { process?.isRunning ?? false }
+
+    init(childDidExit: @escaping (Int32) -> Void) {
+        self.childDidExit = childDidExit
+    }
+
+    func launch(
+        at executableURL: URL,
+        arguments: [String],
+        loggingPreference: OperationalLoggingPreference,
+        onLine: @escaping (Data) -> Void,
+        onEOF: @escaping () -> Void,
+        onExit: @escaping (Int32) -> Void
+    ) throws -> HelperProcess {
+        let process = try launcher.launch(
+            at: executableURL,
+            arguments: arguments,
+            loggingPreference: loggingPreference,
+            onLine: onLine,
+            onEOF: onEOF,
+            onExit: { [childDidExit] status in
+                childDidExit(status)
+                onExit(status)
+            }
+        )
+        self.process = process
+        return process
+    }
+
+    func forceKill() {
+        process?.closeInput()
+        process?.terminate()
+        process?.kill()
+    }
+}
+
+@MainActor
+private func waitForFixture(at url: URL) {
+    let deadline = Date().addingTimeInterval(2)
+    while !FileManager.default.fileExists(atPath: url.path), Date() < deadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+    }
+    XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "fixture did not receive the request")
+}
+
+@MainActor
+private func waitForProcessToStop(_ launcher: RecordingHelperLauncher) {
+    let deadline = Date().addingTimeInterval(2)
+    while launcher.isRunning, Date() < deadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+    }
+    XCTAssertFalse(launcher.isRunning, "fixture child remained running after cleanup")
 }
 
 final class FakeHelperLauncher: HelperLaunching {
@@ -535,9 +1074,21 @@ final class FakeHelperProcess: HelperProcess {
     var sent: [Data] = []
     private(set) var inputClosed = false
     private(set) var terminated = false
+    private(set) var killed = false
+    var completesWritesImmediately = true
+    private var pendingWriteCompletions: [(Result<Void, Error>) -> Void] = []
 
-    func send(_ data: Data) throws {
+    func send(_ data: Data, completion: @escaping (Result<Void, Error>) -> Void) {
         sent.append(data)
+        if completesWritesImmediately {
+            completion(.success(()))
+        } else {
+            pendingWriteCompletions.append(completion)
+        }
+    }
+
+    func completeNextWrite(_ result: Result<Void, Error>) {
+        pendingWriteCompletions.removeFirst()(result)
     }
 
     func closeInput() {
@@ -546,6 +1097,14 @@ final class FakeHelperProcess: HelperProcess {
 
     func terminate() {
         terminated = true
-        isRunning = false
     }
+
+    func kill() {
+        killed = true
+    }
+
+}
+
+private enum FakeHelperWriteError: Error {
+    case failed
 }
