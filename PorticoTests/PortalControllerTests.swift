@@ -65,6 +65,33 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(client.retryCount, 0)
     }
 
+    func testUnreadableInstallationFailsClosedWithoutOverwritingSource() throws {
+        let root = temporaryRoot()
+        let store = PortalStore(rootURL: root)
+        try store.save(InstallationRecord(operationalLogging: .enabled))
+        let authoritative = try Data(contentsOf: store.installationURL)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: root.path)
+
+        XCTAssertThrowsError(try store.prepareForStartup())
+        XCTAssertThrowsError(try store.loadInstallation())
+
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+        XCTAssertFalse(controller.isInstallationAvailable)
+        controller.setOperationalLogging(.disabled)
+        controller.portalName = "hermes"
+        controller.localAppPort = "8787"
+        XCTAssertNil(controller.addPortal())
+        XCTAssertTrue(client.restartedWith.isEmpty)
+        XCTAssertTrue(client.reconciliations.isEmpty)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), authoritative)
+    }
+
     func testUnavailableInstallationDiagnosticReportIsSanitizedAndInert() throws {
         let root = temporaryRoot()
         let store = PortalStore(rootURL: root)
