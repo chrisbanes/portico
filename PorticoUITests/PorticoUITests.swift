@@ -579,16 +579,24 @@ final class PorticoUITests: XCTestCase {
         openMenuBarExtra(app)
         let compactHelperState = app.descendants(matching: .any)["helper-state"]
         XCTAssertTrue(waitForText("Restarting", element: compactHelperState, timeout: 2))
-        app.typeKey(.escape, modifierFlags: [])
+        let openPortico = app.buttons["open-portico"]
+        XCTAssertTrue(openPortico.exists, app.debugDescription)
+        openPortico.click()
         let managementWindow = app.windows.matching(
             NSPredicate(format: "identifier == %@", "management")
         ).firstMatch
         XCTAssertTrue(managementWindow.waitForExistence(timeout: 3), app.debugDescription)
-        app.activate()
+        let focusedManagementWindow = app.windows.matching(
+            NSPredicate(format: "identifier == %@ AND hasKeyboardFocus == true", "management")
+        ).firstMatch
+        XCTAssertTrue(focusedManagementWindow.waitForExistence(timeout: 3), app.debugDescription)
         app.typeKey("r", modifierFlags: [.command, .shift])
-        XCTAssertTrue(waitForValue("Connected", element: app.staticTexts["settings-helper-state"], timeout: 5))
+        XCTAssertTrue(
+            waitForValue("Connected", element: app.staticTexts["settings-helper-state"], timeout: 5),
+            app.debugDescription
+        )
         openMenuBarExtra(app)
-        XCTAssertTrue(waitForText("Connected", element: compactHelperState, timeout: 5))
+        XCTAssertTrue(waitForText("Connected", element: compactHelperState, timeout: 5), app.debugDescription)
 
         app = launch(scenario: "terminal-failure")
         app.typeKey("o", modifierFlags: [.command, .shift])

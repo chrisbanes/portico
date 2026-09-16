@@ -519,7 +519,7 @@ final class HelperSupervisorTests: XCTestCase {
         XCTAssertEqual(completions.count, 1)
     }
 
-    func testAcceptedCommandsUseTheirSpecifiedDeadlines() {
+    func testDispatchedCommandsUseTheirSpecifiedDeadlines() {
         let launcher = FakeHelperLauncher()
         let scheduler = FakePorticoScheduler()
         var requestIDs = ["handshake-1", "authenticate-1", "discover-1", "cleanup-1", "remove-1", "reconcile-1"]
@@ -539,7 +539,225 @@ final class HelperSupervisorTests: XCTestCase {
         supervisor.removePortal(id: UUID()) { _ in }
         supervisor.reconcilePortals([]) { _ in }
 
-        XCTAssertEqual(scheduler.pendingDelays.sorted(), [5, 5, 10, 15, 15])
+        XCTAssertEqual(scheduler.pendingDelays.filter { $0 < 60 }, [5])
+        launcher.receive(line: #"{"version":4,"requestId":"authenticate-1","result":{"accepted":true}}"#)
+
+        XCTAssertEqual(scheduler.pendingDelays.filter { $0 < 60 }, [5])
+        launcher.receive(line: #"{"version":4,"requestId":"discover-1","result":{"candidates":[]}}"#)
+
+        XCTAssertEqual(scheduler.pendingDelays.filter { $0 < 60 }, [15])
+        launcher.receive(line: #"{"version":4,"requestId":"cleanup-1","result":{"accepted":true}}"#)
+
+        XCTAssertEqual(scheduler.pendingDelays.filter { $0 < 60 }, [15])
+        launcher.receive(line: #"{"version":4,"requestId":"remove-1","result":{"accepted":true}}"#)
+
+        XCTAssertEqual(scheduler.pendingDelays.filter { $0 < 60 }, [10])
+    }
+
+    func testQueuesAuthenticationAndCleanupUntilReconciliationResponds() throws {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "reconcile-1", "authenticate-1", "cleanup-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+
+        supervisor.reconcilePortals([]) { _ in }
+        supervisor.authenticatePortal(id: UUID()) { _ in }
+        supervisor.cleanupRejectedPortal(id: UUID()) { _ in }
+
+        XCTAssertEqual(launcher.process.sent.count, 2)
+        XCTAssertEqual(scheduler.pendingDelays, [10])
+        let reconciliation = try XCTUnwrap(launcher.process.sent.last)
+        XCTAssertEqual(
+            try JSONDecoder().decode(HelperRequest<ReconcilePortalsPayload>.self, from: reconciliation).command,
+            .reconcilePortals
+        )
+
+        launcher.receive(line: #"{"version":4,"requestId":"reconcile-1","result":{"entries":[]}}"#)
+
+        XCTAssertEqual(launcher.process.sent.count, 3)
+        XCTAssertEqual(scheduler.pendingDelays.filter { $0 < 60 }, [5])
+        let authentication = try XCTUnwrap(launcher.process.sent.last)
+        XCTAssertEqual(
+            try JSONDecoder().decode(HelperRequest<AuthenticatePortalPayload>.self, from: authentication).command,
+            .authenticatePortal
+        )
+
+        launcher.receive(line: #"{"version":4,"requestId":"authenticate-1","result":{"accepted":true}}"#)
+
+        XCTAssertEqual(launcher.process.sent.count, 4)
+        XCTAssertEqual(scheduler.pendingDelays.filter { $0 < 60 }, [15])
+        let cleanup = try XCTUnwrap(launcher.process.sent.last)
+        XCTAssertEqual(
+            try JSONDecoder().decode(HelperRequest<CleanupRejectedPortalPayload>.self, from: cleanup).command,
+            .cleanupRejectedPortal
+        )
+    }
+
+    func testGenerationLossFailsQueuedRequestsWithoutDispatchingThem() {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "reconcile-1", "authenticate-1", "cleanup-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        var authenticationResults: [Result<Void, Error>] = []
+        var cleanupResults: [Result<Void, Error>] = []
+
+        supervisor.reconcilePortals([]) { _ in }
+        supervisor.authenticatePortal(id: UUID()) { authenticationResults.append($0) }
+        supervisor.cleanupRejectedPortal(id: UUID()) { cleanupResults.append($0) }
+        launcher.receiveEOF()
+
+        XCTAssertEqual(launcher.process.sent.count, 2)
+        guard authenticationResults.count == 1,
+              case .failure(HelperClientError.generationLost) = authenticationResults[0]
+        else {
+            return XCTFail("expected queued authentication to lose its generation")
+        }
+        guard cleanupResults.count == 1,
+              case .failure(HelperClientError.generationLost) = cleanupResults[0]
+        else {
+            return XCTFail("expected queued cleanup to lose its generation")
+        }
+    }
+
+    func testShutdownBypassesQueuedRequestsAndFailsThemOnce() throws {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "reconcile-1", "authenticate-1", "shutdown-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        var authenticationResults: [Result<Void, Error>] = []
+
+        supervisor.reconcilePortals([]) { _ in }
+        supervisor.authenticatePortal(id: UUID()) { authenticationResults.append($0) }
+        supervisor.shutdown {}
+
+        XCTAssertEqual(launcher.process.sent.count, 3)
+        let shutdown = try XCTUnwrap(launcher.process.sent.last)
+        XCTAssertEqual(
+            try JSONDecoder().decode(HelperRequest<EmptyPayload>.self, from: shutdown).command,
+            .shutdown
+        )
+        guard authenticationResults.count == 1,
+              case .failure(HelperClientError.generationLost) = authenticationResults[0]
+        else {
+            return XCTFail("expected queued authentication to finish once during shutdown")
+        }
+        XCTAssertTrue(launcher.process.inputClosed)
+    }
+
+    func testRestartFailsQueuedRequestsWithoutDispatchingThem() throws {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "reconcile-1", "authenticate-1", "shutdown-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        var authenticationResults: [Result<Void, Error>] = []
+
+        supervisor.reconcilePortals([]) { _ in }
+        supervisor.authenticatePortal(id: UUID()) { authenticationResults.append($0) }
+        supervisor.restart(loggingPreference: .disabled)
+
+        XCTAssertEqual(launcher.process.sent.count, 3)
+        let shutdown = try XCTUnwrap(launcher.process.sent.last)
+        XCTAssertEqual(
+            try JSONDecoder().decode(HelperRequest<EmptyPayload>.self, from: shutdown).command,
+            .shutdown
+        )
+        guard authenticationResults.count == 1,
+              case .failure(HelperClientError.generationLost) = authenticationResults[0]
+        else {
+            return XCTFail("expected queued authentication to finish once during restart")
+        }
+    }
+
+    func testResponseCallbackQueuesAfterPreviouslyAcceptedOrdinaryRequest() throws {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "reconcile-1", "cleanup-1", "authenticate-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+
+        supervisor.reconcilePortals([]) { _ in
+            supervisor.authenticatePortal(id: UUID()) { _ in }
+        }
+        supervisor.cleanupRejectedPortal(id: UUID()) { _ in }
+        launcher.receive(line: #"{"version":4,"requestId":"reconcile-1","result":{"entries":[]}}"#)
+
+        XCTAssertEqual(launcher.process.sent.count, 3)
+        let cleanup = try XCTUnwrap(launcher.process.sent.last)
+        XCTAssertEqual(
+            try JSONDecoder().decode(HelperRequest<CleanupRejectedPortalPayload>.self, from: cleanup).command,
+            .cleanupRejectedPortal
+        )
+
+        launcher.receive(line: #"{"version":4,"requestId":"cleanup-1","result":{"accepted":true}}"#)
+
+        XCTAssertEqual(launcher.process.sent.count, 4)
+        let authentication = try XCTUnwrap(launcher.process.sent.last)
+        XCTAssertEqual(
+            try JSONDecoder().decode(HelperRequest<AuthenticatePortalPayload>.self, from: authentication).command,
+            .authenticatePortal
+        )
+    }
+
+    func testUnmatchedResponseDoesNotAdvanceOrdinaryQueue() throws {
+        let launcher = FakeHelperLauncher()
+        var requestIDs = ["handshake-1", "reconcile-1", "authenticate-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        var authenticationResults: [Result<Void, Error>] = []
+
+        supervisor.reconcilePortals([]) { _ in }
+        supervisor.authenticatePortal(id: UUID()) { authenticationResults.append($0) }
+        launcher.receive(line: #"{"version":4,"requestId":"authenticate-1","result":{"accepted":true}}"#)
+
+        XCTAssertEqual(launcher.process.sent.count, 2)
+        XCTAssertTrue(authenticationResults.isEmpty)
+        launcher.receive(line: #"{"version":4,"requestId":"reconcile-1","result":{"entries":[]}}"#)
+
+        XCTAssertEqual(launcher.process.sent.count, 3)
+        let authentication = try XCTUnwrap(launcher.process.sent.last)
+        XCTAssertEqual(
+            try JSONDecoder().decode(HelperRequest<AuthenticatePortalPayload>.self, from: authentication).command,
+            .authenticatePortal
+        )
+        launcher.receive(line: #"{"version":4,"requestId":"authenticate-1","result":{"accepted":true}}"#)
+        XCTAssertEqual(authenticationResults.count, 1)
     }
 
     func testReconciliationDeadlineUsesOnlyThePreviousSentSnapshotCount() {

@@ -95,6 +95,9 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
     private let shutdownKillObservationInterval: TimeInterval
     private var process: HelperProcess?
     private var pendingResponses: [String: PendingResponse] = [:]
+    private var queuedOrdinaryRequests: [QueuedRequest] = []
+    private var activeOrdinaryRequestID: String?
+    private var isCompletingOrdinaryRequest = false
     private var shutdownTimeoutTask: ScheduledTask?
     private var retryTask: ScheduledTask?
     private var stabilityTask: ScheduledTask?
@@ -218,7 +221,12 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
                 onEOF: { [weak self] in self?.handleFailure(generation: generation) },
                 onExit: { [weak self] _ in self?.processExited(generation: generation) }
             )
-            try sendRequest(command: .handshake, payload: EmptyPayload(), deadline: handshakeTimeout) { [weak self] (result: Result<HandshakeResult, Error>) in
+            try sendRequest(
+                command: .handshake,
+                payload: EmptyPayload(),
+                deadline: handshakeTimeout,
+                dispatch: .control
+            ) { [weak self] (result: Result<HandshakeResult, Error>) in
                 guard let self else { return }
                 guard generation == self.processGeneration, !self.failureHandled else { return }
                 guard case let .success(handshake) = result else {
@@ -402,9 +410,20 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         if let requestID = envelope.requestId {
             if let pending = pendingResponses.removeValue(forKey: requestID) {
                 pending.deadlineTask?.cancel()
-                if !pending.consume(line) {
+                let completesOrdinaryRequest = activeOrdinaryRequestID == requestID
+                if completesOrdinaryRequest {
+                    activeOrdinaryRequestID = nil
+                    isCompletingOrdinaryRequest = true
+                }
+                let consumed = pending.consume(line)
+                if completesOrdinaryRequest {
+                    isCompletingOrdinaryRequest = false
+                }
+                if !consumed {
                     handleFailure(generation: generation)
                     pending.fail(HelperClientError.protocolFailure)
+                } else if completesOrdinaryRequest {
+                    dispatchNextOrdinaryRequest()
                 }
             }
             return
@@ -437,9 +456,15 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         command: HelperCommand,
         payload: Payload,
         deadline: TimeInterval? = nil,
+        dispatch: RequestDispatch = .ordinary,
         completion: @escaping (Result<Response, Error>) -> Void
     ) throws {
         let requestID = requestIDProvider()
+        var data = try JSONEncoder().encode(
+            HelperRequest(version: helperProtocolVersion, requestId: requestID, command: command, payload: payload)
+        )
+        data.append(0x0A)
+        guard process != nil else { throw HelperClientError.unavailable }
         let pending = PendingResponse(
             consume: { data in
                 guard let response = try? JSONDecoder().decode(HelperResponse<Response>.self, from: data),
@@ -459,25 +484,93 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
             },
             fail: { error in completion(.failure(error)) }
         )
-        pendingResponses[requestID] = pending
         let generation = processGeneration
+        switch dispatch {
+        case .control:
+            dispatchRequest(
+                requestID: requestID,
+                data: data,
+                deadline: deadline,
+                generation: generation,
+                pending: pending
+            )
+        case .ordinary:
+            queuedOrdinaryRequests.append(
+                QueuedRequest(
+                    requestID: requestID,
+                    data: data,
+                    deadline: deadline,
+                    generation: generation,
+                    pending: pending
+                )
+            )
+            dispatchNextOrdinaryRequest()
+        }
+    }
+
+    private func dispatchNextOrdinaryRequest() {
+        guard activeOrdinaryRequestID == nil,
+              !isCompletingOrdinaryRequest,
+              availability == .connected,
+              !failureHandled,
+              !isShuttingDown,
+              restartingGeneration == nil
+        else { return }
+        while !queuedOrdinaryRequests.isEmpty {
+            let request = queuedOrdinaryRequests.removeFirst()
+            guard request.generation == processGeneration else {
+                request.pending.fail(HelperClientError.generationLost)
+                continue
+            }
+            activeOrdinaryRequestID = request.requestID
+            dispatchRequest(
+                requestID: request.requestID,
+                data: request.data,
+                deadline: request.deadline,
+                generation: request.generation,
+                pending: request.pending
+            )
+            return
+        }
+    }
+
+    private func dispatchRequest(
+        requestID: String,
+        data: Data,
+        deadline: TimeInterval?,
+        generation: Int,
+        pending: PendingResponse
+    ) {
+        pendingResponses[requestID] = pending
         if let deadline {
             pending.deadlineTask = scheduler.schedule(after: deadline) { [weak self] in
                 self?.requestTimedOut(requestID: requestID, generation: generation)
             }
         }
-        do {
-            try sendWithoutResponse(command: command, requestID: requestID, payload: payload) { [weak self] in
-                guard let self, generation == self.processGeneration else { return }
-                let failedPending = self.pendingResponses.removeValue(forKey: requestID)
-                failedPending?.deadlineTask?.cancel()
-                self.handleFailure(generation: generation)
-                failedPending?.fail(HelperClientError.generationLost)
-            }
-        } catch {
+        guard let process else {
             pendingResponses.removeValue(forKey: requestID)?.deadlineTask?.cancel()
-            throw error
+            if activeOrdinaryRequestID == requestID {
+                activeOrdinaryRequestID = nil
+            }
+            handleFailure(generation: generation)
+            pending.fail(HelperClientError.generationLost)
+            return
         }
+        process.send(data) { [weak self] result in
+            guard case .failure = result else { return }
+            self?.requestWriteFailed(requestID: requestID, generation: generation)
+        }
+    }
+
+    private func requestWriteFailed(requestID: String, generation: Int) {
+        guard generation == processGeneration else { return }
+        let failedPending = pendingResponses.removeValue(forKey: requestID)
+        failedPending?.deadlineTask?.cancel()
+        if activeOrdinaryRequestID == requestID {
+            activeOrdinaryRequestID = nil
+        }
+        handleFailure(generation: generation)
+        failedPending?.fail(HelperClientError.generationLost)
     }
 
     private func requestTimedOut(requestID: String, generation: Int) {
@@ -561,10 +654,14 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
     private func failPendingResponses(with error: Error = HelperClientError.protocolFailure) {
         let pending = pendingResponses.values
         pendingResponses.removeAll()
+        activeOrdinaryRequestID = nil
+        let queued = queuedOrdinaryRequests
+        queuedOrdinaryRequests.removeAll()
         pending.forEach {
             $0.deadlineTask?.cancel()
             $0.fail(error)
         }
+        queued.forEach { $0.pending.fail(error) }
     }
 
     private func scheduleRetry(generation: Int) {
@@ -710,6 +807,19 @@ private final class PendingResponse {
         self.consume = consume
         self.fail = fail
     }
+}
+
+private enum RequestDispatch {
+    case control
+    case ordinary
+}
+
+private struct QueuedRequest {
+    let requestID: String
+    let data: Data
+    let deadline: TimeInterval?
+    let generation: Int
+    let pending: PendingResponse
 }
 
 private struct IncomingHelperEnvelope: Decodable {

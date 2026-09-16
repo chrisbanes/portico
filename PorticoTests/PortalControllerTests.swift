@@ -1493,6 +1493,13 @@ final class PortalControllerTests: XCTestCase {
         scheduler.run(delay: 1)
         launcher.receive(line: #"{"version":4,"requestId":"handshake-2","result":{"protocolVersion":4}}"#)
 
+        let discovery = try JSONDecoder().decode(
+            HelperRequest<EmptyPayload>.self,
+            from: XCTUnwrap(launcher.process.sent.last)
+        )
+        XCTAssertEqual(discovery.command, .discoverLocalApps)
+        launcher.receive(line: #"{"version":4,"requestId":"discover-2","result":{"candidates":[]}}"#)
+
         let request = try JSONDecoder().decode(
             HelperRequest<ReconcilePortalsPayload>.self,
             from: XCTUnwrap(launcher.process.sent.last)
