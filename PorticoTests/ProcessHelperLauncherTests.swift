@@ -63,7 +63,7 @@ final class ProcessHelperLauncherTests: XCTestCase {
         XCTAssertEqual(crlf.append(Data("1234\r\n".utf8)).frames, [Data("1234".utf8)])
     }
 
-    func testDeliveryQueueDrainsFramesBeforeByteOverflowTerminal() {
+    func testDeliveryQueueDeliversQueuedFramesBeforeExplicitTerminalAtByteCapacity() {
         var scheduledDrains: [() -> Void] = []
         var deliveryOrder: [String] = []
         let queue = FrameDeliveryQueue(
@@ -85,7 +85,7 @@ final class ProcessHelperLauncherTests: XCTestCase {
         XCTAssertTrue(scheduledDrains.isEmpty)
     }
 
-    func testDeliveryQueueDrainsFramesBeforeFrameOverflowTerminal() {
+    func testDeliveryQueueDeliversQueuedFramesBeforeExplicitTerminalAtFrameCapacity() {
         var scheduledDrains: [() -> Void] = []
         var deliveryOrder: [String] = []
         let queue = FrameDeliveryQueue(
@@ -107,7 +107,7 @@ final class ProcessHelperLauncherTests: XCTestCase {
         XCTAssertEqual(deliveryOrder, ["a", "b", "terminal"])
     }
 
-    func testDeliveryQueueYieldsWhenDeliveryAddsMoreFrames() {
+    func testDeliveryQueueYieldsWhenDeliveryAppendsTerminalCallback() {
         var scheduledDrains: [() -> Void] = []
         var deliveryOrder: [String] = []
         var queue: FrameDeliveryQueue!
@@ -118,7 +118,7 @@ final class ProcessHelperLauncherTests: XCTestCase {
                 let frame = String(decoding: data, as: UTF8.self)
                 deliveryOrder.append(frame)
                 if frame == "a" {
-                    XCTAssertTrue(queue.append([Data("c".utf8)]))
+                    queue.appendTerminal { deliveryOrder.append("terminal") }
                 }
             },
             scheduleOnMain: { scheduledDrains.append($0) }
@@ -134,7 +134,182 @@ final class ProcessHelperLauncherTests: XCTestCase {
 
         scheduledDrains.removeFirst()()
 
+        XCTAssertEqual(deliveryOrder, ["a", "b", "terminal"])
+    }
+
+    func testDeliveryQueueResumesAfterFrameCapacityDrains() {
+        var scheduledDrains: [() -> Void] = []
+        var deliveryOrder: [String] = []
+        let queue = FrameDeliveryQueue(
+            maximumFrames: 2,
+            maximumBytes: 10,
+            deliver: { data in deliveryOrder.append(String(decoding: data, as: UTF8.self)) },
+            scheduleOnMain: { scheduledDrains.append($0) }
+        )
+
+        XCTAssertTrue(queue.append([Data("a".utf8), Data("b".utf8)]))
+        XCTAssertFalse(queue.append([Data("c".utf8)]))
+        XCTAssertEqual(scheduledDrains.count, 1)
+
+        scheduledDrains.removeFirst()()
+
+        XCTAssertTrue(queue.append([Data("c".utf8)]))
+        scheduledDrains.removeFirst()()
         XCTAssertEqual(deliveryOrder, ["a", "b", "c"])
+    }
+
+    func testDeliveryQueueResumesAfterByteCapacityDrains() {
+        var scheduledDrains: [() -> Void] = []
+        var deliveryOrder: [String] = []
+        let queue = FrameDeliveryQueue(
+            maximumFrames: 4,
+            maximumBytes: 3,
+            deliver: { data in deliveryOrder.append(String(decoding: data, as: UTF8.self)) },
+            scheduleOnMain: { scheduledDrains.append($0) }
+        )
+
+        XCTAssertTrue(queue.append([Data("aa".utf8)]))
+        XCTAssertFalse(queue.append([Data("bb".utf8)]))
+        XCTAssertEqual(scheduledDrains.count, 1)
+
+        scheduledDrains.removeFirst()()
+
+        XCTAssertTrue(queue.append([Data("bb".utf8)]))
+        scheduledDrains.removeFirst()()
+        XCTAssertEqual(deliveryOrder, ["aa", "bb"])
+    }
+
+    func testDeliveryProgressResetsTheBackpressureDeadlineBeforeAFrameFits() {
+        let releaseDeliveries = DispatchSemaphore(value: 0)
+        let deliveryStarted = DispatchSemaphore(value: 0)
+        let largeFrameDelivered = expectation(description: "large frame is delivered")
+        let lock = NSLock()
+        var deliveryTimes: [UInt64] = []
+        var pendingDrain: (() -> Void)?
+        var startDraining = false
+        let queue = FrameDeliveryQueue(
+            maximumFrames: 4,
+            maximumBytes: 6,
+            deliver: { data in
+                if data == Data("dddddd".utf8) {
+                    largeFrameDelivered.fulfill()
+                    return
+                }
+                deliveryStarted.signal()
+                XCTAssertEqual(releaseDeliveries.wait(timeout: .now() + 1), .success)
+                lock.lock()
+                deliveryTimes.append(DispatchTime.now().uptimeNanoseconds)
+                lock.unlock()
+            },
+            scheduleOnMain: { work in
+                lock.lock()
+                if startDraining {
+                    lock.unlock()
+                    DispatchQueue.global().async(execute: work)
+                } else {
+                    XCTAssertNil(pendingDrain)
+                    pendingDrain = work
+                    lock.unlock()
+                }
+            }
+        )
+        let largeFrame = Data("dddddd".utf8)
+
+        XCTAssertTrue(queue.append([Data("aa".utf8), Data("bb".utf8), Data("cc".utf8)]))
+        lock.lock()
+        startDraining = true
+        let initialDrain = pendingDrain
+        pendingDrain = nil
+        lock.unlock()
+        XCTAssertNotNil(initialDrain)
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.01) {
+            initialDrain?()
+        }
+        DispatchQueue.global().async {
+            for _ in 0..<3 {
+                guard deliveryStarted.wait(timeout: .now() + 1) == .success else { return }
+                Thread.sleep(forTimeInterval: 0.3)
+                releaseDeliveries.signal()
+            }
+        }
+
+        XCTAssertTrue(queue.waitUntilCanAppend(largeFrame, timeout: 0.5))
+        XCTAssertTrue(queue.append([largeFrame]))
+        wait(for: [largeFrameDelivered], timeout: 2)
+
+        lock.lock()
+        XCTAssertEqual(deliveryTimes.count, 3)
+        XCTAssertGreaterThan(
+            Double(deliveryTimes[2] - deliveryTimes[0]) / 1_000_000_000,
+            0.5
+        )
+        XCTAssertTrue(zip(deliveryTimes, deliveryTimes.dropFirst()).allSatisfy {
+            Double($1 - $0) / 1_000_000_000 < 0.5
+        })
+        lock.unlock()
+    }
+
+    func testDeliveryDeadlineDoesNotTreatInFlightCallbackAsCapacityOrProgress() {
+        let firstDeliveryStarted = expectation(description: "first delivery starts")
+        let deadlineElapsed = expectation(description: "deadline elapses while first callback is held")
+        let suffixAppended = expectation(description: "suffix appends after held callback completes")
+        let terminalDelivered = expectation(description: "terminal follows both frames")
+        let releaseFirstDelivery = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var deliveryOrder: [String] = []
+        var couldAppendBeforeCompletion: Bool?
+        let queue = FrameDeliveryQueue(
+            maximumFrames: 1,
+            maximumBytes: 2,
+            deliver: { data in
+                let line = String(decoding: data, as: UTF8.self)
+                if line == "a" {
+                    firstDeliveryStarted.fulfill()
+                    XCTAssertEqual(releaseFirstDelivery.wait(timeout: .now() + 1), .success)
+                }
+                lock.lock()
+                deliveryOrder.append(line)
+                lock.unlock()
+            },
+            scheduleOnMain: { work in DispatchQueue.global().async(execute: work) }
+        )
+
+        XCTAssertTrue(queue.append([Data("a".utf8)]))
+        wait(for: [firstDeliveryStarted], timeout: 1)
+
+        DispatchQueue.global().async {
+            let canAppend = queue.waitUntilCanAppend(Data("b".utf8), timeout: 0.2)
+            lock.lock()
+            couldAppendBeforeCompletion = canAppend
+            lock.unlock()
+            deadlineElapsed.fulfill()
+        }
+        wait(for: [deadlineElapsed], timeout: 1)
+
+        lock.lock()
+        XCTAssertEqual(couldAppendBeforeCompletion, false)
+        lock.unlock()
+
+        DispatchQueue.global().async {
+            guard queue.waitUntilCanAppend(Data("b".utf8), timeout: nil) else { return }
+            XCTAssertTrue(queue.append([Data("b".utf8)]))
+            suffixAppended.fulfill()
+        }
+        releaseFirstDelivery.signal()
+        wait(for: [suffixAppended], timeout: 1)
+
+        queue.appendTerminal {
+            lock.lock()
+            deliveryOrder.append("terminal")
+            lock.unlock()
+            terminalDelivered.fulfill()
+        }
+        wait(for: [terminalDelivered], timeout: 1)
+
+        lock.lock()
+        XCTAssertEqual(deliveryOrder, ["a", "b", "terminal"])
+        lock.unlock()
     }
 
     func testRealChildDeliversFinalCoalescedFramesBeforeEOFAndExit() throws {
@@ -202,7 +377,7 @@ final class ProcessHelperLauncherTests: XCTestCase {
         XCTAssertEqual(events, ["eof", "exit:0"])
     }
 
-    func testRealChildFloodDeliversBoundedFIFOFramesBeforeTerminalFailure() throws {
+    func testRealChildFloodDeliversAllFiniteFramesInFIFOOrder() throws {
         let terminal = expectation(description: "EOF and exit")
         var events: [String] = []
         let process = try ProcessHelperLauncher().launch(
@@ -220,10 +395,96 @@ final class ProcessHelperLauncherTests: XCTestCase {
         wait(for: [terminal], timeout: 2)
 
         XCTAssertFalse(process.isRunning)
-        let lines = Array(events.dropLast(2))
-        XCTAssertEqual(lines, lines.indices.map { "line:\($0 + 1)" })
-        XCTAssertLessThanOrEqual(lines.count, 17)
-        XCTAssertEqual(Array(events.suffix(2)), ["eof", "exit:0"])
+        XCTAssertEqual(events, (1...17).map { "line:\($0)" } + ["eof", "exit:0"])
+    }
+
+    func testRealChildDeliversValidBurstBeyondQueueCapacityAfterDelayedMainDrain() throws {
+        let terminal = expectation(description: "EOF and exit")
+        let releaseFirstDelivery = DispatchSemaphore(value: 0)
+        var events: [String] = []
+        var delayedFirstDelivery = false
+        let burst = (1...64).map(String.init).joined(separator: "\n") + "\n"
+        let process = try ProcessHelperLauncher().launch(
+            at: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "printf '%s' '\(burst)'"],
+            loggingPreference: .disabled,
+            onLine: { data in
+                if !delayedFirstDelivery {
+                    delayedFirstDelivery = true
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+                        releaseFirstDelivery.signal()
+                    }
+                    XCTAssertEqual(releaseFirstDelivery.wait(timeout: .now() + 1), .success)
+                }
+                events.append("line:" + String(decoding: data, as: UTF8.self))
+            },
+            onEOF: { events.append("eof") },
+            onExit: { status in
+                events.append("exit:\(status)")
+                terminal.fulfill()
+            }
+        )
+
+        wait(for: [terminal], timeout: 2)
+
+        XCTAssertFalse(process.isRunning)
+        XCTAssertTrue(delayedFirstDelivery)
+        XCTAssertEqual(events, [
+            "line:1", "line:2", "line:3", "line:4", "line:5", "line:6", "line:7", "line:8",
+            "line:9", "line:10", "line:11", "line:12", "line:13", "line:14", "line:15", "line:16",
+            "line:17", "line:18", "line:19", "line:20", "line:21", "line:22", "line:23", "line:24",
+            "line:25", "line:26", "line:27", "line:28", "line:29", "line:30", "line:31", "line:32",
+            "line:33", "line:34", "line:35", "line:36", "line:37", "line:38", "line:39", "line:40",
+            "line:41", "line:42", "line:43", "line:44", "line:45", "line:46", "line:47", "line:48",
+            "line:49", "line:50", "line:51", "line:52", "line:53", "line:54", "line:55", "line:56",
+            "line:57", "line:58", "line:59", "line:60", "line:61", "line:62", "line:63", "line:64",
+            "eof", "exit:0",
+        ])
+    }
+
+    func testBackpressuredChildFailsAfterNoDeliveryProgressButRetainsValidSuffix() throws {
+        let eof = expectation(description: "backpressure failure reaches EOF")
+        let exited = expectation(description: "fixture exits after cleanup")
+        let releaseFirstDelivery = DispatchSemaphore(value: 0)
+        var events: [String] = []
+        var delayedFirstDelivery = false
+        let burst = (1...64).map(String.init).joined(separator: "\n") + "\n"
+        let process = try ProcessHelperLauncher(backpressureTimeout: 0.05).launch(
+            at: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "printf '%s' '\(burst)'; while :; do :; done"],
+            loggingPreference: .disabled,
+            onLine: { data in
+                if !delayedFirstDelivery {
+                    delayedFirstDelivery = true
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+                        releaseFirstDelivery.signal()
+                    }
+                    XCTAssertEqual(releaseFirstDelivery.wait(timeout: .now() + 1), .success)
+                }
+                events.append("line:" + String(decoding: data, as: UTF8.self))
+            },
+            onEOF: {
+                events.append("eof")
+                eof.fulfill()
+            },
+            onExit: { status in
+                events.append("exit:\(status)")
+                exited.fulfill()
+            }
+        )
+        defer {
+            if process.isRunning {
+                process.terminate()
+                process.kill()
+                wait(for: [exited], timeout: 2)
+            }
+        }
+
+        wait(for: [eof], timeout: 2)
+
+        XCTAssertTrue(delayedFirstDelivery)
+        XCTAssertTrue(process.isRunning)
+        XCTAssertEqual(events, (1...64).map { "line:\($0)" } + ["eof"])
     }
 
     func testRealChildBrokenPipeReportsFailedWrite() throws {

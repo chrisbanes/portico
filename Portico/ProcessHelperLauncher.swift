@@ -11,6 +11,12 @@ enum JSONLineBufferError: Error, Equatable {
 }
 
 final class ProcessHelperLauncher: HelperLaunching {
+    private let backpressureTimeout: TimeInterval
+
+    init(backpressureTimeout: TimeInterval = 5) {
+        self.backpressureTimeout = backpressureTimeout
+    }
+
     static func childEnvironment(
         for preference: OperationalLoggingPreference,
         inherited: [String: String]
@@ -42,7 +48,8 @@ final class ProcessHelperLauncher: HelperLaunching {
         let outputCoordinator = ProcessOutputCoordinator(
             onLine: onLine,
             onEOF: onEOF,
-            onExit: onExit
+            onExit: onExit,
+            backpressureTimeout: backpressureTimeout
         )
         let parserQueue = DispatchQueue(label: "dev.chrisbanes.portico.helper.stdout")
         let outputDescriptor = output.fileHandleForReading.fileDescriptor
@@ -243,27 +250,27 @@ private final class ProcessOutputCoordinator {
     private let delivery: FrameDeliveryQueue
     private let onEOF: () -> Void
     private let onExit: (Int32) -> Void
+    private let backpressureTimeout: TimeInterval
     private var finished = false
     private var exitStatus: Int32?
 
     init(
         onLine: @escaping (Data) -> Void,
         onEOF: @escaping () -> Void,
-        onExit: @escaping (Int32) -> Void
+        onExit: @escaping (Int32) -> Void,
+        backpressureTimeout: TimeInterval
     ) {
         delivery = FrameDeliveryQueue(deliver: onLine)
         self.onEOF = onEOF
         self.onExit = onExit
+        self.backpressureTimeout = backpressureTimeout
     }
 
     func receive(_ data: Data) {
         guard !finished else { return }
         let result = buffer.append(data)
-        guard delivery.append(result.frames) else {
-            finish()
-            return
-        }
-        if result.error != nil {
+        let timedOut = enqueue(result.frames)
+        if result.error != nil || timedOut {
             finish()
         }
     }
@@ -280,6 +287,32 @@ private final class ProcessOutputCoordinator {
         finishIfPossible()
     }
 
+    private func enqueue(_ frames: [Data]) -> Bool {
+        var timedOut = false
+        for frame in frames {
+            while true {
+                switch delivery.append(frame: frame) {
+                case .enqueued:
+                    break
+                case .needsCapacity:
+                    if timedOut {
+                        _ = delivery.waitUntilCanAppend(frame, timeout: nil)
+                    } else if !delivery.waitUntilCanAppend(
+                        frame,
+                        timeout: backpressureTimeout
+                    ) {
+                        timedOut = true
+                    }
+                    continue
+                case .terminal:
+                    return timedOut
+                }
+                break
+            }
+        }
+        return timedOut
+    }
+
     private func finish() {
         guard !finished else { return }
         finished = true
@@ -293,8 +326,14 @@ private final class ProcessOutputCoordinator {
     }
 }
 
+private enum FrameDeliveryAppendResult {
+    case enqueued
+    case needsCapacity
+    case terminal
+}
+
 final class FrameDeliveryQueue {
-    private let lock = NSLock()
+    private let condition = NSCondition()
     private let maximumFrames: Int
     private let maximumBytes: Int
     private let deliver: (Data) -> Void
@@ -303,6 +342,8 @@ final class FrameDeliveryQueue {
     private var bytes = 0
     private var terminalCallbacks: [() -> Void] = []
     private var drainScheduled = false
+    private var deliveryProgress = 0
+    private var lastDeliveryTime: UInt64?
 
     init(
         maximumFrames: Int = 16,
@@ -319,27 +360,77 @@ final class FrameDeliveryQueue {
     }
 
     func append(_ newFrames: [Data]) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard terminalCallbacks.isEmpty else { return false }
         for frame in newFrames {
-            guard frames.count < maximumFrames, bytes + frame.count <= maximumBytes else {
-                scheduleDrainLocked()
-                return false
-            }
-            frames.append(frame)
-            bytes += frame.count
+            guard case .enqueued = append(frame: frame) else { return false }
         }
-        scheduleDrainLocked()
         return true
     }
 
+    fileprivate func append(frame: Data) -> FrameDeliveryAppendResult {
+        condition.lock()
+        defer { condition.unlock() }
+
+        guard terminalCallbacks.isEmpty else { return .terminal }
+        guard frame.count <= maximumBytes else { return .terminal }
+        guard canAppendLocked(frame) else {
+            scheduleDrainLocked()
+            return .needsCapacity
+        }
+        frames.append(frame)
+        bytes += frame.count
+        scheduleDrainLocked()
+        return .enqueued
+    }
+
+    func waitUntilCanAppend(_ frame: Data, timeout: TimeInterval?) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+
+        let timeoutNanoseconds = timeout.map { timeout in
+            UInt64(max(0, timeout) * 1_000_000_000)
+        }
+        var observedDeliveryProgress = deliveryProgress
+        var monotonicDeadline = timeoutNanoseconds.map { timeout in
+            DispatchTime.now().uptimeNanoseconds &+ timeout
+        }
+        var hasWaitedForCapacity = false
+        while terminalCallbacks.isEmpty {
+            let needsCapacity = !canAppendLocked(frame)
+            if needsCapacity || hasWaitedForCapacity {
+                if deliveryProgress != observedDeliveryProgress,
+                   let timeoutNanoseconds,
+                   let lastDeliveryTime,
+                   let priorDeadline = monotonicDeadline {
+                    guard lastDeliveryTime <= priorDeadline else { return false }
+                    observedDeliveryProgress = deliveryProgress
+                    monotonicDeadline = lastDeliveryTime &+ timeoutNanoseconds
+                }
+                if let monotonicDeadline {
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    guard now < monotonicDeadline else { return false }
+                    guard needsCapacity else { return true }
+                    let remaining = Double(monotonicDeadline - now) / 1_000_000_000
+                    hasWaitedForCapacity = true
+                    _ = condition.wait(until: Date(timeIntervalSinceNow: remaining))
+                    continue
+                }
+            }
+            guard needsCapacity else { return true }
+            hasWaitedForCapacity = true
+            condition.wait()
+        }
+        return false
+    }
+
     func appendTerminal(_ callback: @escaping () -> Void) {
-        lock.lock()
+        condition.lock()
         terminalCallbacks.append(callback)
         scheduleDrainLocked()
-        lock.unlock()
+        condition.unlock()
+    }
+
+    private func canAppendLocked(_ frame: Data) -> Bool {
+        frames.count < maximumFrames && bytes + frame.count <= maximumBytes
     }
 
     private func scheduleDrainLocked() {
@@ -352,29 +443,39 @@ final class FrameDeliveryQueue {
         var delivered = 0
         while delivered < maximumFrames {
             let next: () -> Void
-            lock.lock()
-            if !frames.isEmpty {
-                let frame = frames.removeFirst()
-                bytes -= frame.count
+            let deliveredFrame: Bool
+            condition.lock()
+            if let frame = frames.first {
                 next = { [deliver] in deliver(frame) }
+                deliveredFrame = true
             } else if !terminalCallbacks.isEmpty {
                 next = terminalCallbacks.removeFirst()
+                deliveredFrame = false
             } else {
                 drainScheduled = false
-                lock.unlock()
+                condition.unlock()
                 return
             }
-            lock.unlock()
+            condition.unlock()
             next()
+            if deliveredFrame {
+                condition.lock()
+                let frame = frames.removeFirst()
+                bytes -= frame.count
+                deliveryProgress &+= 1
+                lastDeliveryTime = DispatchTime.now().uptimeNanoseconds
+                condition.broadcast()
+                condition.unlock()
+            }
             delivered += 1
         }
 
-        lock.lock()
+        condition.lock()
         drainScheduled = false
         if !frames.isEmpty || !terminalCallbacks.isEmpty {
             scheduleDrainLocked()
         }
-        lock.unlock()
+        condition.unlock()
     }
 }
 
