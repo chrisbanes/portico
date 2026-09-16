@@ -1576,19 +1576,19 @@ final class PortalControllerTests: XCTestCase {
         )
         let controller = PortalController(store: store, helper: supervisor, openURL: { _ in })
         supervisor.start(loggingPreference: .enabled)
-        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        launcher.receive(line: #"{"version":5,"requestId":"handshake-1","result":{"protocolVersion":5}}"#)
         controller.stopPortal(id: portalID)
 
         launcher.exit(status: 1)
         scheduler.run(delay: 1)
-        launcher.receive(line: #"{"version":4,"requestId":"handshake-2","result":{"protocolVersion":4}}"#)
+        launcher.receive(line: #"{"version":5,"requestId":"handshake-2","result":{"protocolVersion":5}}"#)
 
         let discovery = try JSONDecoder().decode(
             HelperRequest<EmptyPayload>.self,
             from: XCTUnwrap(launcher.process.sent.last)
         )
         XCTAssertEqual(discovery.command, .discoverLocalApps)
-        launcher.receive(line: #"{"version":4,"requestId":"discover-2","result":{"candidates":[]}}"#)
+        launcher.receive(line: #"{"version":5,"requestId":"discover-2","result":{"candidates":[]}}"#)
 
         let request = try JSONDecoder().decode(
             HelperRequest<ReconcilePortalsPayload>.self,

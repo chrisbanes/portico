@@ -1,6 +1,6 @@
 import Foundation
 
-let helperProtocolVersion = 4
+let helperProtocolVersion = 5
 
 enum HelperCommand: String, Codable {
     case handshake
