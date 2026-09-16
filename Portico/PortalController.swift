@@ -242,6 +242,12 @@ final class PortalController: ObservableObject {
             message = errorMessage
             return
         }
+        guard helper.availability != .protocolMismatch else {
+            let errorMessage = "The logging setting cannot be changed while the helper protocol versions do not match."
+            operationalLoggingError = errorMessage
+            message = errorMessage
+            return
+        }
         var updated = installation
         updated.operationalLogging = preference
         do {

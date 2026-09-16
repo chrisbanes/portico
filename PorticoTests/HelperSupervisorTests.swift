@@ -407,6 +407,18 @@ final class HelperSupervisorTests: XCTestCase {
 
         XCTAssertEqual(supervisor.availability, .protocolMismatch)
         XCTAssertTrue(scheduler.pendingDelays.isEmpty)
+
+        supervisor.start(loggingPreference: .disabled)
+
+        XCTAssertEqual(supervisor.availability, .protocolMismatch)
+        XCTAssertEqual(launcher.processes.count, 1)
+        XCTAssertEqual(launcher.loggingPreferences, [.enabled])
+
+        supervisor.restart(loggingPreference: .disabled)
+
+        XCTAssertEqual(supervisor.availability, .protocolMismatch)
+        XCTAssertEqual(launcher.processes.count, 1)
+        XCTAssertEqual(launcher.loggingPreferences, [.enabled])
     }
 
     func testExactEnvelopeProtocolMismatchIsTerminalForHandshakeAndLaterResponse() {

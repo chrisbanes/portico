@@ -141,7 +141,12 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
     }
 
     func start(loggingPreference: OperationalLoggingPreference) {
-        guard process == nil, retryTask == nil, !isShuttingDown, !terminalOwnershipFailure else { return }
+        guard process == nil,
+              retryTask == nil,
+              !isShuttingDown,
+              !terminalOwnershipFailure,
+              !permanentProtocolMismatch
+        else { return }
         self.loggingPreference = loggingPreference
         guard loggingPreference != .undecided else {
             availability = .awaitingLoggingChoice
@@ -169,7 +174,8 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         guard loggingPreference != .undecided,
               loggingPreference != self.loggingPreference,
               !isShuttingDown,
-              !terminalOwnershipFailure
+              !terminalOwnershipFailure,
+              !permanentProtocolMismatch
         else { return }
         self.loggingPreference = loggingPreference
         retryTask?.cancel()
@@ -206,7 +212,11 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
     }
 
     private func launch() {
-        guard process == nil, !isShuttingDown, !terminalOwnershipFailure else { return }
+        guard process == nil,
+              !isShuttingDown,
+              !terminalOwnershipFailure,
+              !permanentProtocolMismatch
+        else { return }
         processGeneration += 1
         let generation = processGeneration
         lastReconciliationCount = 0
