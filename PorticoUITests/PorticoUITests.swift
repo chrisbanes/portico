@@ -590,13 +590,27 @@ final class PorticoUITests: XCTestCase {
             NSPredicate(format: "identifier == %@ AND hasKeyboardFocus == true", "management")
         ).firstMatch
         XCTAssertTrue(focusedManagementWindow.waitForExistence(timeout: 3), app.debugDescription)
-        app.typeKey("r", modifierFlags: [.command, .shift])
+        let porticoMenu = app.menuBars.menuBarItems["Portico"]
+        let menuBarLabels = app.menuBars.menuBarItems.allElementsBoundByIndex.map(\.label).joined(separator: ", ")
+        XCTAssertTrue(porticoMenu.exists, "Portico menu missing; menu bar items: \(menuBarLabels)")
+        porticoMenu.click()
+        let completeRestart = app.menuItems["Complete UI Test Restart"]
         XCTAssertTrue(
-            waitForValue("Connected", element: app.staticTexts["settings-helper-state"], timeout: 5),
-            app.debugDescription
+            completeRestart.waitForExistence(timeout: 3),
+            "restart command missing; exists=\(completeRestart.exists) label=\(completeRestart.label)"
+        )
+        XCTAssertTrue(
+            completeRestart.isEnabled,
+            "restart command disabled; exists=\(completeRestart.exists) label=\(completeRestart.label)"
+        )
+        completeRestart.click()
+        let settingsHelperState = app.staticTexts["settings-helper-state"]
+        XCTAssertTrue(
+            waitForValue("Connected", element: settingsHelperState, timeout: 5),
+            helperStateDiagnostic(settingsHelperState)
         )
         openMenuBarExtra(app)
-        XCTAssertTrue(waitForText("Connected", element: compactHelperState, timeout: 5), app.debugDescription)
+        XCTAssertTrue(waitForText("Connected", element: compactHelperState, timeout: 5), helperStateDiagnostic(compactHelperState))
 
         app = launch(scenario: "terminal-failure")
         app.typeKey("o", modifierFlags: [.command, .shift])
@@ -777,6 +791,10 @@ final class PorticoUITests: XCTestCase {
         let predicate = NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text)
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func helperStateDiagnostic(_ element: XCUIElement) -> String {
+        "helper state label=\(element.label) value=\(String(describing: element.value))"
     }
 
     private func assertNoDetailedMenuControls(in app: XCUIApplication) {
