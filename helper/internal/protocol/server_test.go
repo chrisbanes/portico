@@ -165,6 +165,31 @@ type fakeDiscoverer struct {
 	err        error
 }
 
+func TestDiscoveryDeadlineReturnsFailureWithoutStoppingHelper(t *testing.T) {
+	input := bytes.NewBufferString(`{"version":4,"requestId":"discover-budget","command":"discoverLocalApps","payload":{}}` + "\n")
+	var output, diagnostics bytes.Buffer
+	exitCode := ServeWithServices(input, &output, &diagnostics, Services{
+		LocalAppDiscoverer: deadlineDiscoverer{t: t},
+	})
+	const want = `{"version":4,"requestId":"discover-budget","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
+	if exitCode != 0 || diagnostics.Len() != 0 || output.String() != want {
+		t.Fatalf("ServeWithServices = (%d, %q, %q), want correlated discovery failure only", exitCode, output.String(), diagnostics.String())
+	}
+}
+
+type deadlineDiscoverer struct{ t *testing.T }
+
+func (d deadlineDiscoverer) Discover(ctx context.Context) ([]discovery.Candidate, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > 4*time.Second {
+		d.t.Error("discovery must have a budget leaving time before the Swift five-second deadline")
+		return nil, context.DeadlineExceeded
+	}
+	<-ctx.Done()
+	// A discoverer returning partial candidates on expiry must not produce success.
+	return []discovery.Candidate{{LocalAppPort: 8000, ProcessLabel: "partial"}}, nil
+}
+
 func (d fakeDiscoverer) Discover(context.Context) ([]discovery.Candidate, error) {
 	return d.candidates, d.err
 }

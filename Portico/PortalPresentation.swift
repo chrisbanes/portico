@@ -113,6 +113,13 @@ extension PortalDesiredState {
 }
 
 extension HelperAvailability {
+    var isTerminalFailure: Bool {
+        switch self {
+        case .failed, .protocolMismatch, .ownershipFailure: true
+        default: false
+        }
+    }
+
     var title: String {
         switch self {
         case .awaitingLoggingChoice: "Awaiting logging choice"

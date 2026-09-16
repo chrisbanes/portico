@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/chrisbanes/portico/helper/internal/discovery"
 	"github.com/chrisbanes/portico/helper/internal/portal"
@@ -224,17 +225,24 @@ func ServeWithServices(input io.Reader, output, diagnostics io.Writer, services 
 			discoveryGroup.Add(1)
 			go func() {
 				defer discoveryGroup.Done()
+				// Return an ordinary discovery failure before Swift's five-second
+				// transport deadline so slow discovery cannot restart the helper.
+				requestContext, cancelRequest := context.WithTimeout(discoveryContext, 4*time.Second)
+				defer cancelRequest()
 				select {
 				case discoveryGate <- struct{}{}:
 					defer func() { <-discoveryGate }()
-				case <-discoveryContext.Done():
-					return
+				case <-requestContext.Done():
 				}
-				candidates, err := services.LocalAppDiscoverer.Discover(discoveryContext)
+				var candidates []discovery.Candidate
+				var err error
+				if requestContext.Err() == nil {
+					candidates, err = services.LocalAppDiscoverer.Discover(requestContext)
+				}
 				if discoveryContext.Err() != nil {
 					return
 				}
-				if err != nil {
+				if err != nil || requestContext.Err() != nil {
 					if writer.write(errorResponse(requestID, "discoveryFailure", "local app discovery failed")) != nil {
 						failOutput()
 					}

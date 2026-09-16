@@ -603,7 +603,7 @@ final class PortalController: ObservableObject {
                 : .helperConnected
             loggingRestartPending = false
             announce(PorticoAnnouncement.text(for: event))
-        } else if availability == .failed {
+        } else if availability.isTerminalFailure {
             let event: PorticoAnnouncementEvent = loggingRestartPending
                 ? .preferenceRestartFailed
                 : .helperTerminalFailure

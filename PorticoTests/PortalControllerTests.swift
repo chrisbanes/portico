@@ -203,6 +203,32 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertTrue(opened.isEmpty)
     }
 
+    func testPermanentHelperFailureAnnouncesAndClearsPendingLoggingRestart() throws {
+        for availability in [HelperAvailability.protocolMismatch, .ownershipFailure] {
+            let store = PortalStore(rootURL: temporaryRoot())
+            try store.save(InstallationRecord(operationalLogging: .enabled))
+            let client = FakePortalHelperClient()
+            var announcements: [String] = []
+            let controller = PortalController(
+                store: store,
+                helper: client,
+                announce: { announcements.append($0) },
+                openURL: { _ in }
+            )
+            announcements.removeAll()
+
+            controller.setOperationalLogging(.disabled)
+            client.disconnect(as: availability)
+            client.connect()
+
+            XCTAssertEqual(
+                announcements,
+                ["Logging preference restart failed.", "Helper connected."],
+                "\(availability)"
+            )
+        }
+    }
+
     func testCurrentPortalURLCanCopyAndOpenButStaleURLCanOnlyCopy() throws {
         let store = PortalStore(rootURL: temporaryRoot())
         let portal = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())

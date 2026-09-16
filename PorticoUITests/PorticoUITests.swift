@@ -590,18 +590,14 @@ final class PorticoUITests: XCTestCase {
             NSPredicate(format: "identifier == %@ AND hasKeyboardFocus == true", "management")
         ).firstMatch
         XCTAssertTrue(focusedManagementWindow.waitForExistence(timeout: 3), app.debugDescription)
-        let porticoMenu = app.menuBars.menuBarItems["Portico"]
-        let menuBarLabels = app.menuBars.menuBarItems.allElementsBoundByIndex.map(\.label).joined(separator: ", ")
-        XCTAssertTrue(porticoMenu.exists, "Portico menu missing; menu bar items: \(menuBarLabels)")
-        porticoMenu.click()
-        let completeRestart = app.menuItems["Complete UI Test Restart"]
-        XCTAssertTrue(
-            completeRestart.waitForExistence(timeout: 3),
-            "restart command missing; exists=\(completeRestart.exists) label=\(completeRestart.label)"
-        )
+        let completeRestart = app.buttons["complete-ui-test-restart"]
+        guard completeRestart.waitForExistence(timeout: 3) else {
+            XCTFail("restart control missing")
+            return
+        }
         XCTAssertTrue(
             completeRestart.isEnabled,
-            "restart command disabled; exists=\(completeRestart.exists) label=\(completeRestart.label)"
+            "restart control disabled; label=\(completeRestart.label)"
         )
         completeRestart.click()
         let settingsHelperState = app.staticTexts["settings-helper-state"]
@@ -794,7 +790,8 @@ final class PorticoUITests: XCTestCase {
     }
 
     private func helperStateDiagnostic(_ element: XCUIElement) -> String {
-        "helper state label=\(element.label) value=\(String(describing: element.value))"
+        guard element.exists else { return "helper state missing" }
+        return "helper state label=\(element.label) value=\(String(describing: element.value))"
     }
 
     private func assertNoDetailedMenuControls(in app: XCUIApplication) {

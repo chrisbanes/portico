@@ -1081,6 +1081,45 @@ final class HelperSupervisorTests: XCTestCase {
         XCTAssertEqual(error, HelperProtocolError(code: "discoveryFailure", message: "local app discovery failed"))
     }
 
+    func testDiscoveryFailureDispatchesQueuedReconciliationWithoutLosingConnection() throws {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "discover-1", "reconcile-1"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        var discoveryResult: Result<[LocalAppCandidatePayload], Error>?
+        var reconciliationResult: Result<ReconcilePortalsResult, Error>?
+
+        supervisor.discoverLocalApps { discoveryResult = $0 }
+        supervisor.reconcilePortals([]) { reconciliationResult = $0 }
+        XCTAssertEqual(launcher.process.sent.count, 2)
+        XCTAssertEqual(scheduler.pendingDelays, [5])
+
+        launcher.receive(line: #"{"version":4,"requestId":"discover-1","error":{"code":"discoveryFailure","message":"local app discovery failed"}}"#)
+
+        guard case .failure(HelperClientError.helper) = discoveryResult else {
+            return XCTFail("expected helper discovery failure")
+        }
+        XCTAssertEqual(supervisor.availability, .connected)
+        XCTAssertEqual(scheduler.pendingDelays, [10])
+        let reconciliation = try XCTUnwrap(launcher.process.sent.last)
+        XCTAssertEqual(
+            try JSONDecoder().decode(HelperRequest<ReconcilePortalsPayload>.self, from: reconciliation).command,
+            .reconcilePortals
+        )
+
+        launcher.receive(line: #"{"version":4,"requestId":"reconcile-1","result":{"entries":[]}}"#)
+        let result = try XCTUnwrap(reconciliationResult)
+        XCTAssertNoThrow(try result.get())
+    }
+
     func testRealSilentHelperDeadlineLosesOtherPendingRequestAndEscalatesTERMToKILL() throws {
         let readyURL = temporaryFixtureURL(suffix: "ready")
         let scriptURL = try makeHelperFixture("""
