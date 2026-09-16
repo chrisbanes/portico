@@ -236,6 +236,12 @@ final class PortalController: ObservableObject {
               preference != .undecided,
               preference != installation.operationalLogging
         else { return }
+        guard helper.availability != .ownershipFailure else {
+            let errorMessage = "The logging setting cannot be changed while the helper’s exit is unconfirmed."
+            operationalLoggingError = errorMessage
+            message = errorMessage
+            return
+        }
         var updated = installation
         updated.operationalLogging = preference
         do {

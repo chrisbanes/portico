@@ -1411,6 +1411,7 @@ private struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
                 .accessibilityIdentifier("logging-preference")
+                .disabled(supervisor.availability == .ownershipFailure)
                 Label("Changing this setting safely restarts the helper.", systemImage: "arrow.clockwise")
                     .font(.caption)
                     .foregroundStyle(.secondary)

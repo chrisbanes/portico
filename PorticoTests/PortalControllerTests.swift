@@ -188,6 +188,38 @@ final class PortalControllerTests: XCTestCase {
         )
     }
 
+    func testOwnershipFailurePreventsLoggingChangeAndPreservesNormalConnectionAnnouncement() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(InstallationRecord(operationalLogging: .enabled))
+        let client = FakePortalHelperClient(availability: .ownershipFailure)
+        var announcements: [String] = []
+        let controller = PortalController(
+            store: store,
+            helper: client,
+            announce: { announcements.append($0) },
+            openURL: { _ in }
+        )
+        announcements.removeAll()
+
+        controller.setOperationalLogging(.disabled)
+
+        XCTAssertEqual(controller.operationalLogging, .enabled)
+        XCTAssertEqual(try store.loadInstallation().operationalLogging, .enabled)
+        XCTAssertTrue(client.restartedWith.isEmpty)
+        XCTAssertEqual(
+            controller.operationalLoggingError,
+            "The logging setting cannot be changed while the helper’s exit is unconfirmed."
+        )
+        XCTAssertEqual(
+            controller.message,
+            "The logging setting cannot be changed while the helper’s exit is unconfirmed."
+        )
+
+        client.connect()
+
+        XCTAssertEqual(announcements, ["Helper connected."])
+    }
+
     func testLoggingRestartRejectsOldAuthenticationURL() throws {
         let store = PortalStore(rootURL: temporaryRoot())
         let portal = PortalConfiguration(id: portalID, name: "hermes", localAppPort: 8787, createdAt: Date())
