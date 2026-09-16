@@ -73,6 +73,18 @@ tap_ordered = (
 tap_positions = [HOMEBREW_TAP.index(marker) for marker in tap_ordered]
 assert tap_positions == sorted(tap_positions)
 assert 'pgrep -P "$app_pid" -x portico-helper' in SMOKE_TEST
+assert "-configuration Debug" in SMOKE_TEST
+assert "CFFIXED_USER_HOME" in SMOKE_TEST
+assert "PORTICO_SMOKE_REAL_HELPER" in SMOKE_TEST
+assert "PORTICO_SMOKE_EXPECTED_ROOT" in SMOKE_TEST
+assert "CFBundleExecutable" in SMOKE_TEST
+assert "CFBundleIdentifier" in SMOKE_TEST
+assert 'kill "$app_pid"' in SMOKE_TEST
+assert "osascript" not in SMOKE_TEST
+assert "Portico.app" not in SMOKE_TEST
+assert "\nHOME=" not in SMOKE_TEST
+assert "-configuration Debug" in (ROOT / "README.md").read_text(encoding="utf-8")
+assert "Portico Dev.app" in (ROOT / "README.md").read_text(encoding="utf-8")
 assert "Usage: $0 <version> <architecture> <dmg-path>" in ARTIFACT_VERIFIER
 assert '[[ "$architectures" == "$architecture" ]]' in ARTIFACT_VERIFIER
 assert 'ARCHS="$architecture"' in HELPER_VERIFIER

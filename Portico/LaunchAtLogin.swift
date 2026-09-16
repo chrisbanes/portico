@@ -16,6 +16,25 @@ protocol LaunchAtLoginServicing: AnyObject {
     func openSystemSettingsLoginItems()
 }
 
+@MainActor
+enum LaunchAtLoginComposition {
+    case unavailable
+    case available
+
+    func makeController(
+        service: @autoclosure () -> LaunchAtLoginServicing,
+        offerState: @escaping () -> LaunchAtLoginOfferState,
+        saveOfferState: @escaping (LaunchAtLoginOfferState) -> Bool
+    ) -> LaunchAtLoginController? {
+        guard self == .available else { return nil }
+        return LaunchAtLoginController(
+            service: service(),
+            offerState: offerState,
+            saveOfferState: saveOfferState
+        )
+    }
+}
+
 final class ServiceManagementLaunchAtLoginService: LaunchAtLoginServicing {
     private let service: SMAppService
 

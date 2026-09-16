@@ -60,22 +60,41 @@ final class ManagementRouting: ObservableObject {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    let appVariant: AppVariant
     let supervisor: HelperSupervisor
     let portalController: PortalController
-    let launchAtLoginController: LaunchAtLoginController
+    let launchAtLoginController: LaunchAtLoginController?
     let managementRouting = ManagementRouting()
     let windowActivation = AppWindowActivation()
     private var requestsInitialManagementWindow = false
 
     override init() {
-        let productionRoot = FileManager.default.urls(
+        let appVariant: AppVariant
+        do {
+            appVariant = try AppVariant.current()
+        } catch {
+            fatalError("Portico app variant metadata is invalid.")
+        }
+        let foundationSupportDirectory = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        )[0].appendingPathComponent("Portico", isDirectory: true)
+        )[0]
+        let selectedRoot = foundationSupportDirectory.appendingPathComponent(
+            appVariant.supportDirectoryName,
+            isDirectory: true
+        )
         let scheduler = MainQueueScheduler()
 
 #if DEBUG
         let testConfiguration = UITestLaunchConfiguration.current
+        let smokeConfiguration: SmokeLaunchConfiguration?
+        do {
+            smokeConfiguration = testConfiguration == nil
+                ? try SmokeLaunchConfiguration.current(variant: appVariant)
+                : nil
+        } catch {
+            fatalError("The real-helper smoke configuration is invalid.")
+        }
         let reportsInitialPersistenceFailure = testConfiguration?.reportsInitialPersistenceFailure ?? false
         if let testConfiguration {
             do {
@@ -84,7 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 fatalError("The UI test installation fixture could not be prepared.")
             }
         }
-        let applicationRoot = testConfiguration?.rootURL ?? productionRoot
+        let applicationRoot = testConfiguration?.rootURL ?? selectedRoot
         let supervisorScheduler: PorticoScheduling
         if let scale = testConfiguration?.supervisorSchedulerScale, scale != 1 {
             supervisorScheduler = UITestScaledScheduler(scale: scale)
@@ -97,12 +116,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let reachabilityProbe: LocalAppProbing = testConfiguration.map {
             UITestLocalAppProbe(result: $0.reachabilityResult)
         } ?? LoopbackTCPProbe()
-        let launchAtLoginService: LaunchAtLoginServicing = testConfiguration.map {
-            UITestLaunchAtLoginService(
-                status: $0.launchAtLoginStatus,
-                registrationOutcome: $0.registrationOutcome
-            )
-        } ?? ServiceManagementLaunchAtLoginService()
         let copyText: (String) -> Void
         let openURL: (URL) -> Void
         if testConfiguration == nil {
@@ -114,22 +127,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 #else
         let reportsInitialPersistenceFailure = false
-        let applicationRoot = productionRoot
+        let applicationRoot = selectedRoot
         let supervisorScheduler: PorticoScheduling = scheduler
         let launcher: HelperLaunching = ProcessHelperLauncher()
         let reachabilityProbe: LocalAppProbing = LoopbackTCPProbe()
-        let launchAtLoginService: LaunchAtLoginServicing = ServiceManagementLaunchAtLoginService()
         let copyText: (String) -> Void = Self.copyToPasteboard
         let openURL: (URL) -> Void = Self.openWorkspaceURL
 #endif
 
-        let store = PortalStore(rootURL: applicationRoot)
-        let startupResult: PortalStoreStartupResult?
+        var admittedStore: PortalStore?
+#if DEBUG
+        if let smokeConfiguration {
+            guard SmokeRootAdmission.run(
+                configuration: smokeConfiguration,
+                resolvedRootURL: selectedRoot,
+                prepareStore: { admittedStore = PortalStore(rootURL: applicationRoot) }
+            ) else {
+                fatalError("The real-helper smoke root does not match Foundation resolution.")
+            }
+        }
+#endif
+        let store = admittedStore ?? PortalStore(rootURL: applicationRoot)
+        var startupResult: PortalStoreStartupResult?
         do {
             startupResult = try store.prepareForStartup()
         } catch {
             startupResult = nil
         }
+#if DEBUG
+        if let smokeConfiguration, startupResult != nil {
+            do {
+                var installation = try store.loadInstallation()
+                installation.operationalLogging = .enabled
+                try store.save(installation)
+            } catch {
+                startupResult = nil
+            }
+        }
+#endif
 
         let helperURL = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Helpers/portico-helper", isDirectory: false)
@@ -146,6 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             helper: supervisor,
             reachability: LocalAppReachability(probe: reachabilityProbe, scheduler: scheduler),
             history: history,
+            diagnosticVersions: .current(appName: appVariant.displayName),
             copyText: copyText,
             announce: { message in
                 NSAccessibility.post(
@@ -159,18 +195,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             openURL: openURL
         )
-        let launchAtLoginController = LaunchAtLoginController(
-            service: launchAtLoginService,
+        let launchAtLoginController: LaunchAtLoginController?
+        let launchAtLoginComposition: LaunchAtLoginComposition = appVariant.isLaunchAtLoginAvailable
+            ? .available
+            : .unavailable
+        if let controller = launchAtLoginComposition.makeController(
+            service: ServiceManagementLaunchAtLoginService(),
             offerState: { portalController.launchAtLoginOffer },
             saveOfferState: { portalController.commitLaunchAtLoginOffer($0) }
-        )
-        launchAtLoginController.restorePresentedOffer()
-        portalController.onFreshPortalOnline = {
-            launchAtLoginController.considerOfferAfterFreshOnline()
+        ) {
+            controller.restorePresentedOffer()
+            portalController.onFreshPortalOnline = {
+                controller.considerOfferAfterFreshOnline()
+            }
+            launchAtLoginController = controller
+        } else {
+            launchAtLoginController = nil
         }
+        self.appVariant = appVariant
         self.supervisor = supervisor
         self.portalController = portalController
         self.launchAtLoginController = launchAtLoginController
+#if DEBUG
+        if let smokeConfiguration {
+            let existingOnConnected = supervisor.onConnected
+            supervisor.onConnected = {
+                existingOnConnected?()
+                try? smokeConfiguration.recordAcceptedHandshake()
+            }
+        }
+#endif
         self.requestsInitialManagementWindow = startupResult == .freshInstallation
         if startupResult == nil {
             portalController.reportInitialPersistenceFailure()
@@ -211,7 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        launchAtLoginController.refreshStatusAfterApplicationActivation()
+        launchAtLoginController?.refreshStatusAfterApplicationActivation()
     }
 
     func takeInitialManagementWindowRequest() -> Bool {

@@ -38,21 +38,24 @@ targets:
         CODE_SIGN_STYLE: Manual
         CODE_SIGNING_REQUIRED: "NO"
         ENABLE_USER_SCRIPT_SANDBOXING: "NO"
-        GENERATE_INFOPLIST_FILE: "YES"
-        INFOPLIST_KEY_CFBundleShortVersionString: "$(MARKETING_VERSION)"
-        INFOPLIST_KEY_CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
-        INFOPLIST_KEY_LSUIElement: "YES"
+        GENERATE_INFOPLIST_FILE: "NO"
+        INFOPLIST_FILE: PorticoLauncher/Info.plist
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         MARKETING_VERSION: 0.0.0
         CURRENT_PROJECT_VERSION: 1
         ONLY_ACTIVE_ARCH: "YES"
         PRODUCT_BUNDLE_IDENTIFIER: dev.chrisbanes.Portico
         PRODUCT_NAME: "$(TARGET_NAME)"
+        PORTICO_SUPPORT_DIRECTORY: Portico
+        PORTICO_LAUNCH_AT_LOGIN_AVAILABLE: "YES"
         SWIFT_VERSION: "5.0"
       configs:
         Debug:
           ENABLE_TESTABILITY: "YES"
           PRODUCT_BUNDLE_IDENTIFIER: dev.chrisbanes.Portico.Debug
+          PRODUCT_NAME: "Portico Dev"
+          PORTICO_SUPPORT_DIRECTORY: "Portico Dev"
+          PORTICO_LAUNCH_AT_LOGIN_AVAILABLE: "NO"
           SWIFT_OPTIMIZATION_LEVEL: "-Onone"
     postBuildScripts:
       - name: Build and Embed Helper

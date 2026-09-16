@@ -104,10 +104,11 @@ Generate the local Xcode project, build, and launch:
 xcodebuild \
   -project Portico.xcodeproj \
   -scheme Portico \
+  -configuration Debug \
   -destination 'platform=macOS' \
   -derivedDataPath .build/xcode \
   build
-open .build/xcode/Build/Products/Debug/Portico.app
+open ".build/xcode/Build/Products/Debug/Portico Dev.app"
 ```
 
 Run the Swift unit tests, native UI tests, and Go helper tests:

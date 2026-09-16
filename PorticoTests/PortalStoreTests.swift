@@ -3,6 +3,25 @@ import XCTest
 @testable import PorticoApplication
 
 final class PortalStoreTests: XCTestCase {
+    func testFreshDevStoreDoesNotReadOrChangeSiblingProductionRecord() throws {
+        let parent = temporaryRoot()
+        let productionRoot = parent.appendingPathComponent("Portico", isDirectory: true)
+        let devRoot = parent.appendingPathComponent("Portico Dev", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let productionStore = PortalStore(rootURL: productionRoot)
+        let production = InstallationRecord(operationalLogging: .disabled, launchAtLoginOffer: .accepted)
+        try productionStore.save(production)
+        let productionBytes = try Data(contentsOf: productionStore.installationURL)
+
+        let devStore = PortalStore(rootURL: devRoot)
+        XCTAssertEqual(try devStore.prepareForStartup(), .freshInstallation)
+
+        XCTAssertEqual(try Data(contentsOf: productionStore.installationURL), productionBytes)
+        XCTAssertEqual(try productionStore.loadInstallation(), production)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: devStore.installationURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: productionRoot.appendingPathComponent("tsnet").path))
+    }
+
     func testPrepareForStartupPersistsOnlyGenuinelyNewInstallations() throws {
         let freshStore = PortalStore(rootURL: temporaryRoot())
 

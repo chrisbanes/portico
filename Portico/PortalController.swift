@@ -157,7 +157,7 @@ final class PortalController: ObservableObject {
         dateProvider: @escaping () -> Date = Date.init,
         reachability: LocalAppReachability? = nil,
         history: DiagnosticHistory? = nil,
-        diagnosticVersions: DiagnosticVersions = .current,
+        diagnosticVersions: DiagnosticVersions = .current(),
         copyText: @escaping (String) -> Void = { _ in },
         announce: @escaping (String) -> Void = { _ in },
         openURL: @escaping (URL) -> Void
