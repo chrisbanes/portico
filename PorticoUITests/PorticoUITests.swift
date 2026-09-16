@@ -579,9 +579,9 @@ final class PorticoUITests: XCTestCase {
         openMenuBarExtra(app)
         let compactHelperState = app.descendants(matching: .any)["helper-state"]
         XCTAssertTrue(waitForText("Restarting", element: compactHelperState, timeout: 2))
-        let openPortico = app.buttons["open-portico"]
-        XCTAssertTrue(openPortico.exists, app.debugDescription)
-        openPortico.click()
+        let settings = app.buttons["settings"]
+        XCTAssertTrue(settings.exists, collapsedDebugDescription(settings))
+        settings.click()
         let managementWindow = app.windows.matching(
             NSPredicate(format: "identifier == %@", "management")
         ).firstMatch
@@ -590,9 +590,14 @@ final class PorticoUITests: XCTestCase {
             NSPredicate(format: "identifier == %@ AND hasKeyboardFocus == true", "management")
         ).firstMatch
         XCTAssertTrue(focusedManagementWindow.waitForExistence(timeout: 3), app.debugDescription)
+        let settingsHeading = app.staticTexts["settings-heading"]
+        guard settingsHeading.waitForExistence(timeout: 3) else {
+            XCTFail("settings heading missing; management=\(collapsedDebugDescription(managementWindow))")
+            return
+        }
         let completeRestart = app.buttons["complete-ui-test-restart"]
         guard completeRestart.waitForExistence(timeout: 3) else {
-            XCTFail("restart control missing")
+            XCTFail("restart control missing; settings=\(collapsedDebugDescription(settingsHeading)); management=\(collapsedDebugDescription(managementWindow))")
             return
         }
         XCTAssertTrue(
@@ -792,6 +797,10 @@ final class PorticoUITests: XCTestCase {
     private func helperStateDiagnostic(_ element: XCUIElement) -> String {
         guard element.exists else { return "helper state missing" }
         return "helper state label=\(element.label) value=\(String(describing: element.value))"
+    }
+
+    private func collapsedDebugDescription(_ element: XCUIElement) -> String {
+        return element.debugDescription.replacingOccurrences(of: "\n", with: " | ")
     }
 
     private func assertNoDetailedMenuControls(in app: XCUIApplication) {
