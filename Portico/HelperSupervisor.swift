@@ -775,7 +775,7 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
     }
 
     private func recordTerminalOwnershipFailure() {
-        guard !terminalOwnershipFailure else { return }
+        guard !terminalOwnershipFailure, process?.isRunning == true else { return }
         terminalOwnershipFailure = true
         failureHandled = true
         stabilityTask?.cancel()

@@ -114,6 +114,92 @@ final class HelperSupervisorTests: XCTestCase {
         XCTAssertEqual(launcher.processes.count, 1)
     }
 
+    func testStoppedRestartedChildWaitsForOrderedExitBeforeLaunchingReplacement() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "shutdown-1", "handshake-2"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+
+        supervisor.restart(loggingPreference: .disabled)
+        scheduler.run(delay: 5)
+        scheduler.run(delay: 2)
+        launcher.process.isRunning = false
+        scheduler.run(delay: 1)
+
+        XCTAssertEqual(supervisor.availability, .restarting)
+        XCTAssertEqual(launcher.processes.count, 1)
+
+        launcher.exit(status: 9)
+
+        XCTAssertEqual(supervisor.availability, .connecting)
+        XCTAssertEqual(launcher.processes.count, 2)
+    }
+
+    func testStoppedShutdownChildWaitsForOrderedExitBeforeCompleting() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { "handshake-1" },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+        var completionCount = 0
+
+        supervisor.shutdown { completionCount += 1 }
+        scheduler.run(delay: 5)
+        scheduler.run(delay: 2)
+        launcher.process.isRunning = false
+        scheduler.run(delay: 1)
+
+        XCTAssertEqual(supervisor.availability, .shuttingDown)
+        XCTAssertEqual(completionCount, 0)
+
+        launcher.exit(status: 9)
+
+        XCTAssertEqual(completionCount, 1)
+    }
+
+    func testStoppedFailedChildWaitsForOrderedExitBeforeRetrying() {
+        let launcher = FakeHelperLauncher()
+        let scheduler = FakePorticoScheduler()
+        var requestIDs = ["handshake-1", "handshake-2"]
+        let supervisor = HelperSupervisor(
+            helperURL: URL(fileURLWithPath: "/unused/portico-helper"),
+            launcher: launcher,
+            requestIDProvider: { requestIDs.removeFirst() },
+            scheduler: scheduler,
+            handshakeTimeout: 60
+        )
+        supervisor.start(loggingPreference: .enabled)
+        launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
+
+        launcher.receiveEOF()
+        scheduler.run(delay: 2)
+        launcher.process.isRunning = false
+        scheduler.run(delay: 1)
+
+        XCTAssertEqual(supervisor.availability, .generationLost)
+        XCTAssertEqual(launcher.processes.count, 1)
+
+        launcher.exit(status: 9)
+
+        XCTAssertEqual(supervisor.availability, .retrying(attempt: 1, delay: 1))
+        scheduler.run(delay: 1)
+        XCTAssertEqual(launcher.processes.count, 2)
+    }
+
     func testControlledRestartRejectsOldEventsAndStartsFreshRecoveryBudget() {
         let launcher = FakeHelperLauncher()
         let scheduler = FakePorticoScheduler()
