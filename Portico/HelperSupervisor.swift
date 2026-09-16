@@ -277,7 +277,7 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
             try sendRequest(
                 command: .reconcilePortals,
                 payload: payload,
-                deadline: min(60, 10 + 10 * TimeInterval(requestCount))
+                deadline: 10 + 10 * TimeInterval(requestCount)
             ) { [weak self] result in
                 completion(result)
                 guard let self,

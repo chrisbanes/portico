@@ -248,10 +248,17 @@ func ServeWithServices(input io.Reader, output, diagnostics io.Writer, services 
 					}
 					return
 				}
-				if writer.write(response{
+				result := response{
 					Version: Version, RequestID: requestID,
 					Result: discoverLocalAppsResult{Candidates: canonicalCandidates(candidates)},
-				}) != nil {
+				}
+				encoded, err := json.Marshal(result)
+				// Match the Swift JSONL frame limit without silently truncating
+				// discovery or turning a large result into a transport failure.
+				if err != nil || len(encoded) > 256*1024 {
+					result = errorResponse(requestID, "discoveryFailure", "local app discovery failed")
+				}
+				if writer.write(result) != nil {
 					failOutput()
 				}
 			}()

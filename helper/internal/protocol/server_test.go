@@ -177,6 +177,24 @@ func TestDiscoveryDeadlineReturnsFailureWithoutStoppingHelper(t *testing.T) {
 	}
 }
 
+func TestOversizedDiscoveryReturnsFailureWithoutSendingPartialCandidates(t *testing.T) {
+	candidates := make([]discovery.Candidate, 3000)
+	for i := range candidates {
+		candidates[i] = discovery.Candidate{
+			LocalAppPort: uint16(i + 1), ProcessLabel: strings.Repeat("a", 64),
+		}
+	}
+	input := bytes.NewBufferString(`{"version":4,"requestId":"discover-large","command":"discoverLocalApps","payload":{}}` + "\n")
+	var output, diagnostics bytes.Buffer
+	exitCode := ServeWithServices(input, &output, &diagnostics, Services{
+		LocalAppDiscoverer: fakeDiscoverer{candidates: candidates},
+	})
+	const want = `{"version":4,"requestId":"discover-large","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
+	if exitCode != 0 || diagnostics.Len() != 0 || output.String() != want {
+		t.Fatalf("ServeWithServices = (exit %d, output %d bytes, diagnostics %q), want only the correlated sanitized failure", exitCode, output.Len(), diagnostics.String())
+	}
+}
+
 type deadlineDiscoverer struct{ t *testing.T }
 
 func (d deadlineDiscoverer) Discover(ctx context.Context) ([]discovery.Candidate, error) {

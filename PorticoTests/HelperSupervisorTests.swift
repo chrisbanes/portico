@@ -859,15 +859,15 @@ final class HelperSupervisorTests: XCTestCase {
         )
         supervisor.start(loggingPreference: .enabled)
         launcher.receive(line: #"{"version":4,"requestId":"handshake-1","result":{"protocolVersion":4}}"#)
-        let portals = (0..<5).map {
+        let portals = (0..<6).map {
             PortalConfiguration(id: UUID(), name: "portal-\($0)", localAppPort: 8000 + $0, createdAt: Date())
         }
 
         supervisor.reconcilePortals(portals) { _ in }
-        XCTAssertTrue(scheduler.pendingDelays.contains(60))
+        XCTAssertTrue(scheduler.pendingDelays.contains(70))
         launcher.receive(line: #"{"version":4,"requestId":"reconcile-1","error":{"code":"expected","message":"expected"}}"#)
         supervisor.reconcilePortals([]) { _ in }
-        XCTAssertTrue(scheduler.pendingDelays.contains(60))
+        XCTAssertTrue(scheduler.pendingDelays.contains(70))
         launcher.receive(line: #"{"version":4,"requestId":"reconcile-2","error":{"code":"expected","message":"expected"}}"#)
         supervisor.reconcilePortals([]) { _ in }
 
