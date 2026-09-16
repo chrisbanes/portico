@@ -1389,6 +1389,9 @@ private struct SettingsView: View {
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
     @ObservedObject var launchAtLogin: LaunchAtLoginController
+#if DEBUG
+    @ObservedObject private var restartGate = UITestRestartGate.shared
+#endif
     @AccessibilityFocusState private var headingFocused: Bool
 
     var body: some View {
@@ -1420,7 +1423,7 @@ private struct SettingsView: View {
                 }
                 .accessibilityIdentifier("settings-helper-state")
 #if DEBUG
-                if UITestLaunchConfiguration.current?.scenario == .restarting {
+                if restartGate.isHolding {
                     Button("Complete UI Test Restart") { UITestRestartGate.shared.release() }
                         .accessibilityIdentifier("complete-ui-test-restart")
                 }

@@ -2,6 +2,8 @@ import Foundation
 
 #if DEBUG
 
+import Combine
+
 enum UITestScenario: String {
     case firstRun = "first-run"
     case creation
@@ -242,20 +244,23 @@ struct UITestLaunchConfiguration {
 private struct UITestHelperLaunchBlocked: Error {}
 private struct UITestServiceError: Error {}
 
-final class UITestRestartGate {
+final class UITestRestartGate: ObservableObject {
     static let shared = UITestRestartGate()
 
     private var completion: (() -> Void)?
+    @Published private(set) var isHolding = false
 
     private init() {}
 
     func hold(_ completion: @escaping () -> Void) {
         self.completion = completion
+        isHolding = true
     }
 
     func release() {
         let completion = completion
         self.completion = nil
+        isHolding = false
         completion?()
     }
 }

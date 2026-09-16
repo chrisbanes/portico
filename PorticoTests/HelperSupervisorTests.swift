@@ -1233,6 +1233,48 @@ final class HelperSupervisorTests: XCTestCase {
         XCTAssertFalse(scheduler.pendingDelays.contains { $0 == 1 || $0 == 2 || $0 == 4 || $0 == 8 || $0 == 16 })
     }
 
+    func testRestartingUITestHelperWaitsForGateReleaseBeforeExit() throws {
+        defer { UITestRestartGate.shared.release() }
+        let launcher = UITestHelperLauncher(
+            configuration: UITestLaunchConfiguration(
+                scenario: .restarting,
+                rootURL: FileManager.default.temporaryDirectory
+            )
+        )
+        var exitStatuses: [Int32] = []
+        let process = try launcher.launch(
+            at: URL(fileURLWithPath: "/unused/portico-helper"),
+            arguments: [],
+            loggingPreference: .enabled,
+            onLine: { _ in },
+            onEOF: {},
+            onExit: { exitStatuses.append($0) }
+        )
+        let shutdown = HelperRequest(
+            version: helperProtocolVersion,
+            requestId: "shutdown-1",
+            command: .shutdown,
+            payload: EmptyPayload()
+        )
+        var sendResult: Result<Void, Error>?
+
+        process.send(try JSONEncoder().encode(shutdown)) { sendResult = $0 }
+        guard case .success? = sendResult else {
+            return XCTFail("test helper did not accept shutdown")
+        }
+        process.closeInput()
+
+        XCTAssertTrue(process.isRunning)
+        XCTAssertTrue(exitStatuses.isEmpty)
+        XCTAssertTrue(UITestRestartGate.shared.isHolding)
+
+        UITestRestartGate.shared.release()
+
+        XCTAssertFalse(process.isRunning)
+        XCTAssertEqual(exitStatuses, [0])
+        XCTAssertFalse(UITestRestartGate.shared.isHolding)
+    }
+
     func testRealLauncherFailureEntersGenerationLossRecovery() {
         let scheduler = FakePorticoScheduler()
         let supervisor = HelperSupervisor(
