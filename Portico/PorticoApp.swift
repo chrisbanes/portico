@@ -77,12 +77,6 @@ private struct PorticoCommands: Commands {
                 .keyboardShortcut("o", modifiers: [.command, .shift])
             Button("Diagnostics") { presentWindow(id: "diagnostics") }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
-#if DEBUG
-            if UITestLaunchConfiguration.current?.scenario == .restarting {
-                Button("Complete UI Test Restart") { UITestRestartGate.shared.release() }
-                    .keyboardShortcut("r", modifiers: [.command, .shift])
-            }
-#endif
         }
     }
 
@@ -433,7 +427,7 @@ private struct OverviewView: View {
     }
 
     private var hasRecoveryContent: Bool {
-        (controller.isInstallationAvailable && supervisor.availability == .failed) || !controller.pendingPortals.isEmpty ||
+        (controller.isInstallationAvailable && supervisor.availability.isTerminalFailure) || !controller.pendingPortals.isEmpty ||
             !controller.removalNotices.isEmpty || !controller.alerts.isEmpty ||
             controller.canResetTailnet || controller.message != nil
     }
@@ -983,7 +977,7 @@ private struct PortalView: View {
     }
 
     private var requiresAttention: Bool {
-        (controller.isInstallationAvailable && supervisor.availability == .failed)
+        (controller.isInstallationAvailable && supervisor.availability.isTerminalFailure)
             || !controller.pendingPortals.isEmpty
             || !controller.pendingRemovalPortals.isEmpty
             || !controller.alerts.isEmpty
@@ -1395,6 +1389,9 @@ private struct SettingsView: View {
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
     @ObservedObject var launchAtLogin: LaunchAtLoginController
+#if DEBUG
+    @ObservedObject private var restartGate = UITestRestartGate.shared
+#endif
     @AccessibilityFocusState private var headingFocused: Bool
 
     var body: some View {
@@ -1417,6 +1414,9 @@ private struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
                 .accessibilityIdentifier("logging-preference")
+                .disabled(
+                    supervisor.availability == .ownershipFailure || supervisor.availability == .protocolMismatch
+                )
                 Label("Changing this setting safely restarts the helper.", systemImage: "arrow.clockwise")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1424,6 +1424,12 @@ private struct SettingsView: View {
                     Label(helperStatus.title, systemImage: helperStatus.symbolName)
                 }
                 .accessibilityIdentifier("settings-helper-state")
+#if DEBUG
+                if restartGate.isHolding {
+                    Button("Complete UI Test Restart") { UITestRestartGate.shared.release() }
+                        .accessibilityIdentifier("complete-ui-test-restart")
+                }
+#endif
                 if let error = controller.operationalLoggingError {
                     Label(error, systemImage: "exclamationmark.circle")
                         .foregroundStyle(.secondary)

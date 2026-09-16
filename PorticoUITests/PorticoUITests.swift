@@ -579,8 +579,39 @@ final class PorticoUITests: XCTestCase {
         openMenuBarExtra(app)
         let compactHelperState = app.descendants(matching: .any)["helper-state"]
         XCTAssertTrue(waitForText("Restarting", element: compactHelperState, timeout: 2))
-        app.typeKey("r", modifierFlags: [.command, .shift])
-        XCTAssertTrue(waitForText("Connected", element: compactHelperState, timeout: 5))
+        let settings = app.buttons["settings"]
+        XCTAssertTrue(settings.exists, collapsedDebugDescription(settings))
+        settings.click()
+        let managementWindow = app.windows.matching(
+            NSPredicate(format: "identifier == %@", "management")
+        ).firstMatch
+        XCTAssertTrue(managementWindow.waitForExistence(timeout: 3), app.debugDescription)
+        let focusedManagementWindow = app.windows.matching(
+            NSPredicate(format: "identifier == %@ AND hasKeyboardFocus == true", "management")
+        ).firstMatch
+        XCTAssertTrue(focusedManagementWindow.waitForExistence(timeout: 3), app.debugDescription)
+        let settingsHeading = app.staticTexts["settings-heading"]
+        guard settingsHeading.waitForExistence(timeout: 3) else {
+            XCTFail("settings heading missing; management=\(collapsedDebugDescription(managementWindow))")
+            return
+        }
+        let completeRestart = app.buttons["complete-ui-test-restart"]
+        guard completeRestart.waitForExistence(timeout: 3) else {
+            XCTFail("restart control missing; settings=\(collapsedDebugDescription(settingsHeading)); management=\(collapsedDebugDescription(managementWindow))")
+            return
+        }
+        XCTAssertTrue(
+            completeRestart.isEnabled,
+            "restart control disabled; label=\(completeRestart.label)"
+        )
+        completeRestart.click()
+        let settingsHelperState = app.staticTexts["settings-helper-state"]
+        XCTAssertTrue(
+            waitForValue("Connected", element: settingsHelperState, timeout: 5),
+            helperStateDiagnostic(settingsHelperState)
+        )
+        openMenuBarExtra(app)
+        XCTAssertTrue(waitForText("Connected", element: compactHelperState, timeout: 5), helperStateDiagnostic(compactHelperState))
 
         app = launch(scenario: "terminal-failure")
         app.typeKey("o", modifierFlags: [.command, .shift])
@@ -761,6 +792,15 @@ final class PorticoUITests: XCTestCase {
         let predicate = NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", text, text)
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func helperStateDiagnostic(_ element: XCUIElement) -> String {
+        guard element.exists else { return "helper state missing" }
+        return "helper state label=\(element.label) value=\(String(describing: element.value))"
+    }
+
+    private func collapsedDebugDescription(_ element: XCUIElement) -> String {
+        return element.debugDescription.replacingOccurrences(of: "\n", with: " | ")
     }
 
     private func assertNoDetailedMenuControls(in app: XCUIApplication) {

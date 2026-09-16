@@ -15,13 +15,13 @@ import (
 	"github.com/chrisbanes/portico/helper/internal/portal"
 )
 
-func TestServeReconcilesLiteralProtocolVersionFourSnapshot(t *testing.T) {
+func TestServeReconcilesLiteralProtocolVersionFiveSnapshot(t *testing.T) {
 	runtime := &fakeRuntime{reconcileEntries: []portal.ReconcileEntry{
 		{PortalID: "5ea74329-3144-4ba2-925f-138d14d61fcc", Outcome: portal.OutcomeConverged},
 		{PortalID: "9f55ca93-d7b3-4eab-a871-310ea576005a", Outcome: portal.OutcomeStartFailed},
 	}}
 	input := bytes.NewBufferString(
-		`{"version":4,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[` +
+		`{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[` +
 			`{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","destination":{"kind":"localApp","port":8787},"desiredState":"enabled"},` +
 			`{"portalId":"5EA74329-3144-4BA2-925F-138D14D61FCC","portalName":"atlas","destination":{"kind":"localApp","port":8788},"desiredState":"stopped"}` +
 			`]}}` + "\n",
@@ -37,9 +37,9 @@ func TestServeReconcilesLiteralProtocolVersionFourSnapshot(t *testing.T) {
 	if len(runtime.reconciled) != 2 || runtime.reconciled[0].ID != "9f55ca93-d7b3-4eab-a871-310ea576005a" || runtime.reconciled[1].DesiredState != portal.DesiredStateStopped {
 		t.Fatalf("reconciled = %+v, want normalized complete snapshot", runtime.reconciled)
 	}
-	const want = `{"version":4,"requestId":"reconcile-1","result":{"entries":[{"portalId":"5ea74329-3144-4ba2-925f-138d14d61fcc","outcome":"converged"},{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","outcome":"startFailed"}]}}` + "\n"
+	const want = `{"version":5,"requestId":"reconcile-1","result":{"entries":[{"portalId":"5ea74329-3144-4ba2-925f-138d14d61fcc","outcome":"converged"},{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","outcome":"startFailed"}]}}` + "\n"
 	if output.String() != want {
-		t.Fatalf("output = %q, want exact protocol-v4 result %q", output.String(), want)
+		t.Fatalf("output = %q, want exact protocol-v5 result %q", output.String(), want)
 	}
 }
 
@@ -50,7 +50,7 @@ func TestDiscoverLocalAppsReturnsOnlyStableSanitizedCandidates(t *testing.T) {
 		{LocalAppPort: 9000, ProcessLabel: "hermes", SuggestedPortalName: "hermes"},
 		{LocalAppPort: 7000, ProcessLabel: "first", SuggestedPortalName: "first"},
 	}}
-	input := bytes.NewBufferString(`{"version":4,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}` + "\n")
+	input := bytes.NewBufferString(`{"version":5,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}` + "\n")
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
 
@@ -59,7 +59,7 @@ func TestDiscoverLocalAppsReturnsOnlyStableSanitizedCandidates(t *testing.T) {
 	if exitCode != 0 || diagnostics.Len() != 0 {
 		t.Fatalf("ServeWithServices = (exit %d, diagnostics %q), want success", exitCode, diagnostics.String())
 	}
-	const want = `{"version":4,"requestId":"discover-1","result":{"candidates":[{"localAppPort":7000,"processLabel":"first","suggestedPortalName":"first"},{"localAppPort":8000,"processLabel":"atlas","suggestedPortalName":"atlas"},{"localAppPort":9000,"processLabel":"hermes","suggestedPortalName":"hermes"}]}}` + "\n"
+	const want = `{"version":5,"requestId":"discover-1","result":{"candidates":[{"localAppPort":7000,"processLabel":"first","suggestedPortalName":"first"},{"localAppPort":8000,"processLabel":"atlas","suggestedPortalName":"atlas"},{"localAppPort":9000,"processLabel":"hermes","suggestedPortalName":"hermes"}]}}` + "\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want %q", output.String(), want)
 	}
@@ -70,13 +70,13 @@ func TestDiscoverLocalAppsCollapsesDisagreeingDuplicateOwners(t *testing.T) {
 		{LocalAppPort: 8787, ProcessLabel: "python3", SuggestedPortalName: "hermes"},
 		{LocalAppPort: 8787, ProcessLabel: "node", SuggestedPortalName: "atlas"},
 	}}
-	input := bytes.NewBufferString(`{"version":4,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}` + "\n")
+	input := bytes.NewBufferString(`{"version":5,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}` + "\n")
 	var output bytes.Buffer
 
 	if exitCode := ServeWithServices(input, &output, &bytes.Buffer{}, Services{LocalAppDiscoverer: discoverer}); exitCode != 0 {
 		t.Fatalf("ServeWithServices exit code = %d, want success", exitCode)
 	}
-	const want = `{"version":4,"requestId":"discover-1","result":{"candidates":[{"localAppPort":8787,"processLabel":"Port 8787"}]}}` + "\n"
+	const want = `{"version":5,"requestId":"discover-1","result":{"candidates":[{"localAppPort":8787,"processLabel":"Port 8787"}]}}` + "\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want %q", output.String(), want)
 	}
@@ -84,7 +84,7 @@ func TestDiscoverLocalAppsCollapsesDisagreeingDuplicateOwners(t *testing.T) {
 
 func TestDiscoverLocalAppsRequiresEmptyPayload(t *testing.T) {
 	const secret = "do-not-copy"
-	input := bytes.NewBufferString(`{"version":4,"requestId":"discover-1","command":"discoverLocalApps","payload":{"unexpected":"` + secret + `"}}` + "\n")
+	input := bytes.NewBufferString(`{"version":5,"requestId":"discover-1","command":"discoverLocalApps","payload":{"unexpected":"` + secret + `"}}` + "\n")
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
 
@@ -100,7 +100,7 @@ func TestDiscoverLocalAppsRequiresEmptyPayload(t *testing.T) {
 
 func TestDiscoverLocalAppsReturnsFixedSecretFreeFailure(t *testing.T) {
 	const secret = "token=do-not-copy"
-	input := bytes.NewBufferString(`{"version":4,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}` + "\n")
+	input := bytes.NewBufferString(`{"version":5,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}` + "\n")
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
 
@@ -109,7 +109,7 @@ func TestDiscoverLocalAppsReturnsFixedSecretFreeFailure(t *testing.T) {
 	if exitCode != 0 || diagnostics.Len() != 0 {
 		t.Fatalf("ServeWithServices = (exit %d, diagnostics %q), want correlated failure", exitCode, diagnostics.String())
 	}
-	const want = `{"version":4,"requestId":"discover-1","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
+	const want = `{"version":5,"requestId":"discover-1","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want %q", output.String(), want)
 	}
@@ -131,10 +131,10 @@ func TestDiscoverLocalAppsCancelsBeforeRuntimeCloseAndShutdownAcknowledgement(t 
 		})
 	}()
 
-	_, _ = io.WriteString(input, `{"version":4,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":5,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`+"\n")
 	<-discoverer.started
 	go func() {
-		_, _ = io.WriteString(input, `{"version":4,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
+		_, _ = io.WriteString(input, `{"version":5,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
 		_ = input.Close()
 	}()
 
@@ -144,14 +144,14 @@ func TestDiscoverLocalAppsCancelsBeforeRuntimeCloseAndShutdownAcknowledgement(t 
 	if !runtime.closedAfterDiscoveryCancellation {
 		t.Fatal("runtime closed before in-flight discovery observed cancellation")
 	}
-	const want = `{"version":4,"requestId":"shutdown-1","result":{"accepted":true}}` + "\n"
+	const want = `{"version":5,"requestId":"shutdown-1","result":{"accepted":true}}` + "\n"
 	if output.String() != want || diagnostics.Len() != 0 {
 		t.Fatalf("ServeWithServices = (output %q, diagnostics %q), want only post-close shutdown acknowledgement", output.String(), diagnostics.String())
 	}
 }
 
 func TestDiscoverLocalAppsFailsServeWhenResponseCannotBeWritten(t *testing.T) {
-	input := bytes.NewBufferString(`{"version":4,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}` + "\n")
+	input := bytes.NewBufferString(`{"version":5,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}` + "\n")
 
 	exitCode := ServeWithServices(input, errorWriter{}, &bytes.Buffer{}, Services{LocalAppDiscoverer: fakeDiscoverer{}})
 
@@ -163,6 +163,49 @@ func TestDiscoverLocalAppsFailsServeWhenResponseCannotBeWritten(t *testing.T) {
 type fakeDiscoverer struct {
 	candidates []discovery.Candidate
 	err        error
+}
+
+func TestDiscoveryDeadlineReturnsFailureWithoutStoppingHelper(t *testing.T) {
+	input := bytes.NewBufferString(`{"version":5,"requestId":"discover-budget","command":"discoverLocalApps","payload":{}}` + "\n")
+	var output, diagnostics bytes.Buffer
+	exitCode := ServeWithServices(input, &output, &diagnostics, Services{
+		LocalAppDiscoverer: deadlineDiscoverer{t: t},
+	})
+	const want = `{"version":5,"requestId":"discover-budget","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
+	if exitCode != 0 || diagnostics.Len() != 0 || output.String() != want {
+		t.Fatalf("ServeWithServices = (%d, %q, %q), want correlated discovery failure only", exitCode, output.String(), diagnostics.String())
+	}
+}
+
+func TestOversizedDiscoveryReturnsFailureWithoutSendingPartialCandidates(t *testing.T) {
+	candidates := make([]discovery.Candidate, 3000)
+	for i := range candidates {
+		candidates[i] = discovery.Candidate{
+			LocalAppPort: uint16(i + 1), ProcessLabel: strings.Repeat("a", 64),
+		}
+	}
+	input := bytes.NewBufferString(`{"version":5,"requestId":"discover-large","command":"discoverLocalApps","payload":{}}` + "\n")
+	var output, diagnostics bytes.Buffer
+	exitCode := ServeWithServices(input, &output, &diagnostics, Services{
+		LocalAppDiscoverer: fakeDiscoverer{candidates: candidates},
+	})
+	const want = `{"version":5,"requestId":"discover-large","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
+	if exitCode != 0 || diagnostics.Len() != 0 || output.String() != want {
+		t.Fatalf("ServeWithServices = (exit %d, output %d bytes, diagnostics %q), want only the correlated sanitized failure", exitCode, output.Len(), diagnostics.String())
+	}
+}
+
+type deadlineDiscoverer struct{ t *testing.T }
+
+func (d deadlineDiscoverer) Discover(ctx context.Context) ([]discovery.Candidate, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > 4*time.Second {
+		d.t.Error("discovery must have a budget leaving time before the Swift five-second deadline")
+		return nil, context.DeadlineExceeded
+	}
+	<-ctx.Done()
+	// A discoverer returning partial candidates on expiry must not produce success.
+	return []discovery.Candidate{{LocalAppPort: 8000, ProcessLabel: "partial"}}, nil
 }
 
 func (d fakeDiscoverer) Discover(context.Context) ([]discovery.Candidate, error) {
@@ -214,7 +257,7 @@ func (r *shutdownOrderingRuntime) Close() error {
 }
 
 func TestServeCorrelatesHandshakeResponse(t *testing.T) {
-	input := bytes.NewBufferString(`{"version":4,"requestId":"request-1","command":"handshake","payload":{}}` + "\n")
+	input := bytes.NewBufferString(`{"version":5,"requestId":"request-1","command":"handshake","payload":{}}` + "\n")
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
 
@@ -231,8 +274,8 @@ func TestServeCorrelatesHandshakeResponse(t *testing.T) {
 	if err := json.NewDecoder(&output).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.Version != 4 || response.RequestID != "request-1" || string(response.Result) != `{"protocolVersion":4}` {
-		t.Fatalf("response = %+v, want correlated version-four handshake", response)
+	if response.Version != 5 || response.RequestID != "request-1" || string(response.Result) != `{"protocolVersion":5}` {
+		t.Fatalf("response = %+v, want correlated version-five handshake", response)
 	}
 	if diagnostics.Len() != 0 {
 		t.Fatalf("diagnostics = %q, want empty", diagnostics.String())
@@ -244,7 +287,7 @@ func TestServeReconciliationSerializesStructuredStatusEvent(t *testing.T) {
 		PortalID: "9f55ca93-d7b3-4eab-a871-310ea576005a", Outcome: portal.OutcomeConverged,
 	}}}
 	input := bytes.NewBufferString(
-		`{"version":4,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","destination":{"kind":"localApp","port":8787},"desiredState":"enabled"}]}}` + "\n",
+		`{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","destination":{"kind":"localApp","port":8787},"desiredState":"enabled"}]}}` + "\n",
 	)
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
@@ -269,7 +312,7 @@ func TestServeReconciliationSerializesStructuredStatusEvent(t *testing.T) {
 	if payload["tailnetName"] != "opaque-identity-do-not-display" || payload["magicDNSSuffix"] != "example.ts.net" {
 		t.Fatalf("payload = %+v, want exact identity and separate display suffix", payload)
 	}
-	const wantResponse = `{"version":4,"requestId":"reconcile-1","result":{"entries":[{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","outcome":"converged"}]}}`
+	const wantResponse = `{"version":5,"requestId":"reconcile-1","result":{"entries":[{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","outcome":"converged"}]}}`
 	if lines[1] != wantResponse {
 		t.Fatalf("response = %q, want %q", lines[1], wantResponse)
 	}
@@ -280,8 +323,8 @@ func TestServeAuthenticatesCorrelatedPortalAndEmitsTransientURL(t *testing.T) {
 		PortalID: "9f55ca93-d7b3-4eab-a871-310ea576005a", Outcome: portal.OutcomeConverged,
 	}}}
 	input := bytes.NewBufferString(
-		`{"version":4,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","destination":{"kind":"localApp","port":8787},"desiredState":"enabled"}]}}` + "\n" +
-			`{"version":4,"requestId":"auth-1","command":"authenticatePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}` + "\n",
+		`{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","destination":{"kind":"localApp","port":8787},"desiredState":"enabled"}]}}` + "\n" +
+			`{"version":5,"requestId":"auth-1","command":"authenticatePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}` + "\n",
 	)
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
@@ -302,7 +345,7 @@ func TestServeAuthenticatesCorrelatedPortalAndEmitsTransientURL(t *testing.T) {
 func TestServeCleansUpOnlyCorrelatedRejectedPortal(t *testing.T) {
 	runtime := &fakeRuntime{}
 	input := bytes.NewBufferString(
-		`{"version":4,"requestId":"cleanup-1","command":"cleanupRejectedPortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}` + "\n",
+		`{"version":5,"requestId":"cleanup-1","command":"cleanupRejectedPortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}` + "\n",
 	)
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
@@ -312,16 +355,16 @@ func TestServeCleansUpOnlyCorrelatedRejectedPortal(t *testing.T) {
 	if exitCode != 0 || diagnostics.Len() != 0 || runtime.cleaned != "9f55ca93-d7b3-4eab-a871-310ea576005a" {
 		t.Fatalf("ServeWithRuntime = (exit %d, cleaned %q, diagnostics %q), want correlated cleanup", exitCode, runtime.cleaned, diagnostics.String())
 	}
-	const want = `{"version":4,"requestId":"cleanup-1","result":{"accepted":true}}` + "\n"
+	const want = `{"version":5,"requestId":"cleanup-1","result":{"accepted":true}}` + "\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want %q", output.String(), want)
 	}
 }
 
-func TestServeRemovesOnlyCorrelatedPortalWithProtocolVersionFour(t *testing.T) {
+func TestServeRemovesOnlyCorrelatedPortalWithProtocolVersionFive(t *testing.T) {
 	runtime := &fakeRuntime{}
 	input := bytes.NewBufferString(
-		`{"version":4,"requestId":"remove-1","command":"removePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}` + "\n",
+		`{"version":5,"requestId":"remove-1","command":"removePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}` + "\n",
 	)
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
@@ -331,7 +374,7 @@ func TestServeRemovesOnlyCorrelatedPortalWithProtocolVersionFour(t *testing.T) {
 	if exitCode != 0 || diagnostics.Len() != 0 || runtime.removed != "9f55ca93-d7b3-4eab-a871-310ea576005a" {
 		t.Fatalf("ServeWithRuntime = (exit %d, removed %q, diagnostics %q), want correlated removal", exitCode, runtime.removed, diagnostics.String())
 	}
-	const want = `{"version":4,"requestId":"remove-1","result":{"accepted":true}}` + "\n"
+	const want = `{"version":5,"requestId":"remove-1","result":{"accepted":true}}` + "\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want %q", output.String(), want)
 	}
@@ -347,7 +390,7 @@ func TestServeRejectsUntrustedRemovalPayloadWithoutRuntimeCall(t *testing.T) {
 	for name, payload := range fixtures {
 		t.Run(name, func(t *testing.T) {
 			runtime := &fakeRuntime{}
-			input := bytes.NewBufferString(`{"version":4,"requestId":"remove-1","command":"removePortal","payload":` + payload + `}` + "\n")
+			input := bytes.NewBufferString(`{"version":5,"requestId":"remove-1","command":"removePortal","payload":` + payload + `}` + "\n")
 			var output bytes.Buffer
 
 			if exitCode := ServeWithRuntime(input, &output, &bytes.Buffer{}, runtime); exitCode != 0 {
@@ -364,14 +407,14 @@ func TestServeMapsRemovalFailureToFixedRuntimeError(t *testing.T) {
 	const secret = "path=/private/secret"
 	runtime := &fakeRuntime{removeErr: errors.New(secret)}
 	input := bytes.NewBufferString(
-		`{"version":4,"requestId":"remove-1","command":"removePortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a"}}` + "\n",
+		`{"version":5,"requestId":"remove-1","command":"removePortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a"}}` + "\n",
 	)
 	var output bytes.Buffer
 
 	if exitCode := ServeWithRuntime(input, &output, &bytes.Buffer{}, runtime); exitCode != 0 {
 		t.Fatalf("ServeWithRuntime exit code = %d, want correlated failure", exitCode)
 	}
-	const want = `{"version":4,"requestId":"remove-1","error":{"code":"runtimeFailure","message":"portal runtime failed"}}` + "\n"
+	const want = `{"version":5,"requestId":"remove-1","error":{"code":"runtimeFailure","message":"portal runtime failed"}}` + "\n"
 	if output.String() != want || strings.Contains(output.String(), secret) {
 		t.Fatalf("output = %q, want fixed secret-free runtime error", output.String())
 	}
@@ -391,7 +434,7 @@ func TestServeRejectsInvalidReconciliationWithoutRuntimeMutationOrLeaks(t *testi
 	for name, payload := range fixtures {
 		t.Run(name, func(t *testing.T) {
 			runtime := &fakeRuntime{}
-			input := bytes.NewBufferString(`{"version":4,"requestId":"reconcile-1","command":"reconcilePortals","payload":` + payload + `}` + "\n")
+			input := bytes.NewBufferString(`{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":` + payload + `}` + "\n")
 			var output bytes.Buffer
 			var diagnostics bytes.Buffer
 
@@ -407,16 +450,16 @@ func TestServeRejectsInvalidReconciliationWithoutRuntimeMutationOrLeaks(t *testi
 	}
 }
 
-func TestServeRejectsImperativeStartPortalInProtocolVersionFour(t *testing.T) {
+func TestServeRejectsImperativeStartPortalInProtocolVersionFive(t *testing.T) {
 	input := bytes.NewBufferString(
-		`{"version":4,"requestId":"start-1","command":"startPortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","portalName":"hermes","destination":{"kind":"localApp","port":8787}}}` + "\n",
+		`{"version":5,"requestId":"start-1","command":"startPortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","portalName":"hermes","destination":{"kind":"localApp","port":8787}}}` + "\n",
 	)
 	var output bytes.Buffer
 
 	if exitCode := ServeWithRuntime(input, &output, &bytes.Buffer{}, &fakeRuntime{}); exitCode != 0 {
 		t.Fatalf("ServeWithRuntime exit code = %d", exitCode)
 	}
-	const want = `{"version":4,"requestId":"start-1","error":{"code":"unknownCommand","message":"unsupported command"}}` + "\n"
+	const want = `{"version":5,"requestId":"start-1","error":{"code":"unknownCommand","message":"unsupported command"}}` + "\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want protocol-v1 lifecycle rejection", output.String())
 	}
@@ -424,7 +467,7 @@ func TestServeRejectsImperativeStartPortalInProtocolVersionFour(t *testing.T) {
 
 func TestServeClosesRuntimeOnShutdown(t *testing.T) {
 	runtime := &fakeRuntime{}
-	input := bytes.NewBufferString(`{"version":4,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n")
+	input := bytes.NewBufferString(`{"version":5,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n")
 	var output bytes.Buffer
 
 	if exitCode := ServeWithRuntime(input, &output, &bytes.Buffer{}, runtime); exitCode != 0 || !runtime.closed {
@@ -434,7 +477,7 @@ func TestServeClosesRuntimeOnShutdown(t *testing.T) {
 
 func TestServeAcknowledgesShutdownAfterRuntimeCloseCompletes(t *testing.T) {
 	runtime := &fakeRuntime{closeEntered: make(chan struct{}), releaseClose: make(chan struct{})}
-	input := bytes.NewBufferString(`{"version":4,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n")
+	input := bytes.NewBufferString(`{"version":5,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n")
 	var output bytes.Buffer
 	done := make(chan int, 1)
 	go func() { done <- ServeWithRuntime(input, &output, &bytes.Buffer{}, runtime) }()
@@ -512,8 +555,8 @@ func (r *fakeRuntime) Close() error {
 
 func TestServeAcknowledgesShutdownAndStops(t *testing.T) {
 	input := bytes.NewBufferString(
-		`{"version":4,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n" +
-			`{"version":4,"requestId":"ignored","command":"handshake","payload":{}}` + "\n",
+		`{"version":5,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n" +
+			`{"version":5,"requestId":"ignored","command":"handshake","payload":{}}` + "\n",
 	)
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
@@ -523,7 +566,7 @@ func TestServeAcknowledgesShutdownAndStops(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("Serve() exit code = %d, want 0", exitCode)
 	}
-	const want = "{\"version\":4,\"requestId\":\"shutdown-1\",\"result\":{\"accepted\":true}}\n"
+	const want = "{\"version\":5,\"requestId\":\"shutdown-1\",\"result\":{\"accepted\":true}}\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want %q", output.String(), want)
 	}
@@ -533,7 +576,7 @@ func TestServeAcknowledgesShutdownAndStops(t *testing.T) {
 }
 
 func TestServeReturnsCorrelatedErrorForUnknownCommand(t *testing.T) {
-	input := bytes.NewBufferString(`{"version":4,"requestId":"unknown-1","command":"surprise","payload":{}}` + "\n")
+	input := bytes.NewBufferString(`{"version":5,"requestId":"unknown-1","command":"surprise","payload":{}}` + "\n")
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
 
@@ -542,7 +585,7 @@ func TestServeReturnsCorrelatedErrorForUnknownCommand(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("Serve() exit code = %d, want 0", exitCode)
 	}
-	const want = "{\"version\":4,\"requestId\":\"unknown-1\",\"error\":{\"code\":\"unknownCommand\",\"message\":\"unsupported command\"}}\n"
+	const want = "{\"version\":5,\"requestId\":\"unknown-1\",\"error\":{\"code\":\"unknownCommand\",\"message\":\"unsupported command\"}}\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want %q", output.String(), want)
 	}
@@ -551,8 +594,8 @@ func TestServeReturnsCorrelatedErrorForUnknownCommand(t *testing.T) {
 	}
 }
 
-func TestServeReturnsCorrelatedErrorForUnsupportedVersion(t *testing.T) {
-	input := bytes.NewBufferString(`{"version":3,"requestId":"version-3","command":"handshake","payload":{}}` + "\n")
+func TestServeRejectsVersionFourPeer(t *testing.T) {
+	input := bytes.NewBufferString(`{"version":4,"requestId":"version-4","command":"handshake","payload":{}}` + "\n")
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
 
@@ -561,7 +604,7 @@ func TestServeReturnsCorrelatedErrorForUnsupportedVersion(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("Serve() exit code = %d, want 0", exitCode)
 	}
-	const want = "{\"version\":4,\"requestId\":\"version-3\",\"error\":{\"code\":\"unsupportedVersion\",\"message\":\"unsupported protocol version\"}}\n"
+	const want = "{\"version\":5,\"requestId\":\"version-4\",\"error\":{\"code\":\"unsupportedVersion\",\"message\":\"unsupported protocol version\"}}\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want %q", output.String(), want)
 	}
@@ -572,7 +615,7 @@ func TestServeReturnsCorrelatedErrorForUnsupportedVersion(t *testing.T) {
 
 func TestServeRejectsMalformedInputWithoutLeakingIt(t *testing.T) {
 	const secret = "token=do-not-copy"
-	input := bytes.NewBufferString(`{"version":4,"requestId":"` + secret + `"` + "\n")
+	input := bytes.NewBufferString(`{"version":5,"requestId":"` + secret + `"` + "\n")
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
 
@@ -594,7 +637,7 @@ func TestServeRejectsMalformedInputWithoutLeakingIt(t *testing.T) {
 }
 
 func TestServeRejectsTrailingContentAfterRequest(t *testing.T) {
-	input := bytes.NewBufferString(`{"version":4,"requestId":"request-1","command":"handshake","payload":{}} trailing` + "\n")
+	input := bytes.NewBufferString(`{"version":5,"requestId":"request-1","command":"handshake","payload":{}} trailing` + "\n")
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
 
@@ -608,12 +651,12 @@ func TestServeRejectsTrailingContentAfterRequest(t *testing.T) {
 func TestServeRejectsStructurallyInvalidRequests(t *testing.T) {
 	fixtures := map[string]string{
 		"missing version":    `{"requestId":"request-1","command":"handshake","payload":{}}`,
-		"missing request ID": `{"version":4,"command":"handshake","payload":{}}`,
-		"missing command":    `{"version":4,"requestId":"request-1","payload":{}}`,
-		"missing payload":    `{"version":4,"requestId":"request-1","command":"handshake"}`,
-		"non-object payload": `{"version":4,"requestId":"request-1","command":"handshake","payload":[]}`,
-		"non-empty payload":  `{"version":4,"requestId":"request-1","command":"handshake","payload":{"unexpected":true}}`,
-		"unknown field":      `{"version":4,"requestId":"request-1","command":"handshake","payload":{},"extra":true}`,
+		"missing request ID": `{"version":5,"command":"handshake","payload":{}}`,
+		"missing command":    `{"version":5,"requestId":"request-1","payload":{}}`,
+		"missing payload":    `{"version":5,"requestId":"request-1","command":"handshake"}`,
+		"non-object payload": `{"version":5,"requestId":"request-1","command":"handshake","payload":[]}`,
+		"non-empty payload":  `{"version":5,"requestId":"request-1","command":"handshake","payload":{"unexpected":true}}`,
+		"unknown field":      `{"version":5,"requestId":"request-1","command":"handshake","payload":{},"extra":true}`,
 	}
 
 	for name, fixture := range fixtures {

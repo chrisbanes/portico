@@ -113,6 +113,13 @@ extension PortalDesiredState {
 }
 
 extension HelperAvailability {
+    var isTerminalFailure: Bool {
+        switch self {
+        case .failed, .protocolMismatch, .ownershipFailure: true
+        default: false
+        }
+    }
+
     var title: String {
         switch self {
         case .awaitingLoggingChoice: "Awaiting logging choice"
@@ -121,6 +128,10 @@ extension HelperAvailability {
         case let .retrying(attempt, delay): "Retry \(attempt) in \(Int(delay))s"
         case .connected: "Connected"
         case .failed: "Helper unavailable"
+        case .requestDeadline: "Helper request deadline exceeded"
+        case .generationLost: "Helper generation lost"
+        case .protocolMismatch: "Helper protocol mismatch"
+        case .ownershipFailure: "Helper ownership failure"
         case .shuttingDown: "Shutting down"
         }
     }
@@ -129,7 +140,7 @@ extension HelperAvailability {
         switch self {
         case .awaitingLoggingChoice, .restarting, .connecting, .retrying: "ellipsis.circle"
         case .connected: "checkmark.circle"
-        case .failed: "exclamationmark.triangle"
+        case .failed, .requestDeadline, .generationLost, .protocolMismatch, .ownershipFailure: "exclamationmark.triangle"
         case .shuttingDown: "stop.circle"
         }
     }

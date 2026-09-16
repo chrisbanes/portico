@@ -2,6 +2,8 @@ import Foundation
 
 #if DEBUG
 
+import Combine
+
 enum UITestScenario: String {
     case firstRun = "first-run"
     case creation
@@ -242,20 +244,23 @@ struct UITestLaunchConfiguration {
 private struct UITestHelperLaunchBlocked: Error {}
 private struct UITestServiceError: Error {}
 
-final class UITestRestartGate {
+final class UITestRestartGate: ObservableObject {
     static let shared = UITestRestartGate()
 
     private var completion: (() -> Void)?
+    @Published private(set) var isHolding = false
 
     private init() {}
 
     func hold(_ completion: @escaping () -> Void) {
         self.completion = completion
+        isHolding = true
     }
 
     func release() {
         let completion = completion
         self.completion = nil
+        isHolding = false
         completion?()
     }
 }
@@ -324,7 +329,16 @@ private final class UITestHelperProcess: HelperProcess {
         self.onExit = onExit
     }
 
-    func send(_ data: Data) throws {
+    func send(_ data: Data, completion: @escaping (Result<Void, Error>) -> Void) {
+        do {
+            try handleSend(data)
+            completion(.success(()))
+        } catch {
+            completion(.failure(error))
+        }
+    }
+
+    private func handleSend(_ data: Data) throws {
         let envelope = try JSONDecoder().decode(RequestEnvelope.self, from: data)
         switch envelope.command {
         case .handshake:
@@ -379,6 +393,10 @@ private final class UITestHelperProcess: HelperProcess {
 
     func terminate() {
         finish(exitCode: -15)
+    }
+
+    func kill() {
+        finish(exitCode: -9)
     }
 
     private func respond<Result: Codable>(_ result: Result, requestID: String) {

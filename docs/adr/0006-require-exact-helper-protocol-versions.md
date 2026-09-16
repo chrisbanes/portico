@@ -18,6 +18,14 @@ now requires the tagged `destination` field: `PortalDestination` in Swift and
 A version-4 app and helper must exact-match, and reject version-1, version-2,
 and version-3 peers.
 
+Bounded Local App discovery introduces protocol version 5. The helper gives
+discovery a four-second budget, including time waiting for an earlier discovery
+to finish, and cancels probing with `discoveryFailure` when it expires. The app allows five
+seconds for that request before treating the generation as unresponsive. An
+older helper does not provide this timing contract, so a version-5 app and
+helper reject version-4 and earlier peers during the exact-version handshake.
+The version-4 destination shape and commands are retained.
+
 The persistence record's version 4 (`InstallationRecord.currentVersion` and
 `installation-v4.json`) also introduced Remote App records, but it is a
 separate migration domain. Persistence and helper-protocol versions have

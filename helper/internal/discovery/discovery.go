@@ -49,7 +49,7 @@ func newDiscoverer(source listenerSource, prober reachabilityProber) *Discoverer
 
 func (d *Discoverer) Discover(ctx context.Context) ([]Candidate, error) {
 	candidates, err := d.source.listeners(ctx)
-	if err != nil {
+	if err != nil || ctx.Err() != nil {
 		return nil, errDiscoveryUnavailable
 	}
 
@@ -75,6 +75,9 @@ func (d *Discoverer) Discover(ctx context.Context) ([]Candidate, error) {
 	}
 	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
 	reachable := d.reachablePorts(ctx, ports)
+	if ctx.Err() != nil {
+		return nil, errDiscoveryUnavailable
+	}
 
 	result := make([]Candidate, 0, len(reachable))
 	for _, port := range ports {
@@ -96,7 +99,7 @@ func (d *Discoverer) reachablePorts(ctx context.Context, ports []uint16) map[uin
 		reachable bool
 	}
 	jobs := make(chan uint16)
-	results := make(chan probeResult, len(ports))
+	results := make(chan probeResult)
 	workers := min(maxProbeWorkers, len(ports))
 	var group sync.WaitGroup
 	for range workers {
@@ -104,18 +107,31 @@ func (d *Discoverer) reachablePorts(ctx context.Context, ports []uint16) map[uin
 		go func() {
 			defer group.Done()
 			for port := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
 				probeContext, cancel := context.WithTimeout(ctx, probeTimeout)
 				reachable := d.prober.reachableAtLoopback(probeContext, port)
 				cancel()
-				results <- probeResult{port: port, reachable: reachable}
+				select {
+				case results <- probeResult{port: port, reachable: reachable}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}()
 	}
 	go func() {
+		defer close(jobs)
 		for _, port := range ports {
-			jobs <- port
+			select {
+			case jobs <- port:
+			case <-ctx.Done():
+				return
+			}
 		}
-		close(jobs)
+	}()
+	go func() {
 		group.Wait()
 		close(results)
 	}()

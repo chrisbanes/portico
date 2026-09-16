@@ -11,12 +11,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/chrisbanes/portico/helper/internal/discovery"
 	"github.com/chrisbanes/portico/helper/internal/portal"
 )
 
-const Version = 4
+const Version = 5
 
 const invalidRequestDiagnostic = "portico-helper: invalid request\n"
 
@@ -224,26 +225,40 @@ func ServeWithServices(input io.Reader, output, diagnostics io.Writer, services 
 			discoveryGroup.Add(1)
 			go func() {
 				defer discoveryGroup.Done()
+				// Return an ordinary discovery failure before Swift's five-second
+				// transport deadline so slow discovery cannot restart the helper.
+				requestContext, cancelRequest := context.WithTimeout(discoveryContext, 4*time.Second)
+				defer cancelRequest()
 				select {
 				case discoveryGate <- struct{}{}:
 					defer func() { <-discoveryGate }()
-				case <-discoveryContext.Done():
-					return
+				case <-requestContext.Done():
 				}
-				candidates, err := services.LocalAppDiscoverer.Discover(discoveryContext)
+				var candidates []discovery.Candidate
+				var err error
+				if requestContext.Err() == nil {
+					candidates, err = services.LocalAppDiscoverer.Discover(requestContext)
+				}
 				if discoveryContext.Err() != nil {
 					return
 				}
-				if err != nil {
+				if err != nil || requestContext.Err() != nil {
 					if writer.write(errorResponse(requestID, "discoveryFailure", "local app discovery failed")) != nil {
 						failOutput()
 					}
 					return
 				}
-				if writer.write(response{
+				result := response{
 					Version: Version, RequestID: requestID,
 					Result: discoverLocalAppsResult{Candidates: canonicalCandidates(candidates)},
-				}) != nil {
+				}
+				encoded, err := json.Marshal(result)
+				// Match the Swift JSONL frame limit without silently truncating
+				// discovery or turning a large result into a transport failure.
+				if err != nil || len(encoded) > 256*1024 {
+					result = errorResponse(requestID, "discoveryFailure", "local app discovery failed")
+				}
+				if writer.write(result) != nil {
 					failOutput()
 				}
 			}()

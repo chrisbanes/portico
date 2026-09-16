@@ -5,7 +5,9 @@ import (
 	"net"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestDiscoverSuggestsConservativePortalNames(t *testing.T) {
@@ -138,6 +140,64 @@ func TestDiscoverIncludesOnlyAcceptingLoopbackPort(t *testing.T) {
 type fakeSource struct {
 	candidates []Candidate
 	err        error
+}
+
+func TestDiscoverCancellationStopsProbeWorkWithoutPartialSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	prober := &cancelingProber{started: make(chan struct{}, 8)}
+	candidates := make([]Candidate, 64)
+	for i := range candidates {
+		candidates[i] = Candidate{LocalAppPort: uint16(i + 1), ProcessLabel: "app"}
+	}
+	done := make(chan error, 1)
+	go func() {
+		got, err := newDiscoverer(fakeSource{candidates: candidates}, prober).Discover(ctx)
+		if len(got) != 0 {
+			t.Errorf("cancelled discovery returned partial candidates: %v", got)
+		}
+		done <- err
+	}()
+	for range 8 {
+		select {
+		case <-prober.started:
+		case <-time.After(time.Second):
+			t.Fatal("probe workers did not start")
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != errDiscoveryUnavailable {
+			t.Errorf("cancelled discovery error = %v, want sanitized unavailable", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("discovery did not finish after cancellation")
+	}
+	if got := prober.calls.Load(); got != 8 {
+		t.Errorf("probe calls = %d, want only the eight already started", got)
+	}
+	if got := prober.active.Load(); got != 0 {
+		t.Errorf("active probes after return = %d", got)
+	}
+}
+
+type cancelingProber struct {
+	started chan struct{}
+	calls   atomic.Int32
+	active  atomic.Int32
+}
+
+func (p *cancelingProber) reachableAtLoopback(ctx context.Context, _ uint16) bool {
+	p.calls.Add(1)
+	p.active.Add(1)
+	defer p.active.Add(-1)
+	select {
+	case p.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return true
 }
 
 func (s fakeSource) listeners(context.Context) ([]Candidate, error) {
