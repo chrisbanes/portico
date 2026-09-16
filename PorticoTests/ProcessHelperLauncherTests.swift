@@ -182,9 +182,13 @@ final class ProcessHelperLauncherTests: XCTestCase {
     func testDeliveryProgressResetsTheBackpressureDeadlineBeforeAFrameFits() {
         let releaseDeliveries = DispatchSemaphore(value: 0)
         let deliveryStarted = DispatchSemaphore(value: 0)
+        let deliveryCompleted = DispatchSemaphore(value: 0)
+        let capacityWaiterReady = DispatchSemaphore(value: 0)
+        let capacityWaiterFinished = DispatchSemaphore(value: 0)
         let largeFrameDelivered = expectation(description: "large frame is delivered")
         let lock = NSLock()
         var deliveryTimes: [UInt64] = []
+        var canAppendLargeFrame: Bool?
         var pendingDrain: (() -> Void)?
         var startDraining = false
         let queue = FrameDeliveryQueue(
@@ -200,6 +204,7 @@ final class ProcessHelperLauncherTests: XCTestCase {
                 lock.lock()
                 deliveryTimes.append(DispatchTime.now().uptimeNanoseconds)
                 lock.unlock()
+                deliveryCompleted.signal()
             },
             scheduleOnMain: { work in
                 lock.lock()
@@ -223,18 +228,35 @@ final class ProcessHelperLauncherTests: XCTestCase {
         lock.unlock()
         XCTAssertNotNil(initialDrain)
 
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.01) {
+        DispatchQueue.global().async {
             initialDrain?()
         }
         DispatchQueue.global().async {
-            for _ in 0..<3 {
-                guard deliveryStarted.wait(timeout: .now() + 1) == .success else { return }
-                Thread.sleep(forTimeInterval: 0.3)
-                releaseDeliveries.signal()
-            }
+            XCTAssertEqual(deliveryStarted.wait(timeout: .now() + 1), .success)
+            capacityWaiterReady.signal()
+            let result = queue.waitUntilCanAppend(largeFrame, timeout: 0.5)
+            lock.lock()
+            canAppendLargeFrame = result
+            lock.unlock()
+            capacityWaiterFinished.signal()
         }
 
-        XCTAssertTrue(queue.waitUntilCanAppend(largeFrame, timeout: 0.5))
+        XCTAssertEqual(capacityWaiterReady.wait(timeout: .now() + 1), .success)
+        releaseDeliveries.signal()
+        XCTAssertEqual(deliveryCompleted.wait(timeout: .now() + 1), .success)
+
+        for _ in 0..<2 {
+            XCTAssertEqual(deliveryStarted.wait(timeout: .now() + 1), .success)
+            Thread.sleep(forTimeInterval: 0.3)
+            releaseDeliveries.signal()
+            XCTAssertEqual(deliveryCompleted.wait(timeout: .now() + 1), .success)
+        }
+
+        XCTAssertEqual(capacityWaiterFinished.wait(timeout: .now() + 1), .success)
+        lock.lock()
+        let canAppend = canAppendLargeFrame
+        lock.unlock()
+        XCTAssertEqual(canAppend, true)
         XCTAssertTrue(queue.append([largeFrame]))
         wait(for: [largeFrameDelivered], timeout: 2)
 
