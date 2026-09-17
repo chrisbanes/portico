@@ -2,12 +2,15 @@ package portal
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"os"
+	"strings"
 
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 )
 
@@ -53,6 +56,37 @@ func (n *tsnetNode) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
+	return mapTSNetStatus(status), nil
+}
+
+func (n *tsnetNode) Up(ctx context.Context) (Status, error) {
+	if n.client == nil {
+		return Status{}, errors.New("tsnet node is not started")
+	}
+	status, err := n.server.Up(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	mapped := mapTSNetStatus(status)
+	if err := validateHTTPSReadiness(mapped); err != nil {
+		return Status{}, err
+	}
+	return mapped, nil
+}
+
+func validateHTTPSReadiness(status Status) error {
+	if status.MagicDNSSuffix == "" || status.DNSName == "" {
+		return errors.New("tsnet node is not ready for HTTPS")
+	}
+	for _, domain := range status.CertDomains {
+		if strings.EqualFold(strings.TrimSuffix(domain, "."), strings.TrimSuffix(status.DNSName, ".")) {
+			return nil
+		}
+	}
+	return errors.New("tsnet node has no HTTPS certificate domain")
+}
+
+func mapTSNetStatus(status *ipnstate.Status) Status {
 	mapped := Status{
 		BackendState: status.BackendState,
 		CertDomains:  append([]string(nil), status.CertDomains...),
@@ -69,7 +103,7 @@ func (n *tsnetNode) Status(ctx context.Context) (Status, error) {
 		mapped.StableNodeID = string(status.Self.ID)
 		mapped.DNSName = status.Self.DNSName
 	}
-	return mapped, nil
+	return mapped
 }
 
 func (n *tsnetNode) Watch(ctx context.Context) (Watcher, error) {
@@ -90,8 +124,15 @@ func (n *tsnetNode) StartLoginInteractive(ctx context.Context) error {
 	return n.client.StartLoginInteractive(ctx)
 }
 
-func (n *tsnetNode) ListenTLS(network, address string) (net.Listener, error) {
-	return n.server.ListenTLS(network, address)
+func (n *tsnetNode) Listen(network, address string) (net.Listener, error) {
+	return n.server.Listen(network, address)
+}
+
+func (n *tsnetNode) TLSConfig() *tls.Config {
+	if n.client == nil {
+		return nil
+	}
+	return &tls.Config{GetCertificate: n.client.GetCertificate}
 }
 
 func (n *tsnetNode) Close() error { return n.server.Close() }

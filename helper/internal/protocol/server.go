@@ -5,12 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/chrisbanes/portico/helper/internal/discovery"
@@ -24,9 +24,9 @@ const invalidRequestDiagnostic = "portico-helper: invalid request\n"
 type PortalRuntime interface {
 	Reconcile(context.Context, []portal.Config, func(portal.Event)) ([]portal.ReconcileEntry, error)
 	Authenticate(context.Context, string) error
-	CleanupRejectedPortal(string) error
-	RemovePortal(string) error
-	Close() error
+	CleanupRejectedPortal(context.Context, string) error
+	RemovePortal(context.Context, string) error
+	Close(context.Context) error
 }
 
 type LocalAppDiscoverer interface {
@@ -108,14 +108,112 @@ type authenticationURLPayload struct {
 }
 
 type messageWriter struct {
-	mu      sync.Mutex
-	encoder *json.Encoder
+	ctx      context.Context
+	queue    chan outputFrame
+	failed   chan struct{}
+	stop     chan struct{}
+	stopped  chan struct{}
+	fail     func()
+	once     sync.Once
+	stopOnce sync.Once
 }
 
+type outputFrame struct {
+	value   any
+	flushed chan struct{}
+}
+
+type inputTerminal struct {
+	invalid bool
+}
+
+type operationResult struct {
+	err     error
+	invalid bool
+}
+
+var errInvalidRequest = errors.New("invalid request")
+
 func (w *messageWriter) write(value any) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.encoder.Encode(value)
+	return w.writeContext(w.ctx, value)
+}
+
+func (w *messageWriter) writeContext(ctx context.Context, value any) error {
+	select {
+	case <-w.failed:
+		return errors.New("write protocol output")
+	case <-ctx.Done():
+		return ctx.Err()
+	case w.queue <- outputFrame{value: value}:
+		return nil
+	}
+}
+
+func (w *messageWriter) flush(ctx context.Context) error {
+	flushed := make(chan struct{})
+	select {
+	case <-w.failed:
+		return errors.New("write protocol output")
+	case <-ctx.Done():
+		return ctx.Err()
+	case w.queue <- outputFrame{flushed: flushed}:
+	}
+	select {
+	case <-w.failed:
+		return errors.New("write protocol output")
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-flushed:
+		return nil
+	}
+}
+
+func (w *messageWriter) stopContext(ctx context.Context) {
+	w.stopOnce.Do(func() { close(w.stop) })
+	select {
+	case <-w.stopped:
+	case <-ctx.Done():
+	}
+}
+
+func newMessageWriter(ctx context.Context, output io.Writer, fail func()) *messageWriter {
+	w := &messageWriter{
+		ctx:     ctx,
+		queue:   make(chan outputFrame, 16),
+		failed:  make(chan struct{}),
+		stop:    make(chan struct{}),
+		stopped: make(chan struct{}),
+		fail:    fail,
+	}
+	go func() {
+		defer close(w.stopped)
+		encoder := json.NewEncoder(output)
+		for {
+			select {
+			case <-w.stop:
+				return
+			default:
+			}
+			var frame outputFrame
+			select {
+			case <-w.stop:
+				return
+			case frame = <-w.queue:
+			}
+			if frame.flushed != nil {
+				close(frame.flushed)
+				continue
+			}
+			if err := encoder.Encode(frame.value); err != nil {
+				w.once.Do(func() {
+					close(w.failed)
+					w.fail()
+				})
+				return
+			}
+		}
+	}()
+	return w
 }
 
 func Serve(input io.Reader, output, diagnostics io.Writer) int {
@@ -128,254 +226,301 @@ func ServeWithRuntime(input io.Reader, output, diagnostics io.Writer, runtime Po
 
 func ServeWithServices(input io.Reader, output, diagnostics io.Writer, services Services) int {
 	runtime := services.PortalRuntime
-	if runtime != nil {
-		defer runtime.Close()
+	var closeOnce sync.Once
+	var closeErr error
+	closeRuntime := func(ctx context.Context) error {
+		if runtime == nil {
+			return nil
+		}
+		closeOnce.Do(func() { closeErr = runtime.Close(ctx) })
+		return closeErr
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	discoveryContext, cancelDiscovery := context.WithCancel(ctx)
-	var outputFailed atomic.Bool
+	root, cancelRoot := context.WithCancel(context.Background())
 	failOutput := func() {
-		if outputFailed.CompareAndSwap(false, true) {
-			cancelDiscovery()
-			cancel()
-			if closer, ok := input.(io.Closer); ok {
-				_ = closer.Close()
-			}
+		cancelRoot()
+		if closer, ok := input.(io.Closer); ok {
+			_ = closer.Close()
 		}
 	}
-	var discoveryGroup sync.WaitGroup
-	discoveryGate := make(chan struct{}, 1)
-	cancelBeforeExit := true
-	defer func() {
-		if cancelBeforeExit {
-			cancelDiscovery()
-			cancel()
-		}
-		discoveryGroup.Wait()
-		cancelDiscovery()
-		cancel()
-	}()
-	writer := &messageWriter{encoder: json.NewEncoder(output)}
+	defer cancelRoot()
+	writer := newMessageWriter(root, output, failOutput)
 	emit := func(event portal.Event) {
 		if event.Status != nil {
-			_ = writer.write(eventMessage{Version: Version, Event: "portalStatus", PortalID: event.PortalID, Payload: event.Status})
+			_ = writer.writeContext(root, eventMessage{Version: Version, Event: "portalStatus", PortalID: event.PortalID, Payload: event.Status})
 		}
 		if event.AuthenticationURL != "" {
-			_ = writer.write(eventMessage{
+			_ = writer.writeContext(root, eventMessage{
 				Version: Version, Event: "authenticationURL", PortalID: event.PortalID,
 				Payload: authenticationURLPayload{URL: event.AuthenticationURL},
 			})
 		}
 	}
 
-	scanner := bufio.NewScanner(input)
-	for scanner.Scan() {
-		var request request
-		decoder := json.NewDecoder(bytes.NewReader(scanner.Bytes()))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) != io.EOF || !request.isStructurallyValid() {
-			_, _ = io.WriteString(diagnostics, invalidRequestDiagnostic)
+	ordinary := make(chan request, 1)
+	admissions := make(chan struct{}, 2)
+	shutdown := make(chan request, 1)
+	terminal := make(chan inputTerminal, 1)
+	go readRequests(root, input, admissions, ordinary, shutdown, terminal)
+
+	finish := func(shutdownRequest *request, invalidInput bool) int {
+		// Cancellation comes before close so runtime work and discovery cannot
+		// outlive the single teardown deadline.
+		cancelRoot()
+		if closer, ok := input.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		closeContext, closeCancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer closeCancel()
+		defer writer.stopContext(closeContext)
+		if err := closeRuntime(closeContext); err != nil {
+			if shutdownRequest != nil {
+				_ = writer.writeContext(closeContext, errorResponse(shutdownRequest.RequestID, "runtimeFailure", "portal runtime failed"))
+				_ = writer.flush(closeContext)
+			}
 			return 1
 		}
-		if requestVersion := *request.Version; requestVersion != Version {
-			if writer.write(errorResponse(request.RequestID, "unsupportedVersion", "unsupported protocol version")) != nil {
+		if shutdownRequest != nil {
+			if writer.writeContext(closeContext, response{Version: Version, RequestID: shutdownRequest.RequestID, Result: acceptedResult{Accepted: true}}) != nil || writer.flush(closeContext) != nil {
 				return 1
+			}
+			return 0
+		}
+		flushed := writer.flush(closeContext)
+		if invalidInput {
+			select {
+			case <-writer.failed:
+			default:
+				_, _ = io.WriteString(diagnostics, invalidRequestDiagnostic)
+			}
+			return 1
+		}
+		if flushed != nil {
+			return 1
+		}
+		select {
+		case <-writer.failed:
+			return 1
+		default:
+			return 0
+		}
+	}
+
+	var active bool
+	var activeDone <-chan operationResult
+	start := func(next request) {
+		done := make(chan operationResult, 1)
+		active = true
+		activeDone = done
+		go func() {
+			err := serveRequest(root, next, runtime, services.LocalAppDiscoverer, writer, emit)
+			done <- operationResult{err: err, invalid: errors.Is(err, errInvalidRequest)}
+		}()
+	}
+
+	for {
+		// A direct shutdown must win over a staged ordinary request whenever it
+		// is already available.
+		select {
+		case shutdownRequest := <-shutdown:
+			return finish(&shutdownRequest, false)
+		default:
+		}
+		select {
+		case inputEnd := <-terminal:
+			return finish(nil, inputEnd.invalid)
+		default:
+		}
+		if !active {
+			select {
+			case shutdownRequest := <-shutdown:
+				return finish(&shutdownRequest, false)
+			case inputEnd := <-terminal:
+				return finish(nil, inputEnd.invalid)
+			case next := <-ordinary:
+				// If terminal input became ready in the same scheduler turn as a
+				// staged request, terminal handling wins and the request is dropped.
+				select {
+				case shutdownRequest := <-shutdown:
+					return finish(&shutdownRequest, false)
+				default:
+				}
+				select {
+				case inputEnd := <-terminal:
+					return finish(nil, inputEnd.invalid)
+				default:
+				}
+				if root.Err() != nil {
+					return finish(nil, false)
+				}
+				start(next)
+			case <-root.Done():
+				return finish(nil, false)
 			}
 			continue
 		}
 
-		switch request.Command {
-		case "handshake":
-			if !isEmptyPayload(request.Payload) {
-				_, _ = io.WriteString(diagnostics, invalidRequestDiagnostic)
-				return 1
+		select {
+		case shutdownRequest := <-shutdown:
+			return finish(&shutdownRequest, false)
+		case inputEnd := <-terminal:
+			return finish(nil, inputEnd.invalid)
+		case result := <-activeDone:
+			active = false
+			activeDone = nil
+			<-admissions
+			if result.err != nil && root.Err() == nil {
+				return finish(nil, result.invalid)
 			}
-			if writer.write(response{Version: Version, RequestID: request.RequestID, Result: handshakeResult{ProtocolVersion: Version}}) != nil {
-				return 1
-			}
-		case "shutdown":
-			if !isEmptyPayload(request.Payload) {
-				_, _ = io.WriteString(diagnostics, invalidRequestDiagnostic)
-				return 1
-			}
-			cancelDiscovery()
-			discoveryGroup.Wait()
-			if runtime != nil {
-				if err := runtime.Close(); err != nil {
-					_ = writer.write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed"))
-					return 1
-				}
-			}
-			if writer.write(response{Version: Version, RequestID: request.RequestID, Result: acceptedResult{Accepted: true}}) != nil {
-				return 1
-			}
-			return 0
-		case "discoverLocalApps":
-			if !isEmptyPayload(request.Payload) {
-				_, _ = io.WriteString(diagnostics, invalidRequestDiagnostic)
-				return 1
-			}
-			if services.LocalAppDiscoverer == nil {
-				if writer.write(errorResponse(request.RequestID, "discoveryFailure", "local app discovery failed")) != nil {
-					return 1
-				}
-				continue
-			}
-			requestID := request.RequestID
-			discoveryGroup.Add(1)
-			go func() {
-				defer discoveryGroup.Done()
-				// Return an ordinary discovery failure before Swift's five-second
-				// transport deadline so slow discovery cannot restart the helper.
-				requestContext, cancelRequest := context.WithTimeout(discoveryContext, 4*time.Second)
-				defer cancelRequest()
-				select {
-				case discoveryGate <- struct{}{}:
-					defer func() { <-discoveryGate }()
-				case <-requestContext.Done():
-				}
-				var candidates []discovery.Candidate
-				var err error
-				if requestContext.Err() == nil {
-					candidates, err = services.LocalAppDiscoverer.Discover(requestContext)
-				}
-				if discoveryContext.Err() != nil {
-					return
-				}
-				if err != nil || requestContext.Err() != nil {
-					if writer.write(errorResponse(requestID, "discoveryFailure", "local app discovery failed")) != nil {
-						failOutput()
-					}
-					return
-				}
-				result := response{
-					Version: Version, RequestID: requestID,
-					Result: discoverLocalAppsResult{Candidates: canonicalCandidates(candidates)},
-				}
-				encoded, err := json.Marshal(result)
-				// Match the Swift JSONL frame limit without silently truncating
-				// discovery or turning a large result into a transport failure.
-				if err != nil || len(encoded) > 256*1024 {
-					result = errorResponse(requestID, "discoveryFailure", "local app discovery failed")
-				}
-				if writer.write(result) != nil {
-					failOutput()
-				}
-			}()
-		case "reconcilePortals":
-			configs, err := decodeReconcilePortalsPayload(request.Payload)
-			if runtime == nil || err != nil {
-				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
-					return 1
-				}
-				continue
-			}
-			entries, err := runtime.Reconcile(ctx, configs, emit)
-			if err != nil {
-				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
-					return 1
-				}
-				continue
-			}
-			if writer.write(response{
-				Version: Version, RequestID: request.RequestID,
-				Result: reconcilePortalsResult{Entries: entries},
-			}) != nil {
-				return 1
-			}
-		case "authenticatePortal":
-			var payload authenticatePortalPayload
-			if runtime == nil || decodePayload(request.Payload, &payload) != nil {
-				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
-					return 1
-				}
-				continue
-			}
-			portalID, valid := validatedPortalID(payload.PortalID)
-			if !valid {
-				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
-					return 1
-				}
-				continue
-			}
-			if err := runtime.Authenticate(ctx, portalID); err != nil {
-				if writer.write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed")) != nil {
-					return 1
-				}
-				continue
-			}
-			if writer.write(response{Version: Version, RequestID: request.RequestID, Result: acceptedResult{Accepted: true}}) != nil {
-				return 1
-			}
-		case "cleanupRejectedPortal":
-			var payload cleanupRejectedPortalPayload
-			if runtime == nil || decodePayload(request.Payload, &payload) != nil {
-				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
-					return 1
-				}
-				continue
-			}
-			portalID, valid := validatedPortalID(payload.PortalID)
-			if !valid {
-				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
-					return 1
-				}
-				continue
-			}
-			if err := runtime.CleanupRejectedPortal(portalID); err != nil {
-				if writer.write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed")) != nil {
-					return 1
-				}
-				continue
-			}
-			if writer.write(response{Version: Version, RequestID: request.RequestID, Result: acceptedResult{Accepted: true}}) != nil {
-				return 1
-			}
-		case "removePortal":
-			var payload removePortalPayload
-			if runtime == nil || decodePayload(request.Payload, &payload) != nil {
-				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
-					return 1
-				}
-				continue
-			}
-			portalID, valid := validatedPortalID(payload.PortalID)
-			if !valid {
-				if writer.write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request")) != nil {
-					return 1
-				}
-				continue
-			}
-			if err := runtime.RemovePortal(portalID); err != nil {
-				if writer.write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed")) != nil {
-					return 1
-				}
-				continue
-			}
-			if writer.write(response{Version: Version, RequestID: request.RequestID, Result: acceptedResult{Accepted: true}}) != nil {
-				return 1
-			}
-		default:
-			if writer.write(errorResponse(request.RequestID, "unknownCommand", "unsupported command")) != nil {
-				return 1
-			}
+		case <-root.Done():
+			return finish(nil, false)
 		}
 	}
-	if scannerError := scanner.Err(); scannerError != nil {
-		cancelDiscovery()
-		cancel()
-		discoveryGroup.Wait()
-		if !outputFailed.Load() {
-			_, _ = io.WriteString(diagnostics, invalidRequestDiagnostic)
+}
+
+func readRequests(ctx context.Context, input io.Reader, admissions chan struct{}, ordinary chan<- request, shutdown chan<- request, terminal chan<- inputTerminal) {
+	scanner := bufio.NewScanner(input)
+	for scanner.Scan() {
+		select {
+		case admissions <- struct{}{}:
+		case <-ctx.Done():
+			return
 		}
-		return 1
+		var next request
+		decoder := json.NewDecoder(bytes.NewReader(scanner.Bytes()))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&next); err != nil || decoder.Decode(&struct{}{}) != io.EOF || !next.isStructurallyValid() {
+			select {
+			case terminal <- inputTerminal{invalid: true}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		if *next.Version == Version && (next.Command == "handshake" || next.Command == "discoverLocalApps" || next.Command == "shutdown") && !isEmptyPayload(next.Payload) {
+			select {
+			case terminal <- inputTerminal{invalid: true}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		if *next.Version == Version && next.Command == "shutdown" && isEmptyPayload(next.Payload) {
+			<-admissions
+			select {
+			case shutdown <- next:
+			case <-ctx.Done():
+			}
+			return
+		}
+		select {
+		case ordinary <- next:
+		case <-ctx.Done():
+			return
+		}
 	}
-	discoveryGroup.Wait()
-	if outputFailed.Load() {
-		return 1
+	select {
+	case terminal <- inputTerminal{invalid: scanner.Err() != nil}:
+	case <-ctx.Done():
 	}
-	cancelBeforeExit = false
-	return 0
+}
+
+func serveRequest(ctx context.Context, request request, runtime PortalRuntime, discoverer LocalAppDiscoverer, writer *messageWriter, emit func(portal.Event)) error {
+	write := func(value any) error { return writer.writeContext(ctx, value) }
+	if requestVersion := *request.Version; requestVersion != Version {
+		return write(errorResponse(request.RequestID, "unsupportedVersion", "unsupported protocol version"))
+	}
+	switch request.Command {
+	case "handshake":
+		if !isEmptyPayload(request.Payload) {
+			return errInvalidRequest
+		}
+		return write(response{Version: Version, RequestID: request.RequestID, Result: handshakeResult{ProtocolVersion: Version}})
+	case "shutdown":
+		return errInvalidRequest
+	case "discoverLocalApps":
+		if !isEmptyPayload(request.Payload) {
+			return errInvalidRequest
+		}
+		if discoverer == nil {
+			return write(errorResponse(request.RequestID, "discoveryFailure", "local app discovery failed"))
+		}
+		requestContext, cancel := context.WithTimeout(ctx, 4*time.Second)
+		defer cancel()
+		candidates, err := discoverer.Discover(requestContext)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil || requestContext.Err() != nil {
+			return write(errorResponse(request.RequestID, "discoveryFailure", "local app discovery failed"))
+		}
+		result := response{Version: Version, RequestID: request.RequestID, Result: discoverLocalAppsResult{Candidates: canonicalCandidates(candidates)}}
+		encoded, marshalErr := json.Marshal(result)
+		if marshalErr != nil || len(encoded) > 256*1024 {
+			result = errorResponse(request.RequestID, "discoveryFailure", "local app discovery failed")
+		}
+		return write(result)
+	case "reconcilePortals":
+		configs, err := decodeReconcilePortalsPayload(request.Payload)
+		if runtime == nil || err != nil {
+			return write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request"))
+		}
+		entries, err := runtime.Reconcile(ctx, configs, emit)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request"))
+		}
+		return write(response{Version: Version, RequestID: request.RequestID, Result: reconcilePortalsResult{Entries: entries}})
+	case "authenticatePortal":
+		var payload authenticatePortalPayload
+		if runtime == nil || decodePayload(request.Payload, &payload) != nil {
+			return write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request"))
+		}
+		portalID, valid := validatedPortalID(payload.PortalID)
+		if !valid {
+			return write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request"))
+		}
+		if err := runtime.Authenticate(ctx, portalID); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed"))
+		}
+		return write(response{Version: Version, RequestID: request.RequestID, Result: acceptedResult{Accepted: true}})
+	case "cleanupRejectedPortal":
+		var payload cleanupRejectedPortalPayload
+		if runtime == nil || decodePayload(request.Payload, &payload) != nil {
+			return write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request"))
+		}
+		portalID, valid := validatedPortalID(payload.PortalID)
+		if !valid {
+			return write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request"))
+		}
+		if err := runtime.CleanupRejectedPortal(ctx, portalID); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed"))
+		}
+		return write(response{Version: Version, RequestID: request.RequestID, Result: acceptedResult{Accepted: true}})
+	case "removePortal":
+		var payload removePortalPayload
+		if runtime == nil || decodePayload(request.Payload, &payload) != nil {
+			return write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request"))
+		}
+		portalID, valid := validatedPortalID(payload.PortalID)
+		if !valid {
+			return write(errorResponse(request.RequestID, "invalidPayload", "invalid portal request"))
+		}
+		if err := runtime.RemovePortal(ctx, portalID); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return write(errorResponse(request.RequestID, "runtimeFailure", "portal runtime failed"))
+		}
+		return write(response{Version: Version, RequestID: request.RequestID, Result: acceptedResult{Accepted: true}})
+	default:
+		return write(errorResponse(request.RequestID, "unknownCommand", "unsupported command"))
+	}
 }
 
 func validatedPortalID(raw string) (string, bool) {

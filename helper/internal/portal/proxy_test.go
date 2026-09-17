@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -286,7 +287,7 @@ func TestRemoteAppProxyReturnsOnlyGenericBadGatewayForDestinationFailures(t *tes
 func assertRemoteAppFailureIsRedacted(t *testing.T, proxy http.Handler, providerSecret string) {
 	t.Helper()
 	const requestSecret = "request-body-do-not-log"
-	var logs bytes.Buffer
+	var logs lockedBuffer
 	previousWriter := log.Writer()
 	previousFlags := log.Flags()
 	previousPrefix := log.Prefix()
@@ -311,6 +312,23 @@ func assertRemoteAppFailureIsRedacted(t *testing.T, proxy http.Handler, provider
 			t.Fatalf("secret %q leaked", secret)
 		}
 	}
+}
+
+type lockedBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(data)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
 }
 
 func TestRemoteAppProxyStreamsImmediately(t *testing.T) {
@@ -803,13 +821,14 @@ func TestRemoteProxyCloseCanRetryAfterUnconfirmedListenerClose(t *testing.T) {
 		context.Background(),
 		flaky,
 		newRemoteProxy(&url.URL{Scheme: "https", Host: "app.example.com:443"}, &http.Transport{}),
+		nil,
 	)
 
-	if err := proxy.close(); err == nil {
+	if err := proxy.close(context.Background()); err == nil {
 		t.Fatal("first close succeeded, want unconfirmed close failure")
 	}
 	done := make(chan error, 1)
-	go func() { done <- proxy.close() }()
+	go func() { done <- proxy.close(context.Background()) }()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -817,6 +836,29 @@ func TestRemoteProxyCloseCanRetryAfterUnconfirmedListenerClose(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("retry close blocked after Serve result was already collected")
+	}
+}
+
+func TestProxyCloseHonorsDeadlineWhenListenerCloseDoesNotUnblockServe(t *testing.T) {
+	listener := &unblockingFailureListener{entered: make(chan struct{}), release: make(chan struct{})}
+	proxy := startProxyServer(context.Background(), listener, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), nil)
+	t.Cleanup(func() {
+		close(listener.release)
+		_ = proxy.close(context.Background())
+	})
+	waitForSignal(t, listener.entered, "proxy listener Accept")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- proxy.close(ctx) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("close = %v, want deadline", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("close waited for Serve after its deadline")
 	}
 }
 
@@ -843,7 +885,7 @@ func TestProxyCloseClosesRemoteTransportIdleConnections(t *testing.T) {
 	}
 	proxy := startProxyServer(context.Background(), listener, newRemoteProxy(
 		&url.URL{Scheme: "http", Host: "app.example.com:" + port}, transport,
-	))
+	), nil)
 	response, err := http.Get("http://" + listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -851,7 +893,7 @@ func TestProxyCloseClosesRemoteTransportIdleConnections(t *testing.T) {
 	_, _ = io.Copy(io.Discard, response.Body)
 	_ = response.Body.Close()
 
-	if err := proxy.close(); err != nil {
+	if err := proxy.close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !transport.closed.Load() {
@@ -863,6 +905,20 @@ type flakyCloseListener struct {
 	net.Listener
 	failuresRemaining atomic.Int32
 }
+
+type unblockingFailureListener struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (l *unblockingFailureListener) Accept() (net.Conn, error) {
+	close(l.entered)
+	<-l.release
+	return nil, net.ErrClosed
+}
+
+func (*unblockingFailureListener) Close() error   { return errors.New("injected listener close failure") }
+func (*unblockingFailureListener) Addr() net.Addr { return &net.TCPAddr{} }
 
 type responseFailureRoundTripper struct {
 	err error
