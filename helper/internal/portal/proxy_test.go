@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/netip"
 	"net/url"
 	"strconv"
@@ -94,6 +96,95 @@ func TestTrackedHandlerRetiresOnlyDrainedGeneration(t *testing.T) {
 	}
 }
 
+func TestProxyServerUsesInboundTimeouts(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := startProxyServer(context.Background(), listener, http.NotFoundHandler(), nil)
+	t.Cleanup(func() { _ = proxy.close(context.Background()) })
+
+	if proxy.server.ReadHeaderTimeout != 10*time.Second {
+		t.Fatalf("ReadHeaderTimeout = %v, want 10s", proxy.server.ReadHeaderTimeout)
+	}
+	if proxy.server.IdleTimeout != 60*time.Second {
+		t.Fatalf("IdleTimeout = %v, want 60s", proxy.server.IdleTimeout)
+	}
+	if proxy.server.ReadTimeout != 0 || proxy.server.WriteTimeout != 0 {
+		t.Fatalf("request timeouts = (%v, %v), want unset", proxy.server.ReadTimeout, proxy.server.WriteTimeout)
+	}
+}
+
+func TestProxyServerRejectsSlowHeaders(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := startProxyServerWithTimeouts(
+		context.Background(),
+		listener,
+		http.NotFoundHandler(),
+		nil,
+		proxyServerTimeouts{readHeader: 20 * time.Millisecond, idle: time.Second},
+	)
+	t.Cleanup(func() { _ = proxy.close(context.Background()) })
+
+	connection, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, err := io.WriteString(connection, "GET / HTTP/1.1\r\nHost: portal.example.ts.net\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(connection); err != nil {
+		t.Fatalf("slow header connection did not close: %v", err)
+	}
+}
+
+func TestProxyServerClosesIdleKeepAlive(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := startProxyServerWithTimeouts(
+		context.Background(),
+		listener,
+		http.NotFoundHandler(),
+		nil,
+		proxyServerTimeouts{readHeader: time.Second, idle: 20 * time.Millisecond},
+	)
+	t.Cleanup(func() { _ = proxy.close(context.Background()) })
+
+	connection, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	request, err := http.NewRequest(http.MethodGet, "http://portal.example.ts.net/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(connection, "GET / HTTP/1.1\r\nHost: portal.example.ts.net\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(connection)
+	response, err := http.ReadResponse(reader, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ReadByte(); !errors.Is(err, io.EOF) {
+		t.Fatalf("idle keep-alive read = %v, want EOF", err)
+	}
+}
+
 type closeTrackingHandler struct {
 	serve  func(http.ResponseWriter, *http.Request)
 	closed chan struct{}
@@ -107,6 +198,17 @@ func (h *closeTrackingHandler) CloseIdleConnections() {
 	if h.closed != nil {
 		h.closed <- struct{}{}
 	}
+}
+
+type lateCloseTrackingConn struct {
+	net.Conn
+	closed chan<- struct{}
+	once   sync.Once
+}
+
+func (c *lateCloseTrackingConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
 }
 
 func TestRemoteAppHTTPProxyUsesConfiguredAuthority(t *testing.T) {
@@ -480,6 +582,657 @@ func TestRemoteAppProxyPropagatesCancellation(t *testing.T) {
 	}
 }
 
+func TestRemoteAppTransportCancelsResolverWithTailnetRequest(t *testing.T) {
+	resolverEntered := make(chan struct{})
+	resolverCanceled := make(chan struct{})
+	transport := newRemoteAppTransport(remoteTransportDependencies{
+		resolve: func(ctx context.Context, network, host string) ([]netip.Addr, error) {
+			close(resolverEntered)
+			<-ctx.Done()
+			close(resolverCanceled)
+			return nil, ctx.Err()
+		},
+		dial: func(context.Context, string, string) (net.Conn, error) {
+			t.Fatal("dial called after blocking resolver")
+			return nil, nil
+		},
+		setupTimeout: 10 * time.Second,
+	})
+	proxy := httptest.NewServer(newRemoteProxy(&url.URL{Scheme: "http", Host: "app.example.com:443"}, transport))
+	t.Cleanup(proxy.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, proxy.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-resolverEntered:
+	case <-time.After(time.Second):
+		t.Fatal("resolver did not start")
+	}
+	cancel()
+	select {
+	case <-resolverCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("tailnet cancellation did not reach resolver")
+	}
+	select {
+	case err := <-requestDone:
+		if err == nil {
+			t.Fatal("request completed without cancellation error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client request did not finish after cancellation")
+	}
+}
+
+func TestRemoteAppTransportNoBridgeDoesNotCancelResolver(t *testing.T) {
+	resolverEntered := make(chan struct{})
+	resolverCanceled := make(chan struct{})
+	releaseResolver := make(chan struct{})
+	transport := newRemoteAppTransport(remoteTransportDependencies{
+		resolve: func(ctx context.Context, network, host string) ([]netip.Addr, error) {
+			close(resolverEntered)
+			select {
+			case <-ctx.Done():
+				close(resolverCanceled)
+				return nil, ctx.Err()
+			case <-releaseResolver:
+				return nil, errors.New("released no-bridge resolver")
+			}
+		},
+	})
+	proxy := httptest.NewServer(&httputil.ReverseProxy{
+		Transport: transport,
+		Rewrite: func(request *httputil.ProxyRequest) {
+			request.SetURL(&url.URL{Scheme: "http", Host: "app.example.com:443"})
+		},
+		ErrorLog: log.New(io.Discard, "", 0),
+	})
+	t.Cleanup(proxy.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, proxy.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-resolverEntered:
+	case <-time.After(time.Second):
+		t.Fatal("resolver did not start")
+	}
+	cancel()
+	select {
+	case <-resolverCanceled:
+		t.Fatal("detached transport context unexpectedly canceled resolver")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseResolver)
+	select {
+	case err := <-requestDone:
+		if err == nil {
+			t.Fatal("request completed without cancellation error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client request did not finish after cancellation")
+	}
+}
+
+func TestRemoteAppTransportCancelsDialWithTailnetRequest(t *testing.T) {
+	dialEntered := make(chan struct{})
+	dialCanceled := make(chan struct{})
+	transport := newRemoteAppTransport(remoteTransportDependencies{
+		resolve: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil
+		},
+		dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			close(dialEntered)
+			<-ctx.Done()
+			close(dialCanceled)
+			return nil, ctx.Err()
+		},
+		setupTimeout: 10 * time.Second,
+	})
+	proxy := httptest.NewServer(newRemoteProxy(&url.URL{Scheme: "http", Host: "app.example.com:443"}, transport))
+	t.Cleanup(proxy.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, proxy.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-dialEntered:
+	case <-time.After(time.Second):
+		t.Fatal("dial did not start")
+	}
+	cancel()
+	select {
+	case <-dialCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("tailnet cancellation did not reach dial")
+	}
+	select {
+	case err := <-requestDone:
+		if err == nil {
+			t.Fatal("request completed without cancellation error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client request did not finish after cancellation")
+	}
+}
+
+func TestRemoteAppTransportClosesLateDialSuccess(t *testing.T) {
+	dialEntered := make(chan struct{})
+	lateConnectionClosed := make(chan struct{})
+	peerConnections := make(chan net.Conn, 1)
+	transport := newRemoteAppTransport(remoteTransportDependencies{
+		resolve: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2")}, nil
+		},
+		dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			close(dialEntered)
+			<-ctx.Done()
+			peer, connection := net.Pipe()
+			peerConnections <- peer
+			return &lateCloseTrackingConn{Conn: connection, closed: lateConnectionClosed}, nil
+		},
+		setupTimeout: 10 * time.Second,
+	})
+	proxy := httptest.NewServer(newRemoteProxy(&url.URL{Scheme: "http", Host: "app.example.com:443"}, transport))
+	t.Cleanup(proxy.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, proxy.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-dialEntered:
+	case <-time.After(time.Second):
+		t.Fatal("dial did not start")
+	}
+	cancel()
+	var peer net.Conn
+	select {
+	case peer = <-peerConnections:
+		defer peer.Close()
+	case <-time.After(time.Second):
+		t.Fatal("canceled dial did not return a late connection")
+	}
+	select {
+	case <-lateConnectionClosed:
+	case <-time.After(time.Second):
+		t.Fatal("late successful dial connection was not closed")
+	}
+	select {
+	case err := <-requestDone:
+		if err == nil {
+			t.Fatal("request completed without cancellation error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client request did not finish after cancellation")
+	}
+}
+
+func TestRemoteAppTransportCancelsTLSWithTailnetRequest(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err == nil {
+			accepted <- connection
+		}
+	}()
+
+	transport := newRemoteAppTransport(remoteTransportDependencies{
+		resolve: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil
+		},
+		dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, listener.Addr().String())
+		},
+		setupTimeout:        10 * time.Second,
+		tlsHandshakeTimeout: 10 * time.Second,
+	})
+	proxy := httptest.NewServer(newRemoteProxy(&url.URL{Scheme: "https", Host: "app.example.com:443"}, transport))
+	t.Cleanup(proxy.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, proxy.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	var peer net.Conn
+	select {
+	case peer = <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("TLS peer did not accept a connection")
+	}
+	defer peer.Close()
+
+	cancel()
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(peer); err != nil {
+		t.Fatalf("TLS peer remained open after tailnet cancellation: %v", err)
+	}
+	select {
+	case err := <-requestDone:
+		if err == nil {
+			t.Fatal("request completed without cancellation error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client request did not finish after cancellation")
+	}
+}
+
+func TestRemoteAppTransportCancelsTLSWithTransportContext(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err == nil {
+			accepted <- connection
+		}
+	}()
+	transport := newRemoteAppTransport(remoteTransportDependencies{
+		resolve: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil
+		},
+		dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, listener.Addr().String())
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		connection, err := transport.DialTLSContext(ctx, "tcp", "app.example.com:443")
+		if connection != nil {
+			_ = connection.Close()
+		}
+		result <- err
+	}()
+	var peer net.Conn
+	select {
+	case peer = <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("TLS peer did not accept a connection")
+	}
+	defer peer.Close()
+	cancel()
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(peer); err != nil {
+		t.Fatalf("TLS peer remained open after transport cancellation: %v", err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("TLS dial = %v, want transport context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TLS dial did not finish after transport cancellation")
+	}
+}
+
+func TestRemoteAppTransportBoundsTLSAndHeaders(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err == nil {
+			accepted <- connection
+		}
+	}()
+
+	transport := newRemoteAppTransport(remoteTransportDependencies{
+		resolve: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil
+		},
+		dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, listener.Addr().String())
+		},
+		setupTimeout:        time.Second,
+		tlsHandshakeTimeout: 20 * time.Millisecond,
+	})
+	proxy := httptest.NewServer(newRemoteProxy(&url.URL{Scheme: "https", Host: "app.example.com:443"}, transport))
+	t.Cleanup(proxy.Close)
+
+	requestDone := make(chan struct{})
+	go func() {
+		response, _ := http.Get(proxy.URL)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		close(requestDone)
+	}()
+	var peer net.Conn
+	select {
+	case peer = <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("TLS peer did not accept a connection")
+	}
+	defer peer.Close()
+	if err := peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(peer); err != nil {
+		t.Fatalf("TLS peer remained open past handshake deadline: %v", err)
+	}
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not finish after TLS handshake deadline")
+	}
+
+	headerEntered := make(chan struct{})
+	headerCanceled := make(chan struct{})
+	remote := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(headerEntered)
+		<-request.Context().Done()
+		close(headerCanceled)
+	}))
+	t.Cleanup(remote.Close)
+	remoteURL, err := url.Parse(remote.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(remoteURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerTransport := newRemoteAppTransport(remoteTransportDependencies{
+		resolve: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil
+		},
+		dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, remoteURL.Host)
+		},
+		responseHeaderTimeout: 20 * time.Millisecond,
+	})
+	headerProxy := httptest.NewServer(newRemoteProxy(&url.URL{Scheme: "http", Host: "app.example.com:" + port}, headerTransport))
+	t.Cleanup(headerProxy.Close)
+	response, err := http.Get(headerProxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("header-stalled response = %d, want %d", response.StatusCode, http.StatusBadGateway)
+	}
+	select {
+	case <-headerEntered:
+	case <-time.After(time.Second):
+		t.Fatal("header-stalled Remote App request did not start")
+	}
+	select {
+	case <-headerCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("response-header timeout did not cancel the Remote App request")
+	}
+}
+
+func TestRemoteAppTransportUsesHTTP2ALPN(t *testing.T) {
+	protocol := make(chan int, 1)
+	remote := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		protocol <- request.ProtoMajor
+		_, _ = io.WriteString(writer, "h2")
+	}))
+	remote.EnableHTTP2 = true
+	remote.StartTLS()
+	t.Cleanup(remote.Close)
+
+	proxy := httptest.NewServer(newRemoteProxy(testRemoteAppTarget(t, remote), testRemoteAppTransport(t, remote)))
+	t.Cleanup(proxy.Close)
+	response, err := http.Get(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if body, err := io.ReadAll(response.Body); err != nil || string(body) != "h2" {
+		t.Fatalf("response = (%q, %v), want HTTP/2 response", body, err)
+	}
+	select {
+	case got := <-protocol:
+		if got != 2 {
+			t.Fatalf("Remote App protocol = HTTP/%d, want HTTP/2", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Remote App did not receive request")
+	}
+}
+
+func TestRemoteAppTransportKeepsSuccessfulTLSConnectionReusableAfterRequestCancellation(t *testing.T) {
+	var newConnections atomic.Int32
+	remote := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "ok")
+	}))
+	remote.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConnections.Add(1)
+		}
+	}
+	remote.StartTLS()
+	t.Cleanup(remote.Close)
+	proxy := httptest.NewServer(newRemoteProxy(testRemoteAppTarget(t, remote), testRemoteAppTransport(t, remote)))
+	t.Cleanup(proxy.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, proxy.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body, err := io.ReadAll(response.Body); err != nil || string(body) != "ok" {
+		_ = response.Body.Close()
+		t.Fatalf("first response = (%q, %v), want ok", body, err)
+	}
+	_ = response.Body.Close()
+	cancel()
+
+	response, err = http.Get(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if body, err := io.ReadAll(response.Body); err != nil || string(body) != "ok" {
+		t.Fatalf("second response = (%q, %v), want reusable TLS connection", body, err)
+	}
+	if got := newConnections.Load(); got != 1 {
+		t.Fatalf("Remote App TLS connections = %d, want reuse after first request cancellation", got)
+	}
+}
+
+func TestRemoteAppTransportPreservesHTTP1WebSocketUpgradeAgainstHTTP2Origin(t *testing.T) {
+	protocol := make(chan *http.Request, 1)
+	remote := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		protocol <- request.Clone(request.Context())
+		connection, err := websocket.Accept(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer connection.CloseNow()
+		messageType, message, err := connection.Read(request.Context())
+		if err == nil {
+			_ = connection.Write(request.Context(), messageType, append([]byte("app-to-client:"), message...))
+		}
+	}))
+	remote.EnableHTTP2 = true
+	remote.StartTLS()
+	t.Cleanup(remote.Close)
+
+	proxy := httptest.NewServer(newRemoteProxy(testRemoteAppTarget(t, remote), testRemoteAppTransport(t, remote)))
+	t.Cleanup(proxy.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	connection, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(proxy.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if err := connection.Write(ctx, websocket.MessageText, []byte("client-to-app")); err != nil {
+		t.Fatal(err)
+	}
+	messageType, message, err := connection.Read(ctx)
+	if err != nil || messageType != websocket.MessageText || string(message) != "app-to-client:client-to-app" {
+		t.Fatalf("WebSocket response = (%v, %q, %v), want proxied bidirectional message", messageType, message, err)
+	}
+	select {
+	case request := <-protocol:
+		if request.ProtoMajor != 1 {
+			t.Fatalf("WebSocket Remote App protocol = HTTP/%d, want HTTP/1", request.ProtoMajor)
+		}
+		if !headerHasToken(request.Header.Values("Connection"), "upgrade") || !strings.EqualFold(request.Header.Get("Upgrade"), "websocket") {
+			t.Fatalf("WebSocket upgrade headers = %q / %q, want Connection: Upgrade and Upgrade: websocket", request.Header.Values("Connection"), request.Header.Get("Upgrade"))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket Remote App did not receive request")
+	}
+}
+
+func TestRemoteAppTransportUsesDefaultPolicy(t *testing.T) {
+	defaultTransport := http.DefaultTransport.(*http.Transport)
+	transport := newRemoteAppTransport(remoteTransportDependencies{})
+
+	if transport == defaultTransport {
+		t.Fatal("Remote App transport reused http.DefaultTransport")
+	}
+	if transport.Proxy != nil {
+		t.Fatal("Remote App transport retained environment proxy selection")
+	}
+	if transport.DialContext == nil || transport.DialTLSContext == nil {
+		t.Fatal("Remote App transport did not install both safe dial boundaries")
+	}
+	if transport.ForceAttemptHTTP2 != defaultTransport.ForceAttemptHTTP2 ||
+		transport.MaxIdleConns != defaultTransport.MaxIdleConns ||
+		transport.MaxConnsPerHost != defaultTransport.MaxConnsPerHost ||
+		(transport.TLSClientConfig == nil) != (defaultTransport.TLSClientConfig == nil) {
+		t.Fatal("Remote App transport did not retain default transport policy")
+	}
+	if transport.TLSHandshakeTimeout != 10*time.Second ||
+		transport.ResponseHeaderTimeout != 30*time.Second ||
+		transport.IdleConnTimeout != 90*time.Second ||
+		transport.ExpectContinueTimeout != time.Second {
+		t.Fatalf("Remote App timeouts = (%v, %v, %v, %v), want (10s, 30s, 90s, 1s)",
+			transport.TLSHandshakeTimeout,
+			transport.ResponseHeaderTimeout,
+			transport.IdleConnTimeout,
+			transport.ExpectContinueTimeout,
+		)
+	}
+}
+
+func TestRemoteAppTransportNormalizesDialerDefaults(t *testing.T) {
+	dial := safeRemoteDialerWithDependencies(remoteTransportDependencies{
+		resolve: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil
+		},
+		dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("safe dialer did not install a setup deadline")
+			}
+			remaining := time.Until(deadline)
+			if remaining < 29*time.Second || remaining > remoteSetupTimeout {
+				t.Fatalf("setup deadline remaining = %v, want approximately 30s", remaining)
+			}
+			return nil, context.Canceled
+		},
+	})
+	if connection, err := dial(context.Background(), "tcp", "app.example.com:443"); connection != nil || err == nil {
+		t.Fatalf("normalized dial = (%v, %v), want failed default-bound dial", connection, err)
+	}
+}
+
+func TestRemoteAppDialerSharesSetupDeadlineAcrossCandidates(t *testing.T) {
+	dialCalls := 0
+	dial := safeRemoteDialerWithDependencies(remoteTransportDependencies{
+		resolve: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{
+				netip.MustParseAddr("192.0.2.1"),
+				netip.MustParseAddr("192.0.2.2"),
+			}, nil
+		},
+		dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			dialCalls++
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		setupTimeout: 20 * time.Millisecond,
+	})
+
+	connection, err := dial(context.Background(), "tcp", "app.example.com:443")
+	if connection != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("dial = (%v, %v), want setup deadline", connection, err)
+	}
+	if dialCalls != 1 {
+		t.Fatalf("dial calls = %d, want one before the shared deadline", dialCalls)
+	}
+}
+
 func TestRemoteAppDialerNeverDialsLoopbackResolution(t *testing.T) {
 	dial := safeRemoteDialer(func(context.Context, string, string) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
@@ -496,6 +1249,62 @@ func TestRemoteAppDialerNeverDialsIPv4MappedLoopbackResolution(t *testing.T) {
 	if connection, err := dial(context.Background(), "tcp", "app.example.com:443"); err == nil || connection != nil {
 		t.Fatalf("IPv4-mapped loopback resolution dial = (%v, %v), want rejection", connection, err)
 	}
+}
+
+func TestRemoteAppDialerRejectsUnsafeCandidates(t *testing.T) {
+	t.Run("literal loopback", func(t *testing.T) {
+		called := false
+		dial := safeRemoteDialerWithDependencies(remoteTransportDependencies{
+			dial: func(context.Context, string, string) (net.Conn, error) {
+				called = true
+				return nil, nil
+			},
+		})
+		if connection, err := dial(context.Background(), "tcp", "[::ffff:127.0.0.1]:443"); connection != nil || err == nil {
+			t.Fatalf("literal loopback dial = (%v, %v), want rejection", connection, err)
+		}
+		if called {
+			t.Fatal("literal IPv4-mapped loopback reached dialer")
+		}
+	})
+	t.Run("literal unspecified", func(t *testing.T) {
+		called := false
+		dial := safeRemoteDialerWithDependencies(remoteTransportDependencies{
+			dial: func(context.Context, string, string) (net.Conn, error) {
+				called = true
+				return nil, nil
+			},
+		})
+		if connection, err := dial(context.Background(), "tcp", "[::]:443"); connection != nil || err == nil {
+			t.Fatalf("literal unspecified dial = (%v, %v), want rejection", connection, err)
+		}
+		if called {
+			t.Fatal("literal unspecified address reached dialer")
+		}
+	})
+	t.Run("mixed resolution", func(t *testing.T) {
+		var dialed []string
+		dial := safeRemoteDialerWithDependencies(remoteTransportDependencies{
+			resolve: func(context.Context, string, string) ([]netip.Addr, error) {
+				return []netip.Addr{
+					netip.MustParseAddr("127.0.0.1"),
+					netip.MustParseAddr("::ffff:127.0.0.1"),
+					netip.MustParseAddr("::"),
+					netip.MustParseAddr("192.0.2.1"),
+				}, nil
+			},
+			dial: func(_ context.Context, _ string, address string) (net.Conn, error) {
+				dialed = append(dialed, address)
+				return nil, errors.New("test dial failure")
+			},
+		})
+		if connection, err := dial(context.Background(), "tcp", "app.example.com:443"); connection != nil || err == nil {
+			t.Fatalf("mixed resolution dial = (%v, %v), want safe-candidate failure", connection, err)
+		}
+		if len(dialed) != 1 || dialed[0] != "192.0.2.1:443" {
+			t.Fatalf("dialed candidates = %v, want only safe 192.0.2.1:443", dialed)
+		}
+	})
 }
 
 func TestLoopbackProxyReplacesForwardingHeadersAndAuthority(t *testing.T) {
@@ -761,6 +1570,38 @@ func newTestRemoteProxyServer(t *testing.T, remote *httptest.Server) *httptest.S
 	proxy := httptest.NewServer(newRemoteProxy(target, transport))
 	t.Cleanup(proxy.Close)
 	return proxy
+}
+
+func testRemoteAppTarget(t *testing.T, remote *httptest.Server) *url.URL {
+	t.Helper()
+	remoteURL, err := url.Parse(remote.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(remoteURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &url.URL{Scheme: "https", Host: "example.com:" + port}
+}
+
+func testRemoteAppTransport(t *testing.T, remote *httptest.Server) *http.Transport {
+	t.Helper()
+	remoteURL, err := url.Parse(remote.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := newRemoteAppTransport(remoteTransportDependencies{
+		resolve: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil
+		},
+		dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, remoteURL.Host)
+		},
+	})
+	transport.TLSClientConfig = remote.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	transport.TLSClientConfig.NextProtos = nil
+	return transport
 }
 
 func localAppPort(t *testing.T, localAppURL string) (int, string) {
