@@ -901,7 +901,7 @@ func TestRemoteAppTransportCancelsTLSWithTransportContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		connection, err := transport.DialTLSContext(ctx, "tcp", "app.example.com:443")
+		connection, err := transport.ordinary.DialTLSContext(ctx, "tcp", "app.example.com:443")
 		if connection != nil {
 			_ = connection.Close()
 		}
@@ -1062,6 +1062,92 @@ func TestRemoteAppTransportUsesHTTP2ALPN(t *testing.T) {
 	}
 }
 
+func TestRemoteAppTransportPreservesArbitraryHTTP1UpgradeAgainstWarmHTTP2Origin(t *testing.T) {
+	requests := make(chan *http.Request, 2)
+	remote := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests <- request.Clone(request.Context())
+		if request.Header.Get("Upgrade") != "portal-test" {
+			_, _ = io.WriteString(writer, "ordinary")
+			return
+		}
+		connection, buffer, err := writer.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		_, _ = io.WriteString(buffer, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: portal-test\r\n\r\n")
+		_ = buffer.Flush()
+		message := make([]byte, len("client-to-app"))
+		if _, err := io.ReadFull(buffer, message); err == nil {
+			_, _ = io.WriteString(buffer, "app-to-client:"+string(message))
+			_ = buffer.Flush()
+		}
+	}))
+	remote.EnableHTTP2 = true
+	remote.StartTLS()
+	t.Cleanup(remote.Close)
+
+	proxy := httptest.NewServer(newRemoteProxy(testRemoteAppTarget(t, remote), testRemoteAppTransport(t, remote)))
+	t.Cleanup(proxy.Close)
+	response, err := http.Get(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	select {
+	case request := <-requests:
+		if request.ProtoMajor != 2 {
+			t.Fatalf("ordinary Remote App protocol = HTTP/%d, want HTTP/2", request.ProtoMajor)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ordinary Remote App request did not start")
+	}
+
+	connection, err := net.Dial("tcp", strings.TrimPrefix(proxy.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(connection, "GET / HTTP/1.1\r\nHost: portal.example.ts.net\r\nConnection: keep-alive, Upgrade\r\nUpgrade: portal-test\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(connection)
+	upgradeRequest, err := http.NewRequest(http.MethodGet, proxy.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upgradeResponse, err := http.ReadResponse(reader, upgradeRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgradeResponse.Body.Close()
+	if upgradeResponse.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade response = %d, want 101", upgradeResponse.StatusCode)
+	}
+	if _, err := io.WriteString(connection, "client-to-app"); err != nil {
+		t.Fatal(err)
+	}
+	responseMessage := make([]byte, len("app-to-client:client-to-app"))
+	if _, err := io.ReadFull(reader, responseMessage); err != nil || string(responseMessage) != "app-to-client:client-to-app" {
+		t.Fatalf("upgrade response = (%q, %v), want bidirectional bytes", responseMessage, err)
+	}
+	select {
+	case request := <-requests:
+		if request.ProtoMajor != 1 {
+			t.Fatalf("upgrade Remote App protocol = HTTP/%d, want HTTP/1", request.ProtoMajor)
+		}
+		if !headerHasToken(request.Header.Values("Connection"), "upgrade") || request.Header.Get("Upgrade") != "portal-test" {
+			t.Fatalf("upgrade headers = %q / %q, want Connection: Upgrade and Upgrade: portal-test", request.Header.Values("Connection"), request.Header.Get("Upgrade"))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upgrade Remote App request did not start")
+	}
+}
+
 func TestRemoteAppTransportKeepsSuccessfulTLSConnectionReusableAfterRequestCancellation(t *testing.T) {
 	var newConnections atomic.Int32
 	remote := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
@@ -1106,10 +1192,14 @@ func TestRemoteAppTransportKeepsSuccessfulTLSConnectionReusableAfterRequestCance
 	}
 }
 
-func TestRemoteAppTransportPreservesHTTP1WebSocketUpgradeAgainstHTTP2Origin(t *testing.T) {
-	protocol := make(chan *http.Request, 1)
+func TestRemoteAppTransportPreservesHTTP1WebSocketUpgradeAgainstWarmHTTP2Origin(t *testing.T) {
+	protocol := make(chan *http.Request, 2)
 	remote := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		protocol <- request.Clone(request.Context())
+		if !strings.EqualFold(request.Header.Get("Upgrade"), "websocket") {
+			_, _ = io.WriteString(writer, "ordinary")
+			return
+		}
 		connection, err := websocket.Accept(writer, request, nil)
 		if err != nil {
 			return
@@ -1126,6 +1216,20 @@ func TestRemoteAppTransportPreservesHTTP1WebSocketUpgradeAgainstHTTP2Origin(t *t
 
 	proxy := httptest.NewServer(newRemoteProxy(testRemoteAppTarget(t, remote), testRemoteAppTransport(t, remote)))
 	t.Cleanup(proxy.Close)
+	ordinary, err := http.Get(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, ordinary.Body)
+	_ = ordinary.Body.Close()
+	select {
+	case request := <-protocol:
+		if request.ProtoMajor != 2 {
+			t.Fatalf("ordinary Remote App protocol = HTTP/%d, want HTTP/2", request.ProtoMajor)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ordinary Remote App request did not start")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	connection, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(proxy.URL, "http"), nil)
@@ -1157,31 +1261,73 @@ func TestRemoteAppTransportUsesDefaultPolicy(t *testing.T) {
 	defaultTransport := http.DefaultTransport.(*http.Transport)
 	transport := newRemoteAppTransport(remoteTransportDependencies{})
 
-	if transport == defaultTransport {
-		t.Fatal("Remote App transport reused http.DefaultTransport")
+	for name, pool := range map[string]*http.Transport{"ordinary": transport.ordinary, "upgrade": transport.upgrade} {
+		if pool == defaultTransport {
+			t.Fatalf("%s Remote App pool reused http.DefaultTransport", name)
+		}
+		if pool.Proxy != nil {
+			t.Fatalf("%s Remote App pool retained environment proxy selection", name)
+		}
+		if pool.DialContext == nil || pool.DialTLSContext == nil {
+			t.Fatalf("%s Remote App pool did not install both safe dial boundaries", name)
+		}
+		if pool.MaxIdleConns != defaultTransport.MaxIdleConns ||
+			pool.MaxConnsPerHost != defaultTransport.MaxConnsPerHost ||
+			(pool.TLSClientConfig == nil) != (defaultTransport.TLSClientConfig == nil) {
+			t.Fatalf("%s Remote App pool did not retain default transport policy", name)
+		}
+		if pool.TLSHandshakeTimeout != 10*time.Second ||
+			pool.ResponseHeaderTimeout != 30*time.Second ||
+			pool.IdleConnTimeout != 90*time.Second ||
+			pool.ExpectContinueTimeout != time.Second {
+			t.Fatalf("%s Remote App timeouts = (%v, %v, %v, %v), want (10s, 30s, 90s, 1s)", name,
+				pool.TLSHandshakeTimeout, pool.ResponseHeaderTimeout, pool.IdleConnTimeout, pool.ExpectContinueTimeout)
+		}
 	}
-	if transport.Proxy != nil {
-		t.Fatal("Remote App transport retained environment proxy selection")
+	if transport.ordinary.ForceAttemptHTTP2 != defaultTransport.ForceAttemptHTTP2 {
+		t.Fatal("ordinary Remote App pool did not retain default HTTP/2 policy")
 	}
-	if transport.DialContext == nil || transport.DialTLSContext == nil {
-		t.Fatal("Remote App transport did not install both safe dial boundaries")
+	if transport.upgrade.Protocols == nil || !transport.upgrade.Protocols.HTTP1() || transport.upgrade.Protocols.HTTP2() {
+		t.Fatal("upgrade Remote App pool is not explicitly HTTP/1-only")
 	}
-	if transport.ForceAttemptHTTP2 != defaultTransport.ForceAttemptHTTP2 ||
-		transport.MaxIdleConns != defaultTransport.MaxIdleConns ||
-		transport.MaxConnsPerHost != defaultTransport.MaxConnsPerHost ||
-		(transport.TLSClientConfig == nil) != (defaultTransport.TLSClientConfig == nil) {
-		t.Fatal("Remote App transport did not retain default transport policy")
+}
+
+func TestRemoteAppTransportClosesIdleConnectionsInBothPools(t *testing.T) {
+	var closed atomic.Int32
+	remote := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "ok")
+	}))
+	remote.EnableHTTP2 = true
+	remote.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			closed.Add(1)
+		}
 	}
-	if transport.TLSHandshakeTimeout != 10*time.Second ||
-		transport.ResponseHeaderTimeout != 30*time.Second ||
-		transport.IdleConnTimeout != 90*time.Second ||
-		transport.ExpectContinueTimeout != time.Second {
-		t.Fatalf("Remote App timeouts = (%v, %v, %v, %v), want (10s, 30s, 90s, 1s)",
-			transport.TLSHandshakeTimeout,
-			transport.ResponseHeaderTimeout,
-			transport.IdleConnTimeout,
-			transport.ExpectContinueTimeout,
-		)
+	remote.StartTLS()
+	t.Cleanup(remote.Close)
+	target := testRemoteAppTarget(t, remote)
+	transport := testRemoteAppTransport(t, remote)
+
+	for name, pool := range map[string]*http.Transport{"ordinary": transport.ordinary, "upgrade": transport.upgrade} {
+		request, err := http.NewRequest(http.MethodGet, target.String(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := pool.RoundTrip(request)
+		if err != nil {
+			t.Fatalf("%s pool request: %v", name, err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+	}
+	transport.CloseIdleConnections()
+	deadline := time.After(time.Second)
+	for closed.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("closed Remote App idle connections = %d, want one per pool", closed.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 
@@ -1585,7 +1731,7 @@ func testRemoteAppTarget(t *testing.T, remote *httptest.Server) *url.URL {
 	return &url.URL{Scheme: "https", Host: "example.com:" + port}
 }
 
-func testRemoteAppTransport(t *testing.T, remote *httptest.Server) *http.Transport {
+func testRemoteAppTransport(t *testing.T, remote *httptest.Server) *remoteAppTransport {
 	t.Helper()
 	remoteURL, err := url.Parse(remote.URL)
 	if err != nil {
@@ -1599,8 +1745,9 @@ func testRemoteAppTransport(t *testing.T, remote *httptest.Server) *http.Transpo
 			return (&net.Dialer{}).DialContext(ctx, network, remoteURL.Host)
 		},
 	})
-	transport.TLSClientConfig = remote.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
-	transport.TLSClientConfig.NextProtos = nil
+	tlsConfig := remote.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	transport.ordinary.TLSClientConfig = tlsConfig.Clone()
+	transport.upgrade.TLSClientConfig = tlsConfig.Clone()
 	return transport
 }
 

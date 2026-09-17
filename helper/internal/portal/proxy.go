@@ -75,11 +75,11 @@ func newRemoteProxy(target *url.URL, transport http.RoundTripper) http.Handler {
 			request.SetURL(target)
 			request.SetXForwarded()
 			request.Out.Header.Set("X-Forwarded-Proto", "https")
-			outboundContext := context.WithValue(request.Out.Context(), remoteDialRequestContextKey{}, request.In.Context())
-			if requiresHTTP1(request.Out) {
-				outboundContext = context.WithValue(outboundContext, remoteHTTP1RequiredContextKey{}, true)
-			}
-			request.Out = request.Out.WithContext(outboundContext)
+			request.Out = request.Out.WithContext(context.WithValue(
+				request.Out.Context(),
+				remoteDialRequestContextKey{},
+				request.In.Context(),
+			))
 		},
 		FlushInterval: -1,
 		ErrorLog:      log.New(io.Discard, "", 0),
@@ -106,7 +106,6 @@ func (p *remoteProxy) CloseIdleConnections() {
 }
 
 type remoteDialRequestContextKey struct{}
-type remoteHTTP1RequiredContextKey struct{}
 
 type remoteTransportDependencies struct {
 	resolve               func(context.Context, string, string) ([]netip.Addr, error)
@@ -116,8 +115,20 @@ type remoteTransportDependencies struct {
 	responseHeaderTimeout time.Duration
 }
 
-func newRemoteAppTransport(dependencies remoteTransportDependencies) *http.Transport {
+type remoteAppTransport struct {
+	ordinary *http.Transport
+	upgrade  *http.Transport
+}
+
+func newRemoteAppTransport(dependencies remoteTransportDependencies) *remoteAppTransport {
 	dependencies = normalizedRemoteTransportDependencies(dependencies)
+	return &remoteAppTransport{
+		ordinary: newRemoteHTTPTransport(dependencies, false),
+		upgrade:  newRemoteHTTPTransport(dependencies, true),
+	}
+}
+
+func newRemoteHTTPTransport(dependencies remoteTransportDependencies, onlyHTTP1 bool) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.DialContext = safeRemoteDialerWithDependencies(dependencies)
@@ -126,7 +137,24 @@ func newRemoteAppTransport(dependencies remoteTransportDependencies) *http.Trans
 	transport.ResponseHeaderTimeout = dependencies.responseHeaderTimeout
 	transport.IdleConnTimeout = remoteIdleConnTimeout
 	transport.ExpectContinueTimeout = remoteExpectContinueTimeout
+	if onlyHTTP1 {
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		transport.Protocols = protocols
+	}
 	return transport
+}
+
+func (t *remoteAppTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if isUpgradeRequest(request) {
+		return t.upgrade.RoundTrip(request)
+	}
+	return t.ordinary.RoundTrip(request)
+}
+
+func (t *remoteAppTransport) CloseIdleConnections() {
+	t.ordinary.CloseIdleConnections()
+	t.upgrade.CloseIdleConnections()
 }
 
 func safeRemoteDialer(resolve func(context.Context, string, string) ([]netip.Addr, error)) func(context.Context, string, string) (net.Conn, error) {
@@ -241,7 +269,7 @@ func safeRemoteTLSDialer(transport *http.Transport, dependencies remoteTransport
 			}
 		}()
 
-		config, err := remoteTLSConfig(transport, address, requiresHTTP1Context(ctx))
+		config, err := remoteTLSConfig(transport, address)
 		if err != nil {
 			return nil, err
 		}
@@ -274,7 +302,7 @@ func safeRemoteTLSDialer(transport *http.Transport, dependencies remoteTransport
 	}
 }
 
-func remoteTLSConfig(transport *http.Transport, address string, onlyHTTP1 bool) (*tls.Config, error) {
+func remoteTLSConfig(transport *http.Transport, address string) (*tls.Config, error) {
 	config := transport.TLSClientConfig
 	if config == nil {
 		config = &tls.Config{}
@@ -288,9 +316,6 @@ func remoteTLSConfig(transport *http.Transport, address string, onlyHTTP1 bool) 
 		}
 		config.ServerName = host
 	}
-	if onlyHTTP1 {
-		config.NextProtos = nil
-	}
 	return config, nil
 }
 
@@ -300,13 +325,8 @@ func closeConnection(connection net.Conn) {
 	}
 }
 
-func requiresHTTP1(request *http.Request) bool {
-	return headerHasToken(request.Header.Values("Connection"), "upgrade") && strings.EqualFold(request.Header.Get("Upgrade"), "websocket")
-}
-
-func requiresHTTP1Context(ctx context.Context) bool {
-	requiresHTTP1, _ := ctx.Value(remoteHTTP1RequiredContextKey{}).(bool)
-	return requiresHTTP1
+func isUpgradeRequest(request *http.Request) bool {
+	return headerHasToken(request.Header.Values("Connection"), "upgrade") && strings.TrimSpace(request.Header.Get("Upgrade")) != ""
 }
 
 func headerHasToken(values []string, token string) bool {
