@@ -532,7 +532,7 @@ final class PorticoUITests: XCTestCase {
 
         app = launch(scenario: "login-offer")
         openMenuBarExtra(app)
-        XCTAssertTrue(app.buttons["login-offer-reminder"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["login-offer-reminder"].exists)
         XCTAssertFalse(app.buttons["login-offer-enable"].exists)
         XCTAssertFalse(app.buttons["login-offer-decline"].exists)
 

@@ -66,9 +66,8 @@ xcodebuild \
   ARCHS=arm64 \
   build
 
-apps=("$products_directory"/*.app)
-[[ "${#apps[@]}" == 1 ]] || { echo "Expected exactly one Debug app product" >&2; exit 1; }
-app="${apps[0]}"
+app="$products_directory/Portico Dev.app"
+[[ -d "$app" ]] || { echo "Expected Debug Portico Dev app product" >&2; exit 1; }
 info_plist="$app/Contents/Info.plist"
 app_executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$info_plist")"
 app_bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info_plist")"
