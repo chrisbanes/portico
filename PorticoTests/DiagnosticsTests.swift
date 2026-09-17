@@ -122,4 +122,22 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertTrue(report.contains("Helper: ownership failure"))
         XCTAssertFalse(report.contains("/Applications/Portico.app"))
     }
+
+    func testDiagnosticReportUsesTheSelectedAppDisplayName() {
+        let report = DiagnosticReportRenderer.render(
+            versions: DiagnosticVersions(
+                appName: "Portico Dev",
+                porticoShort: "1.2",
+                porticoBuild: "34",
+                helperProtocol: 5
+            ),
+            helper: .connected,
+            isInstallationAvailable: true,
+            portals: [],
+            history: []
+        )
+
+        XCTAssertTrue(report.contains("Portico Dev 1.2 (34)"))
+        XCTAssertFalse(report.contains("Portico 1.2 (34)"))
+    }
 }

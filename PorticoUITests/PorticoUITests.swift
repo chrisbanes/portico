@@ -517,7 +517,8 @@ final class PorticoUITests: XCTestCase {
         openMenuBarExtra(app)
         let attention = app.buttons["compact-attention"]
         XCTAssertTrue(attention.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(attention.label, "Review in Portico")
+        XCTAssertTrue(app.staticTexts["Portico Dev needs your attention."].waitForExistence(timeout: 3))
+        XCTAssertEqual(attention.label, "Review in Portico Dev")
         attention.click()
         XCTAssertTrue(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
 
@@ -532,7 +533,7 @@ final class PorticoUITests: XCTestCase {
 
         app = launch(scenario: "login-offer")
         openMenuBarExtra(app)
-        XCTAssertTrue(app.buttons["login-offer-reminder"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["login-offer-reminder"].exists)
         XCTAssertFalse(app.buttons["login-offer-enable"].exists)
         XCTAssertFalse(app.buttons["login-offer-decline"].exists)
 
@@ -545,8 +546,10 @@ final class PorticoUITests: XCTestCase {
         let quit = app.buttons["quit"]
         XCTAssertTrue(portalAction.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertTrue(openPortico.exists)
+        XCTAssertEqual(openPortico.label, "Open Portico Dev")
         XCTAssertTrue(settings.exists)
         XCTAssertTrue(diagnostics.exists)
+        XCTAssertEqual(quit.label, "Quit Portico Dev")
         XCTAssertLessThan(portalAction.frame.maxY, quit.frame.minY)
         let compactPortal = app.descendants(matching: .any)["compact-portal-portal-one"]
         XCTAssertLessThan(abs(portalAction.frame.midY - compactPortal.frame.midY), 8)
@@ -700,69 +703,19 @@ final class PorticoUITests: XCTestCase {
         XCTAssertFalse(app.buttons["overview-reset-tailnet"].exists)
     }
 
-    func testLaunchAtLoginApprovalFromOverviewOffer() {
-        let app = launch(scenario: "login-offer-approval")
+    func testDebugAppHasDevIdentityAndNoLaunchAtLoginUI() {
+        let app = launch(scenario: "login-offer")
         openMenuBarExtra(app)
-        app.buttons["login-offer-reminder"].click()
-        XCTAssertTrue(app.buttons["overview-login-offer-enable"].waitForExistence(timeout: 3))
-        app.buttons["overview-login-offer-enable"].click()
-        XCTAssertFalse(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["login-offer-reminder"].exists)
         app.typeKey(",", modifierFlags: .command)
-        XCTAssertTrue(app.radioButtons["Allow operational-support logging"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["open-login-items-settings"].isEnabled)
-    }
-
-    func testLaunchAtLoginRegistrationFailureFromOverviewOffer() {
-        let app = launch(scenario: "login-offer-error")
-        openMenuBarExtra(app)
-        app.buttons["login-offer-reminder"].click()
-        XCTAssertTrue(app.buttons["overview-login-offer-enable"].waitForExistence(timeout: 3))
-        app.buttons["overview-login-offer-enable"].click()
-        XCTAssertFalse(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 3))
-        app.typeKey(",", modifierFlags: .command)
-        XCTAssertTrue(app.staticTexts["launch-at-login-error"].waitForExistence(timeout: 3))
-        XCTAssertTrue(waitForValue("Off", element: app.staticTexts["launch-at-login-status"], timeout: 3), app.debugDescription)
-        let retry = app.buttons["retry-launch-at-login"]
-        XCTAssertTrue(retry.waitForExistence(timeout: 3))
-        XCTAssertTrue(retry.isEnabled)
-    }
-
-    func testLaunchAtLoginOfferRoutesFromMenuToOverviewAndStaysUntilExplicitChoice() {
-        let root = makeRoot()
-        let app = launch(scenario: "login-offer", root: root)
-        openMenuBarExtra(app)
-        let reminder = app.buttons["login-offer-reminder"]
-        XCTAssertTrue(reminder.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(app.buttons["login-offer-enable"].exists)
-        XCTAssertFalse(app.buttons["login-offer-decline"].exists)
-
-        reminder.click()
-        XCTAssertTrue(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.descendants(matching: .any)["overview-launch-at-login-offer"].exists)
-
-        app.buttons["management-sidebar-portal-portal-one"].click()
-        XCTAssertTrue(waitForValue("portal-one", element: app.staticTexts["selected-portal-name"], timeout: 3))
-        openMenuBarExtra(app)
-        XCTAssertTrue(app.buttons["login-offer-reminder"].waitForExistence(timeout: 3))
-        app.buttons["login-offer-reminder"].click()
-        XCTAssertTrue(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 3))
-        XCTAssertFalse(app.staticTexts["selected-portal-name"].exists)
-
-        XCTAssertTrue(app.buttons["overview-login-offer-decline"].waitForExistence(timeout: 3))
-        app.buttons["overview-login-offer-decline"].click()
-        XCTAssertFalse(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 2))
-    }
-
-    func testLaunchAtLoginOfferIsActionableInEmptyOverview() {
-        let app = launch(scenario: "login-offer-empty")
-        openMenuBarExtra(app)
-
-        app.buttons["login-offer-reminder"].click()
-
-        XCTAssertTrue(app.staticTexts["Connect Your Tailnet"].waitForExistence(timeout: 3), app.debugDescription)
-        XCTAssertTrue(app.descendants(matching: .any)["overview-launch-at-login-offer"].exists)
-        app.buttons["overview-login-offer-decline"].click()
-        XCTAssertFalse(app.descendants(matching: .any)["overview-launch-at-login-offer"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Portico Dev Settings"].waitForExistence(timeout: 3), app.debugDescription)
+        for identifier in [
+            "launch-at-login-status", "enable-launch-at-login", "disable-launch-at-login",
+            "open-login-items-settings", "retry-launch-at-login", "launch-at-login-error",
+            "overview-launch-at-login-offer", "launch-at-login-offer",
+        ] {
+            XCTAssertFalse(app.descendants(matching: .any)[identifier].exists, identifier)
+        }
     }
 
     private func launch(scenario: String, root: String? = nil) -> XCUIApplication {

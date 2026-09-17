@@ -50,12 +50,26 @@ struct PortalDiagnosticFacts: Equatable {
 }
 
 struct DiagnosticVersions: Equatable {
+    let appName: String
     let porticoShort: String?
     let porticoBuild: String?
     let helperProtocol: Int
 
-    static var current: DiagnosticVersions {
+    init(
+        appName: String = "Portico",
+        porticoShort: String?,
+        porticoBuild: String?,
+        helperProtocol: Int
+    ) {
+        self.appName = appName
+        self.porticoShort = porticoShort
+        self.porticoBuild = porticoBuild
+        self.helperProtocol = helperProtocol
+    }
+
+    static func current(appName: String = "Portico") -> DiagnosticVersions {
         DiagnosticVersions(
+            appName: appName,
             porticoShort: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
             porticoBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
             helperProtocol: helperProtocolVersion
@@ -74,7 +88,7 @@ enum DiagnosticReportRenderer {
         var lines: [String] = []
         if let short = versions.porticoShort {
             let build = versions.porticoBuild.map { " (\($0))" } ?? ""
-            lines.append("Portico \(short)\(build)")
+            lines.append("\(versions.appName) \(short)\(build)")
         }
         lines.append("Helper protocol \(versions.helperProtocol)")
         lines.append("Helper: \(isInstallationAvailable ? describeHelper(helper) : "saved configuration unavailable")")

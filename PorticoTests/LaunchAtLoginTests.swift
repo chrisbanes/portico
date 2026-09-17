@@ -3,6 +3,23 @@ import XCTest
 
 @MainActor
 final class LaunchAtLoginTests: XCTestCase {
+    func testUnavailableCompositionNeverConsultsServiceOrPersistence() {
+        let service = FakeLaunchAtLoginService(status: .notRegistered)
+        let store = FakeLaunchAtLoginOfferStore()
+        let composition = LaunchAtLoginComposition.unavailable
+
+        XCTAssertNil(composition.makeController(
+            service: service,
+            offerState: { store.state },
+            saveOfferState: { store.save($0) }
+        ))
+        XCTAssertEqual(service.statusReadCount, 0)
+        XCTAssertEqual(service.registerCount, 0)
+        XCTAssertEqual(service.unregisterCount, 0)
+        XCTAssertEqual(service.openSettingsCount, 0)
+        XCTAssertTrue(store.saved.isEmpty)
+    }
+
     func testFirstFreshOnlineOfferPersistsPresentedBeforePresentation() {
         let service = FakeLaunchAtLoginService(status: .notRegistered)
         let store = FakeLaunchAtLoginOfferStore()
@@ -204,7 +221,15 @@ private final class FakeLaunchAtLoginOfferStore {
 }
 
 private final class FakeLaunchAtLoginService: LaunchAtLoginServicing {
-    var status: LaunchAtLoginStatus
+    private var storedStatus: LaunchAtLoginStatus
+    var status: LaunchAtLoginStatus {
+        get {
+            statusReadCount += 1
+            return storedStatus
+        }
+        set { storedStatus = newValue }
+    }
+    private(set) var statusReadCount = 0
     var registerError: Error?
     var unregisterError: Error?
     var onRegister: (() -> Void)?
@@ -213,7 +238,7 @@ private final class FakeLaunchAtLoginService: LaunchAtLoginServicing {
     private(set) var openSettingsCount = 0
 
     init(status: LaunchAtLoginStatus) {
-        self.status = status
+        storedStatus = status
     }
 
     func register() throws {

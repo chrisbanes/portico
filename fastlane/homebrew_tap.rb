@@ -55,7 +55,7 @@ def update_homebrew_tap(version:, checksums:, tap_token:, app_directory:, &publi
     '{"version":4,"portals":[],"alerts":[],"operationalLogging":"disabled","launchAtLoginOffer":"notOffered"}'
   )
   FastlaneCore::Helper.with_env_values("PORTICO_APP_PATH" => File.join(app_directory, "Portico.app")) do
-    sh(File.join(PORTICO_ROOT, "Scripts/smoke-test-local-app.sh"))
+    sh(File.join(PORTICO_ROOT, "Scripts/smoke-test-installed-app.sh"))
   end
 
   sh("git", "-C", tap_directory, "add", "--", "Casks/portico.rb")

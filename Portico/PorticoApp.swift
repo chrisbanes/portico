@@ -7,10 +7,11 @@ struct PorticoApp: App {
 
     var body: some Scene {
         let _ = scheduleInitialManagementWindowIfNeeded()
-        MenuBarExtra("Portico", systemImage: "door.left.hand.open") {
+        MenuBarExtra(appDelegate.appVariant.displayName, systemImage: "door.left.hand.open") {
             PortalView(
                 controller: appDelegate.portalController,
                 supervisor: appDelegate.supervisor,
+                appName: appDelegate.appVariant.displayName,
                 launchAtLogin: appDelegate.launchAtLoginController,
                 managementRouting: appDelegate.managementRouting,
                 windowActivation: appDelegate.windowActivation,
@@ -24,21 +25,26 @@ struct PorticoApp: App {
         .menuBarExtraStyle(.window)
         .commands {
             PorticoCommands(
+                appName: appDelegate.appVariant.displayName,
                 managementRouting: appDelegate.managementRouting,
                 windowActivation: appDelegate.windowActivation
             )
         }
-        Window("Portico", id: "management") {
+        Window(appDelegate.appVariant.displayName, id: "management") {
             OverviewView(
                 controller: appDelegate.portalController,
                 supervisor: appDelegate.supervisor,
                 launchAtLogin: appDelegate.launchAtLoginController,
+                appName: appDelegate.appVariant.displayName,
                 managementRouting: appDelegate.managementRouting
             )
         }
         .defaultSize(width: 720, height: 520)
-        Window("Portico Diagnostics", id: "diagnostics") {
-            DiagnosticsView(controller: appDelegate.portalController)
+        Window("\(appDelegate.appVariant.displayName) Diagnostics", id: "diagnostics") {
+            DiagnosticsView(
+                controller: appDelegate.portalController,
+                appName: appDelegate.appVariant.displayName
+            )
         }
         .defaultSize(width: 720, height: 520)
     }
@@ -61,6 +67,7 @@ public enum PorticoApplication {
 
 private struct PorticoCommands: Commands {
     @Environment(\.openWindow) private var openWindow
+    let appName: String
     @ObservedObject var managementRouting: ManagementRouting
     let windowActivation: AppWindowActivation
 
@@ -73,7 +80,7 @@ private struct PorticoCommands: Commands {
             .keyboardShortcut(",", modifiers: .command)
         }
         CommandGroup(after: .appSettings) {
-            Button("Open Portico") { presentWindow(id: "management") }
+            Button("Open \(appName)") { presentWindow(id: "management") }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
             Button("Diagnostics") { presentWindow(id: "diagnostics") }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
@@ -100,7 +107,8 @@ private struct OverviewView: View {
 
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
-    @ObservedObject var launchAtLogin: LaunchAtLoginController
+    let launchAtLogin: LaunchAtLoginController?
+    let appName: String
     @ObservedObject var managementRouting: ManagementRouting
     @State private var selection: Destination? = .overview
     @State private var showingAddPortal = false
@@ -150,7 +158,7 @@ private struct OverviewView: View {
                         .tag(Destination.settings)
                 }
             }
-            .navigationTitle("Portico")
+            .navigationTitle(appName)
         } detail: {
             managementContent
             .navigationTitle(navigationTitle)
@@ -266,7 +274,8 @@ private struct OverviewView: View {
             SettingsView(
                 controller: controller,
                 supervisor: supervisor,
-                launchAtLogin: launchAtLogin
+                launchAtLogin: launchAtLogin,
+                appName: appName
             )
         } else if let selectedPortal {
             selectedDetail(for: selectedPortal)
@@ -281,8 +290,8 @@ private struct OverviewView: View {
                     Text("Create your first Portal. Next, you’ll sign in with Tailscale in your browser.")
                         .accessibilityIdentifier("overview-first-portal-authentication-guidance")
                 }
-                if launchAtLogin.isOffering {
-                    launchAtLoginOffer
+                if let launchAtLogin {
+                    LaunchAtLoginOfferView(controller: launchAtLogin)
                 }
                 Button("Create Your First Portal") { showingAddPortal = true }
                     .buttonStyle(.borderedProminent)
@@ -297,10 +306,8 @@ private struct OverviewView: View {
                     LabeledContent("Tailnet", value: controller.tailnetDisplaySuffix ?? "Not connected")
                         .accessibilityIdentifier("overview-tailnet")
                 }
-                if launchAtLogin.isOffering {
-                    Section("Launch at Login") {
-                        launchAtLoginOffer
-                    }
+                if let launchAtLogin {
+                    LaunchAtLoginOfferSection(controller: launchAtLogin)
                 }
                 if PortalPresentation.showsPrerequisiteGuidance(portalCount: controller.portals.count) {
                     Section("Before creating your first Portal") {
@@ -347,23 +354,44 @@ private struct OverviewView: View {
         }
     }
 
-    private var launchAtLoginOffer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Open Portico at Login?")
-            Text("You can change this later in Settings.")
-                .foregroundStyle(.secondary)
-            HStack {
-                Button("Not Now") { launchAtLogin.declineOffer() }
-                    .accessibilityIdentifier("overview-login-offer-decline")
-                Button("Enable") { launchAtLogin.acceptOffer() }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("overview-login-offer-enable")
+}
+
+private struct LaunchAtLoginOfferView: View {
+    @ObservedObject var controller: LaunchAtLoginController
+
+    var body: some View {
+        if controller.isOffering {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Open Portico at Login?")
+                Text("You can change this later in Settings.")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Not Now") { controller.declineOffer() }
+                        .accessibilityIdentifier("overview-login-offer-decline")
+                    Button("Enable") { controller.acceptOffer() }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("overview-login-offer-enable")
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("overview-launch-at-login-offer")
+        }
+    }
+}
+
+private struct LaunchAtLoginOfferSection: View {
+    @ObservedObject var controller: LaunchAtLoginController
+
+    var body: some View {
+        if controller.isOffering {
+            Section("Launch at Login") {
+                LaunchAtLoginOfferView(controller: controller)
             }
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("overview-launch-at-login-offer")
     }
+}
 
+private extension OverviewView {
     @ViewBuilder
     private func selectedDetail(for portal: PortalConfiguration) -> some View {
         switch portal.lifecycle {
@@ -897,7 +925,8 @@ private struct PortalView: View {
     @Environment(\.openWindow) private var openWindow
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
-    @ObservedObject var launchAtLogin: LaunchAtLoginController
+    let appName: String
+    let launchAtLogin: LaunchAtLoginController?
     @ObservedObject var managementRouting: ManagementRouting
     let windowActivation: AppWindowActivation
     let takeInitialManagementWindowRequest: () -> Bool
@@ -910,21 +939,18 @@ private struct PortalView: View {
                 .accessibilityIdentifier("tailnet-state")
             if requiresAttention {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Portico needs your attention.")
-                    Button("Review in Portico") { openOverview() }
+                    Text("\(appName) needs your attention.")
+                    Button("Review in \(appName)") { openOverview() }
                         .accessibilityIdentifier("compact-attention")
                 }
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("compact-attention-summary")
             }
-            if launchAtLogin.isOffering {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Launch at login is ready to set up.")
-                    Button("Set Up Launch at Login") { openOverview() }
-                    .accessibilityIdentifier("login-offer-reminder")
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("launch-at-login-offer")
+            if let launchAtLogin {
+                LaunchAtLoginReminderView(
+                    controller: launchAtLogin,
+                    openOverview: openOverview
+                )
             }
             ForEach(controller.portals, id: \.id) { portal in
                 CompactPortalMenuRow(controller: controller, portal: portal)
@@ -954,14 +980,14 @@ private struct PortalView: View {
                     presentWindow(id: "management")
                     dismiss()
                 } label: {
-                    Label("Open Portico", systemImage: "rectangle.on.rectangle")
+                    Label("Open \(appName)", systemImage: "rectangle.on.rectangle")
                 }
                 .labelStyle(.iconOnly)
-                .help("Open Portico")
+                .help("Open \(appName)")
                 .accessibilityIdentifier("open-portico")
             }
             Divider()
-            Button("Quit Portico") {
+            Button("Quit \(appName)") {
                 NSApp.terminate(nil)
             }
             .keyboardShortcut("q")
@@ -1007,6 +1033,23 @@ private struct PortalView: View {
     private func presentWindow(id: String) {
         windowActivation.present {
             openWindow(id: id)
+        }
+    }
+}
+
+private struct LaunchAtLoginReminderView: View {
+    @ObservedObject var controller: LaunchAtLoginController
+    let openOverview: () -> Void
+
+    var body: some View {
+        if controller.isOffering {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Launch at login is ready to set up.")
+                Button("Set Up Launch at Login", action: openOverview)
+                    .accessibilityIdentifier("login-offer-reminder")
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("launch-at-login-offer")
         }
     }
 }
@@ -1388,7 +1431,8 @@ private func lifecycleStatusText(for portal: PortalConfiguration) -> String? {
 private struct SettingsView: View {
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
-    @ObservedObject var launchAtLogin: LaunchAtLoginController
+    let launchAtLogin: LaunchAtLoginController?
+    let appName: String
 #if DEBUG
     @ObservedObject private var restartGate = UITestRestartGate.shared
 #endif
@@ -1396,7 +1440,7 @@ private struct SettingsView: View {
 
     var body: some View {
         Form {
-            Text("Portico Settings")
+            Text("\(appName) Settings")
                 .font(.title2)
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityFocused($headingFocused)
@@ -1436,36 +1480,13 @@ private struct SettingsView: View {
                         .accessibilityIdentifier("logging-preference-error")
                 }
             }
-            Section("Startup") {
-                LabeledContent("Launch at login", value: launchAtLogin.status.title)
-                    .accessibilityIdentifier("launch-at-login-status")
-                if launchAtLogin.status == .notRegistered {
-                    Button("Enable Launch at Login") { launchAtLogin.setEnabled(true) }
-                        .accessibilityIdentifier("enable-launch-at-login")
-                } else if launchAtLogin.status == .enabled {
-                    Button("Disable Launch at Login") { launchAtLogin.setEnabled(false) }
-                        .accessibilityIdentifier("disable-launch-at-login")
-                } else if launchAtLogin.status == .requiresApproval {
-                    Button("Open Login Items Settings") { launchAtLogin.openLoginItemsSettings() }
-                        .accessibilityIdentifier("open-login-items-settings")
-                }
-                if controller.launchAtLoginOffer == .accepted,
-                   launchAtLogin.status == .notRegistered,
-                   launchAtLogin.errorMessage != nil {
-                    Button("Retry Launch at Login") { launchAtLogin.retryRegistration() }
-                        .accessibilityIdentifier("retry-launch-at-login")
-                }
-                if let error = launchAtLogin.errorMessage {
-                    Label(error, systemImage: "exclamationmark.circle")
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("launch-at-login-error")
-                }
+            if let launchAtLogin {
+                LaunchAtLoginSettingsView(controller: controller, launchAtLogin: launchAtLogin)
             }
         }
         .formStyle(.grouped)
         .accessibilityIdentifier("settings-view")
         .onAppear {
-            launchAtLogin.refreshStatusAfterApplicationActivation()
             headingFocused = true
         }
     }
@@ -1478,13 +1499,48 @@ private struct SettingsView: View {
     }
 }
 
+private struct LaunchAtLoginSettingsView: View {
+    @ObservedObject var controller: PortalController
+    @ObservedObject var launchAtLogin: LaunchAtLoginController
+
+    var body: some View {
+        Section("Startup") {
+            LabeledContent("Launch at login", value: launchAtLogin.status.title)
+                .accessibilityIdentifier("launch-at-login-status")
+            if launchAtLogin.status == .notRegistered {
+                Button("Enable Launch at Login") { launchAtLogin.setEnabled(true) }
+                    .accessibilityIdentifier("enable-launch-at-login")
+            } else if launchAtLogin.status == .enabled {
+                Button("Disable Launch at Login") { launchAtLogin.setEnabled(false) }
+                    .accessibilityIdentifier("disable-launch-at-login")
+            } else if launchAtLogin.status == .requiresApproval {
+                Button("Open Login Items Settings") { launchAtLogin.openLoginItemsSettings() }
+                    .accessibilityIdentifier("open-login-items-settings")
+            }
+            if controller.launchAtLoginOffer == .accepted,
+               launchAtLogin.status == .notRegistered,
+               launchAtLogin.errorMessage != nil {
+                Button("Retry Launch at Login") { launchAtLogin.retryRegistration() }
+                    .accessibilityIdentifier("retry-launch-at-login")
+            }
+            if let error = launchAtLogin.errorMessage {
+                Label(error, systemImage: "exclamationmark.circle")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("launch-at-login-error")
+            }
+        }
+        .onAppear { launchAtLogin.refreshStatusAfterApplicationActivation() }
+    }
+}
+
 private struct DiagnosticsView: View {
     @ObservedObject var controller: PortalController
+    let appName: String
     @AccessibilityFocusState private var headingFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Portico Diagnostics").font(.title2)
+            Text("\(appName) Diagnostics").font(.title2)
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityFocused($headingFocused)
                 .accessibilityIdentifier("diagnostics-heading")

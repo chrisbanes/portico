@@ -52,6 +52,49 @@ if ! awk '/^[[:space:]]*PRODUCT_TYPE[[:space:]]*=[[:space:]]*com\.apple\.product
 fi
 
 app_settings="$(xcodebuild -showBuildSettings -project "$project_path" -target Portico -configuration Debug)"
+release_app_settings="$(xcodebuild -showBuildSettings -project "$project_path" -target Portico -configuration Release)"
+for expected in \
+  'PRODUCT_NAME = Portico Dev' \
+  'PRODUCT_BUNDLE_IDENTIFIER = dev.chrisbanes.Portico.Debug' \
+  'PORTICO_SUPPORT_DIRECTORY = Portico Dev' \
+  'PORTICO_LAUNCH_AT_LOGIN_AVAILABLE = NO'; do
+  grep -Fq "$expected" <<<"$app_settings" || { echo "Debug app setting is missing: $expected" >&2; exit 1; }
+done
+for expected in \
+  'PRODUCT_NAME = Portico' \
+  'PRODUCT_BUNDLE_IDENTIFIER = dev.chrisbanes.Portico' \
+  'PORTICO_SUPPORT_DIRECTORY = Portico' \
+  'PORTICO_LAUNCH_AT_LOGIN_AVAILABLE = YES'; do
+  grep -Fq "$expected" <<<"$release_app_settings" || { echo "Release app setting is missing: $expected" >&2; exit 1; }
+done
+
+derived_data="$repo_root/.build/project-generation"
+for configuration in Debug Release; do
+  xcodebuild -project "$project_path" -scheme Portico -configuration "$configuration" -destination 'platform=macOS,arch=arm64' -derivedDataPath "$derived_data" build
+done
+assert_info_value() {
+  local actual
+  actual="$(/usr/libexec/PlistBuddy -c "Print :$2" "$1")"
+  [[ "$actual" == "$3" ]] || { echo "Info.plist $2 must be $3, got $actual" >&2; exit 1; }
+}
+debug_info="$derived_data/Build/Products/Debug/Portico Dev.app/Contents/Info.plist"
+release_info="$derived_data/Build/Products/Release/Portico.app/Contents/Info.plist"
+for info in "$debug_info" "$release_info"; do
+  [[ -f "$info" ]] || { echo "Expected emitted Info.plist is missing: $info" >&2; exit 1; }
+  assert_info_value "$info" CFBundleShortVersionString 0.0.0
+  assert_info_value "$info" CFBundleVersion 1
+  assert_info_value "$info" LSUIElement true
+done
+assert_info_value "$debug_info" CFBundleExecutable "Portico Dev"
+assert_info_value "$debug_info" CFBundleDisplayName "Portico Dev"
+assert_info_value "$debug_info" CFBundleIdentifier dev.chrisbanes.Portico.Debug
+assert_info_value "$debug_info" PorticoSupportDirectory "Portico Dev"
+assert_info_value "$debug_info" PorticoLaunchAtLoginAvailable NO
+assert_info_value "$release_info" CFBundleExecutable Portico
+assert_info_value "$release_info" CFBundleDisplayName Portico
+assert_info_value "$release_info" CFBundleIdentifier dev.chrisbanes.Portico
+assert_info_value "$release_info" PorticoSupportDirectory Portico
+assert_info_value "$release_info" PorticoLaunchAtLoginAvailable YES
 if ! awk '/^[[:space:]]*ASSETCATALOG_COMPILER_APPICON_NAME[[:space:]]*=[[:space:]]*AppIcon$/ { found = 1 } END { exit !found }' <<<"$app_settings"; then
   echo "Portico must compile the AppIcon layered icon" >&2
   exit 1
