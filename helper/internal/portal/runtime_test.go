@@ -892,6 +892,167 @@ func TestRuntimeEmitsStartupEventAfterReleasingPortalGate(t *testing.T) {
 	}
 }
 
+func TestWatcherOnlineFollowsInitialStartupEvent(t *testing.T) {
+	watcher := newStartupBarrierWatcher(Notification{})
+	node := &fakeNode{
+		watcherOverride: watcher,
+		statusResults: []Status{
+			{BackendState: "Starting"},
+			{BackendState: "Running"},
+		},
+		statusEntered:   make(chan struct{}),
+		releaseStatus:   make(chan struct{}),
+		blockStatusCall: 1,
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 2)
+	result := make(chan []ReconcileEntry, 1)
+	go func() {
+		entries, _ := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event })
+		result <- entries
+	}()
+
+	waitForSignal(t, node.statusEntered, "startup status read")
+	watcher.releaseNext()
+	waitForSignal(t, watcher.nextReturned, "watcher notification")
+	close(node.releaseStatus)
+	entries := <-result
+	if len(entries) != 1 || entries[0].Outcome != OutcomeConverged {
+		t.Fatalf("Reconcile entries = %+v, want converged", entries)
+	}
+	first := <-events
+	if first.Status == nil || first.Status.State != StateConnecting {
+		t.Fatalf("first event = %+v, want initial connecting", first)
+	}
+	second := <-events
+	if second.Status == nil || second.Status.State != StateOnline {
+		t.Fatalf("second event = %+v, want watcher online", second)
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestRuntimeCloseFromStartupCallbackCancelsBarrierWatcher(t *testing.T) {
+	watcher := newStartupBarrierWatcher(Notification{})
+	node := &fakeNode{
+		watcherOverride: watcher,
+		statusResults: []Status{
+			{BackendState: "Starting"},
+			{BackendState: "Running"},
+		},
+		statusEntered:   make(chan struct{}),
+		releaseStatus:   make(chan struct{}),
+		blockStatusCall: 1,
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 2)
+	closed := make(chan error, 1)
+	result := make(chan []ReconcileEntry, 1)
+	go func() {
+		entries, _ := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) {
+			events <- event
+			if event.Status != nil && event.Status.State == StateConnecting {
+				closed <- runtime.Close(context.Background())
+			}
+		})
+		result <- entries
+	}()
+
+	waitForSignal(t, node.statusEntered, "startup status read")
+	watcher.releaseNext()
+	waitForSignal(t, watcher.nextReturned, "barrier watcher notification")
+	close(node.releaseStatus)
+	if err := <-closed; err != nil {
+		t.Fatalf("Close from startup callback: %v", err)
+	}
+	<-result
+	first := <-events
+	if first.Status == nil || first.Status.State != StateConnecting {
+		t.Fatalf("first event = %+v, want connecting", first)
+	}
+	select {
+	case stale := <-events:
+		t.Fatalf("stale watcher event after close = %+v", stale)
+	default:
+	}
+}
+
+func TestRuntimeCloseFromStartupCallbackDoesNotWaitForWatcherFailureDelivery(t *testing.T) {
+	watcher := &controlledErrorWatcher{release: make(chan struct{})}
+	node := &fakeNode{watcherOverride: watcher, status: Status{BackendState: "Starting"}}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 2)
+	closed := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		_, _ = runtime.Reconcile(context.Background(), []Config{config}, func(event Event) {
+			events <- event
+			if event.Status != nil && event.Status.State == StateConnecting {
+				close(watcher.release)
+				waitForPortalPhase(t, runtime.portal(testPortalID), portalFailed)
+				closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				closed <- runtime.Close(closeCtx)
+			}
+		})
+		close(done)
+	}()
+
+	if err := <-closed; err != nil {
+		t.Fatalf("Close from startup callback: %v", err)
+	}
+	waitForSignal(t, done, "startup callback reconciliation")
+	first := <-events
+	if first.Status == nil || first.Status.State != StateConnecting {
+		t.Fatalf("first event = %+v, want connecting", first)
+	}
+	select {
+	case stale := <-events:
+		t.Fatalf("stale watcher failure after close = %+v", stale)
+	default:
+	}
+}
+
+func TestPortalWatchWaitsForStartupDeliveryBarrier(t *testing.T) {
+	watcher := newStartupBarrierWatcher(Notification{})
+	barrier := make(chan struct{})
+	statusEntered := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	portal := &portalRuntime{
+		gate:            make(chan struct{}, 1),
+		phase:           portalRunning,
+		config:          &Config{ID: testPortalID},
+		node:            &fakeNode{status: Status{BackendState: "Running"}, statusEntered: statusEntered},
+		emit:            func(Event) {},
+		startupDelivery: barrier,
+	}
+	portal.gate <- struct{}{}
+	portal.watchDone.Add(1)
+	go portal.watch(ctx, watcher, barrier)
+
+	watcher.releaseNext()
+	waitForSignal(t, watcher.nextReturned, "watcher notification")
+	select {
+	case <-statusEntered:
+		t.Fatal("watcher mapped a notification before startup delivery")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(barrier)
+	waitForSignal(t, statusEntered, "watcher status after startup delivery")
+	cancel()
+	if err := watcher.Close(); err != nil {
+		t.Fatalf("watcher Close: %v", err)
+	}
+	done := make(chan struct{})
+	go func() { portal.watchDone.Wait(); close(done) }()
+	waitForSignal(t, done, "barrier watcher exit")
+}
+
 func TestPortalSuppressesStartupOnlineAfterFailureDelivered(t *testing.T) {
 	events := make(chan Event, 2)
 	portal := &portalRuntime{
@@ -1308,6 +1469,7 @@ func TestWatcherFailureDuringStartupReturnsStartFailedWithoutOnline(t *testing.T
 		statusEntered:   make(chan struct{}),
 		releaseStatus:   make(chan struct{}),
 	}
+	defer close(node.releaseStatus)
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
 	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	events := make(chan Event, 2)
@@ -1318,11 +1480,17 @@ func TestWatcherFailureDuringStartupReturnsStartFailedWithoutOnline(t *testing.T
 	}()
 	waitForSignal(t, node.statusEntered, "startup status read")
 	close(watcher.release)
-	waitForPortalPhase(t, runtime.portal(testPortalID), portalFailed)
-	close(node.releaseStatus)
-	entries := <-result
+	var entries []ReconcileEntry
+	select {
+	case entries = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("watcher failure did not cancel the initial status read")
+	}
 	if len(entries) != 1 || entries[0].Outcome != OutcomeStartFailed {
 		t.Fatalf("Reconcile entries = %+v, want start failure", entries)
+	}
+	if portal := runtime.portal(testPortalID); portal != nil {
+		t.Fatal("failed startup retained portal ownership")
 	}
 	event := <-events
 	if event.Status == nil || event.Status.State != StateError {
@@ -2318,6 +2486,7 @@ type fakeNode struct {
 	status                    Status
 	statusErr                 error
 	statusCalls               int
+	statusResults             []Status
 	blockStatusCall           int
 	statusEntered             chan struct{}
 	statusReturned            chan struct{}
@@ -2375,7 +2544,12 @@ func (n *fakeNode) Start() error {
 func (n *fakeNode) Status(ctx context.Context) (Status, error) {
 	n.mu.Lock()
 	n.statusCalls++
+	status := n.status
+	if n.statusCalls <= len(n.statusResults) {
+		status = n.statusResults[n.statusCalls-1]
+	}
 	block := n.blockStatusCall == 0 || n.statusCalls == n.blockStatusCall
+	statusErr := n.statusErr
 	n.mu.Unlock()
 	if n.statusEntered != nil && block {
 		close(n.statusEntered)
@@ -2384,7 +2558,7 @@ func (n *fakeNode) Status(ctx context.Context) (Status, error) {
 		}
 		if n.ignoreStatusCancellation {
 			<-n.releaseStatus
-			return n.status, n.statusErr
+			return status, statusErr
 		}
 		select {
 		case <-n.releaseStatus:
@@ -2392,7 +2566,7 @@ func (n *fakeNode) Status(ctx context.Context) (Status, error) {
 			return Status{}, ctx.Err()
 		}
 	}
-	return n.status, n.statusErr
+	return status, statusErr
 }
 func (n *fakeNode) Watch(ctx context.Context) (Watcher, error) {
 	n.watchContext = ctx
@@ -2581,6 +2755,51 @@ func (w *controlledErrorWatcher) Next() (Notification, error) {
 }
 
 func (*controlledErrorWatcher) Close() error { return nil }
+
+type startupBarrierWatcher struct {
+	mu           sync.Mutex
+	notification Notification
+	release      chan struct{}
+	nextReturned chan struct{}
+	closed       chan struct{}
+	releaseOnce  sync.Once
+	closeOnce    sync.Once
+	delivered    bool
+}
+
+func newStartupBarrierWatcher(notification Notification) *startupBarrierWatcher {
+	return &startupBarrierWatcher{
+		notification: notification,
+		release:      make(chan struct{}),
+		nextReturned: make(chan struct{}),
+		closed:       make(chan struct{}),
+	}
+}
+
+func (w *startupBarrierWatcher) Next() (Notification, error) {
+	select {
+	case <-w.release:
+		w.mu.Lock()
+		if !w.delivered {
+			w.delivered = true
+			w.mu.Unlock()
+			close(w.nextReturned)
+			return w.notification, nil
+		}
+		w.mu.Unlock()
+		<-w.closed
+		return Notification{}, errors.New("closed")
+	case <-w.closed:
+		return Notification{}, errors.New("closed")
+	}
+}
+
+func (w *startupBarrierWatcher) Close() error {
+	w.closeOnce.Do(func() { close(w.closed) })
+	return nil
+}
+
+func (w *startupBarrierWatcher) releaseNext() { w.releaseOnce.Do(func() { close(w.release) }) }
 
 type cancellationTrackingTransport struct {
 	transport  http.RoundTripper

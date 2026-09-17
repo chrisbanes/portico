@@ -251,6 +251,8 @@ type portalRuntime struct {
 	watcher               Watcher
 	cancel                context.CancelFunc
 	runContext            context.Context
+	startupDelivery       chan struct{}
+	startupFailureEvent   *Event
 	watchDone             sync.WaitGroup
 	emit                  func(Event)
 	proxyForDestination   func(Destination) (http.Handler, error)
@@ -655,13 +657,15 @@ func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emi
 		return r.startupFailure(errors.New("watch portal status"))
 	}
 	r.mu.Lock()
+	startupDelivery := make(chan struct{})
 	r.watcher = watcher
 	r.cancel = cancel
 	r.runContext = watchContext
+	r.startupDelivery = startupDelivery
 	r.mu.Unlock()
 	r.watchDone.Add(1)
-	go r.watch(watchContext, watcher)
-	status, err := node.Status(ctx)
+	go r.watch(watchContext, watcher, startupDelivery)
+	status, err := node.Status(watchContext)
 	if err != nil {
 		return r.startupFailure(errors.New("read portal status"))
 	}
@@ -673,7 +677,12 @@ func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emi
 	}
 	r.mu.Lock()
 	if r.phase == portalFailed {
+		failureEvent := r.startupFailureEvent
+		r.startupFailureEvent = nil
 		r.mu.Unlock()
+		if failureEvent != nil {
+			return []Event{*failureEvent}, errors.New("portal failed during startup")
+		}
 		return nil, errors.New("portal failed during startup")
 	}
 	r.phase = portalRunning
@@ -682,11 +691,17 @@ func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emi
 }
 
 func (r *portalRuntime) startupFailure(err error) ([]Event, error) {
-	event, recorded := r.recordFailure()
-	if !recorded {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if failureEvent := r.startupFailureEvent; failureEvent != nil {
+		r.startupFailureEvent = nil
+		return []Event{*failureEvent}, err
+	}
+	if r.phase != portalStarting && r.phase != portalRunning {
 		return nil, err
 	}
-	return []Event{event}, err
+	r.failLocked()
+	return []Event{r.errorEventLocked()}, err
 }
 
 func (r *portalRuntime) updateDestinationLocked(destination Destination) error {
@@ -854,7 +869,7 @@ func (r *portalRuntime) errorEventLocked() Event {
 	return Event{PortalID: r.config.ID, Status: &StatusEvent{State: StateError, Addresses: []string{}}}
 }
 
-func (r *portalRuntime) watch(ctx context.Context, watcher Watcher) {
+func (r *portalRuntime) watch(ctx context.Context, watcher Watcher, startupDelivery <-chan struct{}) {
 	defer r.watchDone.Done()
 	for {
 		notification, err := watcher.Next()
@@ -863,6 +878,13 @@ func (r *portalRuntime) watch(ctx context.Context, watcher Watcher) {
 				r.fail()
 			}
 			return
+		}
+		if startupDelivery != nil {
+			select {
+			case <-startupDelivery:
+			case <-ctx.Done():
+				return
+			}
 		}
 		var events []Event
 		if r.acquire(ctx) != nil {
@@ -959,10 +981,21 @@ func (r *portalRuntime) ensureProxyLocked(ctx context.Context) error {
 }
 
 func (r *portalRuntime) fail() {
-	event, recorded := r.recordFailure()
-	if recorded {
-		r.emitEvent(event)
+	r.mu.Lock()
+	if r.phase != portalStarting && r.phase != portalRunning {
+		r.mu.Unlock()
+		return
 	}
+	delayingStartupDelivery := r.startupDelivery != nil
+	r.failLocked()
+	event := r.errorEventLocked()
+	if delayingStartupDelivery {
+		r.startupFailureEvent = &event
+		r.mu.Unlock()
+		return
+	}
+	r.mu.Unlock()
+	r.emitEvent(event)
 }
 
 func (r *portalRuntime) recordFailure() (Event, bool) {
@@ -1005,12 +1038,28 @@ func (r *portalRuntime) emitStartupEvents(events []Event) {
 	r.mu.Lock()
 	running := r.phase == portalRunning
 	r.mu.Unlock()
-	if !running {
-		return
+	if running {
+		for _, event := range events {
+			r.emitEventLocked(event)
+		}
 	}
-	for _, event := range events {
-		r.emitEventLocked(event)
+	failureEvent, startupDelivery := r.finishStartupDelivery()
+	if failureEvent != nil {
+		r.emitEventLocked(*failureEvent)
 	}
+	if startupDelivery != nil {
+		close(startupDelivery)
+	}
+}
+
+func (r *portalRuntime) finishStartupDelivery() (*Event, chan struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	failureEvent := r.startupFailureEvent
+	r.startupFailureEvent = nil
+	startupDelivery := r.startupDelivery
+	r.startupDelivery = nil
+	return failureEvent, startupDelivery
 }
 
 func (r *portalRuntime) emitEventLocked(event Event) {

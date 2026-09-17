@@ -82,13 +82,13 @@ func serveOpenInput(t *testing.T, line string, frames int, serve func(io.Reader,
 	}
 }
 
-func TestServeReconcilesLiteralProtocolVersionFiveSnapshot(t *testing.T) {
+func TestServeReconcilesLiteralProtocolVersionSixSnapshot(t *testing.T) {
 	runtime := &fakeRuntime{reconcileEntries: []portal.ReconcileEntry{
 		{PortalID: "5ea74329-3144-4ba2-925f-138d14d61fcc", Outcome: portal.OutcomeConverged},
 		{PortalID: "9f55ca93-d7b3-4eab-a871-310ea576005a", Outcome: portal.OutcomeStartFailed},
 	}}
 	line :=
-		`{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[` +
+		`{"version":6,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[` +
 			`{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","destination":{"kind":"localApp","port":8787},"desiredState":"enabled"},` +
 			`{"portalId":"5EA74329-3144-4BA2-925F-138D14D61FCC","portalName":"atlas","destination":{"kind":"localApp","port":8788},"desiredState":"stopped"}` +
 			`]}}`
@@ -102,9 +102,9 @@ func TestServeReconcilesLiteralProtocolVersionFiveSnapshot(t *testing.T) {
 	if len(runtime.reconciled) != 2 || runtime.reconciled[0].ID != "9f55ca93-d7b3-4eab-a871-310ea576005a" || runtime.reconciled[1].DesiredState != portal.DesiredStateStopped {
 		t.Fatalf("reconciled = %+v, want normalized complete snapshot", runtime.reconciled)
 	}
-	const want = `{"version":5,"requestId":"reconcile-1","result":{"entries":[{"portalId":"5ea74329-3144-4ba2-925f-138d14d61fcc","outcome":"converged"},{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","outcome":"startFailed"}]}}` + "\n"
+	const want = `{"version":6,"requestId":"reconcile-1","result":{"entries":[{"portalId":"5ea74329-3144-4ba2-925f-138d14d61fcc","outcome":"converged"},{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","outcome":"startFailed"}]}}` + "\n"
 	if output != want {
-		t.Fatalf("output = %q, want exact protocol-v5 result %q", output, want)
+		t.Fatalf("output = %q, want exact protocol-v6 result %q", output, want)
 	}
 }
 
@@ -115,14 +115,14 @@ func TestDiscoverLocalAppsReturnsOnlyStableSanitizedCandidates(t *testing.T) {
 		{LocalAppPort: 9000, ProcessLabel: "hermes", SuggestedPortalName: "hermes"},
 		{LocalAppPort: 7000, ProcessLabel: "first", SuggestedPortalName: "first"},
 	}}
-	exitCode, output, diagnostics := serveOpenInput(t, `{"version":5,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
+	exitCode, output, diagnostics := serveOpenInput(t, `{"version":6,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithServices(input, output, diagnostics, Services{LocalAppDiscoverer: discoverer})
 	})
 
 	if exitCode != 0 || diagnostics != "" {
 		t.Fatalf("ServeWithServices = (exit %d, diagnostics %q), want success", exitCode, diagnostics)
 	}
-	const want = `{"version":5,"requestId":"discover-1","result":{"candidates":[{"localAppPort":7000,"processLabel":"first","suggestedPortalName":"first"},{"localAppPort":8000,"processLabel":"atlas","suggestedPortalName":"atlas"},{"localAppPort":9000,"processLabel":"hermes","suggestedPortalName":"hermes"}]}}` + "\n"
+	const want = `{"version":6,"requestId":"discover-1","result":{"candidates":[{"localAppPort":7000,"processLabel":"first","suggestedPortalName":"first"},{"localAppPort":8000,"processLabel":"atlas","suggestedPortalName":"atlas"},{"localAppPort":9000,"processLabel":"hermes","suggestedPortalName":"hermes"}]}}` + "\n"
 	if output != want {
 		t.Fatalf("output = %q, want %q", output, want)
 	}
@@ -133,13 +133,13 @@ func TestDiscoverLocalAppsCollapsesDisagreeingDuplicateOwners(t *testing.T) {
 		{LocalAppPort: 8787, ProcessLabel: "python3", SuggestedPortalName: "hermes"},
 		{LocalAppPort: 8787, ProcessLabel: "node", SuggestedPortalName: "atlas"},
 	}}
-	exitCode, output, _ := serveOpenInput(t, `{"version":5,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
+	exitCode, output, _ := serveOpenInput(t, `{"version":6,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithServices(input, output, diagnostics, Services{LocalAppDiscoverer: discoverer})
 	})
 	if exitCode != 0 {
 		t.Fatalf("ServeWithServices exit code = %d, want success", exitCode)
 	}
-	const want = `{"version":5,"requestId":"discover-1","result":{"candidates":[{"localAppPort":8787,"processLabel":"Port 8787"}]}}` + "\n"
+	const want = `{"version":6,"requestId":"discover-1","result":{"candidates":[{"localAppPort":8787,"processLabel":"Port 8787"}]}}` + "\n"
 	if output != want {
 		t.Fatalf("output = %q, want %q", output, want)
 	}
@@ -147,7 +147,7 @@ func TestDiscoverLocalAppsCollapsesDisagreeingDuplicateOwners(t *testing.T) {
 
 func TestDiscoverLocalAppsRequiresEmptyPayload(t *testing.T) {
 	const secret = "do-not-copy"
-	input := bytes.NewBufferString(`{"version":5,"requestId":"discover-1","command":"discoverLocalApps","payload":{"unexpected":"` + secret + `"}}` + "\n")
+	input := bytes.NewBufferString(`{"version":6,"requestId":"discover-1","command":"discoverLocalApps","payload":{"unexpected":"` + secret + `"}}` + "\n")
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
 
@@ -163,14 +163,14 @@ func TestDiscoverLocalAppsRequiresEmptyPayload(t *testing.T) {
 
 func TestDiscoverLocalAppsReturnsFixedSecretFreeFailure(t *testing.T) {
 	const secret = "token=do-not-copy"
-	exitCode, output, diagnostics := serveOpenInput(t, `{"version":5,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
+	exitCode, output, diagnostics := serveOpenInput(t, `{"version":6,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithServices(input, output, diagnostics, Services{LocalAppDiscoverer: fakeDiscoverer{err: errors.New(secret)}})
 	})
 
 	if exitCode != 0 || diagnostics != "" {
 		t.Fatalf("ServeWithServices = (exit %d, diagnostics %q), want correlated failure", exitCode, diagnostics)
 	}
-	const want = `{"version":5,"requestId":"discover-1","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
+	const want = `{"version":6,"requestId":"discover-1","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
 	if output != want {
 		t.Fatalf("output = %q, want %q", output, want)
 	}
@@ -192,10 +192,10 @@ func TestDiscoverLocalAppsCancelsBeforeRuntimeCloseAndShutdownAcknowledgement(t 
 		})
 	}()
 
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`+"\n")
 	<-discoverer.started
 	go func() {
-		_, _ = io.WriteString(input, `{"version":5,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
+		_, _ = io.WriteString(input, `{"version":6,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
 		_ = input.Close()
 	}()
 
@@ -203,7 +203,7 @@ func TestDiscoverLocalAppsCancelsBeforeRuntimeCloseAndShutdownAcknowledgement(t 
 		t.Fatalf("ServeWithServices exit code = %d, want success", exitCode)
 	}
 	waitForProtocolSignal(t, discoverer.canceled, "in-flight discovery cancellation")
-	const want = `{"version":5,"requestId":"shutdown-1","result":{"accepted":true}}` + "\n"
+	const want = `{"version":6,"requestId":"shutdown-1","result":{"accepted":true}}` + "\n"
 	if output.String() != want || diagnostics.Len() != 0 {
 		t.Fatalf("ServeWithServices = (output %q, diagnostics %q), want only post-close shutdown acknowledgement", output.String(), diagnostics.String())
 	}
@@ -215,7 +215,7 @@ func TestDiscoverLocalAppsFailsServeWhenResponseCannotBeWritten(t *testing.T) {
 	go func() {
 		done <- ServeWithServices(reader, errorWriter{}, &bytes.Buffer{}, Services{LocalAppDiscoverer: fakeDiscoverer{}})
 	}()
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`+"\n")
 	exitCode := <-done
 	_ = input.Close()
 
@@ -231,7 +231,7 @@ func TestWriterFailureCancelsActiveRuntimeOperation(t *testing.T) {
 	go func() {
 		done <- ServeWithRuntime(reader, errorWriter{}, &bytes.Buffer{}, runtime)
 	}()
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`+"\n")
 	waitForProtocolSignal(t, runtime.started, "runtime reconciliation")
 	waitForProtocolSignal(t, runtime.canceled, "runtime cancellation after writer failure")
 	if exitCode := <-done; exitCode == 0 {
@@ -248,11 +248,11 @@ func TestShutdownPreemptsBlockedOutputAndActiveOperation(t *testing.T) {
 	}
 	done := make(chan int, 1)
 	go func() { done <- ServeWithRuntime(reader, output, &bytes.Buffer{}, runtime) }()
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`+"\n")
 	waitForProtocolSignal(t, runtime.started, "runtime reconciliation")
 	waitForProtocolSignal(t, output.entered, "blocked protocol output")
 	go func() {
-		_, _ = io.WriteString(input, `{"version":5,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
+		_, _ = io.WriteString(input, `{"version":6,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
 	}()
 	waitForProtocolSignal(t, runtime.canceled, "active runtime cancellation")
 	waitForProtocolSignal(t, runtime.closeEntered, "runtime close before output writer release")
@@ -269,10 +269,10 @@ func TestShutdownWithPermanentlyBlockedWriterReturnsAfterCloseDeadline(t *testin
 	runtime := &shutdownPreemptionRuntime{started: make(chan struct{}), canceled: make(chan struct{}), closeEntered: make(chan struct{})}
 	done := make(chan int, 1)
 	go func() { done <- ServeWithRuntime(reader, output, &bytes.Buffer{}, runtime) }()
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`+"\n")
 	waitForProtocolSignal(t, output.entered, "blocked protocol output")
 	go func() {
-		_, _ = io.WriteString(input, `{"version":5,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
+		_, _ = io.WriteString(input, `{"version":6,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
 	}()
 	waitForProtocolSignal(t, runtime.closeEntered, "runtime close")
 	select {
@@ -325,7 +325,7 @@ func TestMessageWriterRejectsCanceledContextWithWritableQueue(t *testing.T) {
 
 func TestServeDrainsMoreThanOutputCapacityBeforeCorrelatedResponse(t *testing.T) {
 	runtime := &burstRuntime{}
-	line := `{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`
+	line := `{"version":6,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`
 	exitCode, output, diagnostics := serveOpenInput(t, line, 18, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithRuntime(input, output, diagnostics, runtime)
 	})
@@ -343,10 +343,10 @@ func TestShutdownStartsCloseWithoutWaitingForCancellationResistantActiveRequest(
 	runtime := &closeUnblocksRuntime{started: make(chan struct{}), closeStarted: make(chan struct{}), release: make(chan struct{})}
 	done := make(chan int, 1)
 	go func() { done <- ServeWithRuntime(reader, &bytes.Buffer{}, &bytes.Buffer{}, runtime) }()
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`+"\n")
 	waitForProtocolSignal(t, runtime.started, "active reconciliation")
 	go func() {
-		_, _ = io.WriteString(input, `{"version":5,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
+		_, _ = io.WriteString(input, `{"version":6,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
 	}()
 	waitForProtocolSignal(t, runtime.closeStarted, "runtime close")
 	close(runtime.release)
@@ -362,9 +362,9 @@ func TestEOFCancelsActiveAndDropsStagedRequestWithoutResponse(t *testing.T) {
 	output := newFrameBuffer(1)
 	done := make(chan int, 1)
 	go func() { done <- ServeWithRuntime(reader, output, &bytes.Buffer{}, runtime) }()
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`+"\n")
 	waitForProtocolSignal(t, runtime.started, "active reconciliation")
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"handshake-2","command":"handshake","payload":{}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"handshake-2","command":"handshake","payload":{}}`+"\n")
 	_ = input.Close()
 	waitForProtocolSignal(t, runtime.canceled, "active cancellation on EOF")
 	waitForProtocolSignal(t, runtime.closeStarted, "runtime close on EOF")
@@ -381,8 +381,8 @@ func TestShutdownAndEOFCancelActiveDeletionCommands(t *testing.T) {
 		name    string
 		request string
 	}{
-		{name: "cleanup", request: `{"version":5,"requestId":"cleanup-1","command":"cleanupRejectedPortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a"}}`},
-		{name: "remove", request: `{"version":5,"requestId":"remove-1","command":"removePortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a"}}`},
+		{name: "cleanup", request: `{"version":6,"requestId":"cleanup-1","command":"cleanupRejectedPortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a"}}`},
+		{name: "remove", request: `{"version":6,"requestId":"remove-1","command":"removePortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a"}}`},
 	}
 	for _, command := range commands {
 		for _, terminal := range []string{"shutdown", "eof"} {
@@ -395,7 +395,7 @@ func TestShutdownAndEOFCancelActiveDeletionCommands(t *testing.T) {
 				_, _ = io.WriteString(input, command.request+"\n")
 				waitForProtocolSignal(t, runtime.started, "active deletion command")
 				if terminal == "shutdown" {
-					_, _ = io.WriteString(input, `{"version":5,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
+					_, _ = io.WriteString(input, `{"version":6,"requestId":"shutdown-1","command":"shutdown","payload":{}}`+"\n")
 				} else {
 					_ = input.Close()
 				}
@@ -408,7 +408,7 @@ func TestShutdownAndEOFCancelActiveDeletionCommands(t *testing.T) {
 					t.Fatalf("ServeWithRuntime exit code = %d, want success", exitCode)
 				}
 				if terminal == "shutdown" {
-					const want = `{"version":5,"requestId":"shutdown-1","result":{"accepted":true}}` + "\n"
+					const want = `{"version":6,"requestId":"shutdown-1","result":{"accepted":true}}` + "\n"
 					if output.String() != want {
 						t.Fatalf("output = %q, want only shutdown acknowledgement", output.String())
 					}
@@ -432,9 +432,9 @@ func TestOrdinaryRequestsRunOneAtATimeInFIFOOrder(t *testing.T) {
 	done := make(chan int, 1)
 	go func() { done <- ServeWithRuntime(reader, output, &bytes.Buffer{}, runtime) }()
 
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"first","command":"authenticatePortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a"}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"first","command":"authenticatePortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a"}}`+"\n")
 	waitForProtocolSignal(t, runtime.firstStarted, "first ordinary request")
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"second","command":"authenticatePortal","payload":{"portalId":"5ea74329-3144-4ba2-925f-138d14d61fcc"}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"second","command":"authenticatePortal","payload":{"portalId":"5ea74329-3144-4ba2-925f-138d14d61fcc"}}`+"\n")
 	select {
 	case <-runtime.secondStarted:
 		t.Fatal("staged ordinary request started while the first was active")
@@ -453,8 +453,8 @@ func TestOrdinaryRequestsRunOneAtATimeInFIFOOrder(t *testing.T) {
 	if exitCode := <-done; exitCode != 0 {
 		t.Fatalf("ServeWithRuntime exit code = %d, want success", exitCode)
 	}
-	const want = "{\"version\":5,\"requestId\":\"first\",\"result\":{\"accepted\":true}}\n" +
-		"{\"version\":5,\"requestId\":\"second\",\"result\":{\"accepted\":true}}\n"
+	const want = "{\"version\":6,\"requestId\":\"first\",\"result\":{\"accepted\":true}}\n" +
+		"{\"version\":6,\"requestId\":\"second\",\"result\":{\"accepted\":true}}\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want FIFO responses %q", output.String(), want)
 	}
@@ -471,9 +471,9 @@ func TestThirdOrdinaryFrameIsNotDecodedBeforeAnAdmissionIsAvailable(t *testing.T
 	done := make(chan int, 1)
 	go func() { done <- ServeWithRuntime(reader, io.Discard, &bytes.Buffer{}, runtime) }()
 
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"first","command":"authenticatePortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a"}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"first","command":"authenticatePortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a"}}`+"\n")
 	waitForProtocolSignal(t, runtime.firstStarted, "first ordinary request")
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"second","command":"authenticatePortal","payload":{"portalId":"5ea74329-3144-4ba2-925f-138d14d61fcc"}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"second","command":"authenticatePortal","payload":{"portalId":"5ea74329-3144-4ba2-925f-138d14d61fcc"}}`+"\n")
 	thirdWritten := make(chan struct{})
 	go func() {
 		_, _ = io.WriteString(input, `not-json`+"\n")
@@ -496,8 +496,8 @@ func TestThirdOrdinaryFrameIsNotDecodedBeforeAnAdmissionIsAvailable(t *testing.T
 func TestScannerErrorCancelsActiveAndDropsStagedRequestWithoutResponse(t *testing.T) {
 	runtime := &eofRuntime{started: make(chan struct{}), canceled: make(chan struct{}), closeStarted: make(chan struct{})}
 	input := &gatedScannerErrorReader{
-		first:       []byte(`{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}` + "\n"),
-		tail:        []byte(`{"version":5,"requestId":"handshake-2","command":"handshake","payload":{}}` + "\n"),
+		first:       []byte(`{"version":6,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}` + "\n"),
+		tail:        []byte(`{"version":6,"requestId":"handshake-2","command":"handshake","payload":{}}` + "\n"),
 		releaseTail: make(chan struct{}),
 	}
 	output := newFrameBuffer(1)
@@ -675,10 +675,10 @@ type fakeDiscoverer struct {
 }
 
 func TestDiscoveryDeadlineReturnsFailureWithoutStoppingHelper(t *testing.T) {
-	exitCode, output, diagnostics := serveOpenInput(t, `{"version":5,"requestId":"discover-budget","command":"discoverLocalApps","payload":{}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
+	exitCode, output, diagnostics := serveOpenInput(t, `{"version":6,"requestId":"discover-budget","command":"discoverLocalApps","payload":{}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithServices(input, output, diagnostics, Services{LocalAppDiscoverer: deadlineDiscoverer{t: t}})
 	})
-	const want = `{"version":5,"requestId":"discover-budget","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
+	const want = `{"version":6,"requestId":"discover-budget","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
 	if exitCode != 0 || diagnostics != "" || output != want {
 		t.Fatalf("ServeWithServices = (%d, %q, %q), want correlated discovery failure only", exitCode, output, diagnostics)
 	}
@@ -691,10 +691,10 @@ func TestOversizedDiscoveryReturnsFailureWithoutSendingPartialCandidates(t *test
 			LocalAppPort: uint16(i + 1), ProcessLabel: strings.Repeat("a", 64),
 		}
 	}
-	exitCode, output, diagnostics := serveOpenInput(t, `{"version":5,"requestId":"discover-large","command":"discoverLocalApps","payload":{}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
+	exitCode, output, diagnostics := serveOpenInput(t, `{"version":6,"requestId":"discover-large","command":"discoverLocalApps","payload":{}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithServices(input, output, diagnostics, Services{LocalAppDiscoverer: fakeDiscoverer{candidates: candidates}})
 	})
-	const want = `{"version":5,"requestId":"discover-large","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
+	const want = `{"version":6,"requestId":"discover-large","error":{"code":"discoveryFailure","message":"local app discovery failed"}}` + "\n"
 	if exitCode != 0 || diagnostics != "" || output != want {
 		t.Fatalf("ServeWithServices = (exit %d, output %d bytes, diagnostics %q), want only the correlated sanitized failure", exitCode, len(output), diagnostics)
 	}
@@ -823,7 +823,7 @@ func (r *shutdownOrderingRuntime) Close(context.Context) error {
 }
 
 func TestServeCorrelatesHandshakeResponse(t *testing.T) {
-	exitCode, output, diagnostics := serveOpenInput(t, `{"version":5,"requestId":"request-1","command":"handshake","payload":{}}`, 1, Serve)
+	exitCode, output, diagnostics := serveOpenInput(t, `{"version":6,"requestId":"request-1","command":"handshake","payload":{}}`, 1, Serve)
 
 	if exitCode != 0 {
 		t.Fatalf("Serve() exit code = %d, want 0", exitCode)
@@ -836,8 +836,8 @@ func TestServeCorrelatesHandshakeResponse(t *testing.T) {
 	if err := json.NewDecoder(strings.NewReader(output)).Decode(&response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response.Version != 5 || response.RequestID != "request-1" || string(response.Result) != `{"protocolVersion":5}` {
-		t.Fatalf("response = %+v, want correlated version-five handshake", response)
+	if response.Version != 6 || response.RequestID != "request-1" || string(response.Result) != `{"protocolVersion":6}` {
+		t.Fatalf("response = %+v, want correlated version-six handshake", response)
 	}
 	if diagnostics != "" {
 		t.Fatalf("diagnostics = %q, want empty", diagnostics)
@@ -848,7 +848,7 @@ func TestServeReconciliationSerializesStructuredStatusEvent(t *testing.T) {
 	runtime := &fakeRuntime{emitStatus: true, reconcileEntries: []portal.ReconcileEntry{{
 		PortalID: "9f55ca93-d7b3-4eab-a871-310ea576005a", Outcome: portal.OutcomeConverged,
 	}}}
-	line := `{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","destination":{"kind":"localApp","port":8787},"desiredState":"enabled"}]}}`
+	line := `{"version":6,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","destination":{"kind":"localApp","port":8787},"desiredState":"enabled"}]}}`
 	exitCode, output, diagnostics := serveOpenInput(t, strings.TrimSpace(line), 2, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithRuntime(input, output, diagnostics, runtime)
 	})
@@ -871,7 +871,7 @@ func TestServeReconciliationSerializesStructuredStatusEvent(t *testing.T) {
 	if payload["tailnetName"] != "opaque-identity-do-not-display" || payload["magicDNSSuffix"] != "example.ts.net" {
 		t.Fatalf("payload = %+v, want exact identity and separate display suffix", payload)
 	}
-	const wantResponse = `{"version":5,"requestId":"reconcile-1","result":{"entries":[{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","outcome":"converged"}]}}`
+	const wantResponse = `{"version":6,"requestId":"reconcile-1","result":{"entries":[{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","outcome":"converged"}]}}`
 	if lines[1] != wantResponse {
 		t.Fatalf("response = %q, want %q", lines[1], wantResponse)
 	}
@@ -886,13 +886,13 @@ func TestServeAuthenticatesCorrelatedPortalAndEmitsTransientURL(t *testing.T) {
 	var diagnostics bytes.Buffer
 	done := make(chan int, 1)
 	go func() { done <- ServeWithRuntime(reader, output, &diagnostics, runtime) }()
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","destination":{"kind":"localApp","port":8787},"desiredState":"enabled"}]}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","destination":{"kind":"localApp","port":8787},"desiredState":"enabled"}]}}`+"\n")
 	select {
 	case <-output.written:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for reconcile response")
 	}
-	_, _ = io.WriteString(input, `{"version":5,"requestId":"auth-1","command":"authenticatePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}`+"\n")
+	_, _ = io.WriteString(input, `{"version":6,"requestId":"auth-1","command":"authenticatePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}`+"\n")
 	select {
 	case <-output.reached:
 	case <-time.After(time.Second):
@@ -914,29 +914,29 @@ func TestServeAuthenticatesCorrelatedPortalAndEmitsTransientURL(t *testing.T) {
 
 func TestServeCleansUpOnlyCorrelatedRejectedPortal(t *testing.T) {
 	runtime := &fakeRuntime{}
-	exitCode, output, diagnostics := serveOpenInput(t, `{"version":5,"requestId":"cleanup-1","command":"cleanupRejectedPortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
+	exitCode, output, diagnostics := serveOpenInput(t, `{"version":6,"requestId":"cleanup-1","command":"cleanupRejectedPortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithRuntime(input, output, diagnostics, runtime)
 	})
 
 	if exitCode != 0 || diagnostics != "" || runtime.cleaned != "9f55ca93-d7b3-4eab-a871-310ea576005a" {
 		t.Fatalf("ServeWithRuntime = (exit %d, cleaned %q, diagnostics %q), want correlated cleanup", exitCode, runtime.cleaned, diagnostics)
 	}
-	const want = `{"version":5,"requestId":"cleanup-1","result":{"accepted":true}}` + "\n"
+	const want = `{"version":6,"requestId":"cleanup-1","result":{"accepted":true}}` + "\n"
 	if output != want {
 		t.Fatalf("output = %q, want %q", output, want)
 	}
 }
 
-func TestServeRemovesOnlyCorrelatedPortalWithProtocolVersionFive(t *testing.T) {
+func TestServeRemovesOnlyCorrelatedPortalWithProtocolVersionSix(t *testing.T) {
 	runtime := &fakeRuntime{}
-	exitCode, output, diagnostics := serveOpenInput(t, `{"version":5,"requestId":"remove-1","command":"removePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
+	exitCode, output, diagnostics := serveOpenInput(t, `{"version":6,"requestId":"remove-1","command":"removePortal","payload":{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A"}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithRuntime(input, output, diagnostics, runtime)
 	})
 
 	if exitCode != 0 || diagnostics != "" || runtime.removed != "9f55ca93-d7b3-4eab-a871-310ea576005a" {
 		t.Fatalf("ServeWithRuntime = (exit %d, removed %q, diagnostics %q), want correlated removal", exitCode, runtime.removed, diagnostics)
 	}
-	const want = `{"version":5,"requestId":"remove-1","result":{"accepted":true}}` + "\n"
+	const want = `{"version":6,"requestId":"remove-1","result":{"accepted":true}}` + "\n"
 	if output != want {
 		t.Fatalf("output = %q, want %q", output, want)
 	}
@@ -952,7 +952,7 @@ func TestServeRejectsUntrustedRemovalPayloadWithoutRuntimeCall(t *testing.T) {
 	for name, payload := range fixtures {
 		t.Run(name, func(t *testing.T) {
 			runtime := &fakeRuntime{}
-			exitCode, output, _ := serveOpenInput(t, `{"version":5,"requestId":"remove-1","command":"removePortal","payload":`+payload+`}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
+			exitCode, output, _ := serveOpenInput(t, `{"version":6,"requestId":"remove-1","command":"removePortal","payload":`+payload+`}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 				return ServeWithRuntime(input, output, diagnostics, runtime)
 			})
 			if exitCode != 0 {
@@ -968,13 +968,13 @@ func TestServeRejectsUntrustedRemovalPayloadWithoutRuntimeCall(t *testing.T) {
 func TestServeMapsRemovalFailureToFixedRuntimeError(t *testing.T) {
 	const secret = "path=/private/secret"
 	runtime := &fakeRuntime{removeErr: errors.New(secret)}
-	exitCode, output, _ := serveOpenInput(t, `{"version":5,"requestId":"remove-1","command":"removePortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a"}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
+	exitCode, output, _ := serveOpenInput(t, `{"version":6,"requestId":"remove-1","command":"removePortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a"}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithRuntime(input, output, diagnostics, runtime)
 	})
 	if exitCode != 0 {
 		t.Fatalf("ServeWithRuntime exit code = %d, want correlated failure", exitCode)
 	}
-	const want = `{"version":5,"requestId":"remove-1","error":{"code":"runtimeFailure","message":"portal runtime failed"}}` + "\n"
+	const want = `{"version":6,"requestId":"remove-1","error":{"code":"runtimeFailure","message":"portal runtime failed"}}` + "\n"
 	if output != want || strings.Contains(output, secret) {
 		t.Fatalf("output = %q, want fixed secret-free runtime error", output)
 	}
@@ -994,7 +994,7 @@ func TestServeRejectsInvalidReconciliationWithoutRuntimeMutationOrLeaks(t *testi
 	for name, payload := range fixtures {
 		t.Run(name, func(t *testing.T) {
 			runtime := &fakeRuntime{}
-			exitCode, output, diagnostics := serveOpenInput(t, `{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":`+payload+`}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
+			exitCode, output, diagnostics := serveOpenInput(t, `{"version":6,"requestId":"reconcile-1","command":"reconcilePortals","payload":`+payload+`}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 				return ServeWithRuntime(input, output, diagnostics, runtime)
 			})
 
@@ -1008,14 +1008,14 @@ func TestServeRejectsInvalidReconciliationWithoutRuntimeMutationOrLeaks(t *testi
 	}
 }
 
-func TestServeRejectsImperativeStartPortalInProtocolVersionFive(t *testing.T) {
-	exitCode, output, _ := serveOpenInput(t, `{"version":5,"requestId":"start-1","command":"startPortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","portalName":"hermes","destination":{"kind":"localApp","port":8787}}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
+func TestServeRejectsImperativeStartPortalInProtocolVersionSix(t *testing.T) {
+	exitCode, output, _ := serveOpenInput(t, `{"version":6,"requestId":"start-1","command":"startPortal","payload":{"portalId":"9f55ca93-d7b3-4eab-a871-310ea576005a","portalName":"hermes","destination":{"kind":"localApp","port":8787}}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithRuntime(input, output, diagnostics, &fakeRuntime{})
 	})
 	if exitCode != 0 {
 		t.Fatalf("ServeWithRuntime exit code = %d", exitCode)
 	}
-	const want = `{"version":5,"requestId":"start-1","error":{"code":"unknownCommand","message":"unsupported command"}}` + "\n"
+	const want = `{"version":6,"requestId":"start-1","error":{"code":"unknownCommand","message":"unsupported command"}}` + "\n"
 	if output != want {
 		t.Fatalf("output = %q, want protocol-v1 lifecycle rejection", output)
 	}
@@ -1023,7 +1023,7 @@ func TestServeRejectsImperativeStartPortalInProtocolVersionFive(t *testing.T) {
 
 func TestServeClosesRuntimeOnShutdown(t *testing.T) {
 	runtime := &fakeRuntime{}
-	input := bytes.NewBufferString(`{"version":5,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n")
+	input := bytes.NewBufferString(`{"version":6,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n")
 	var output bytes.Buffer
 
 	if exitCode := ServeWithRuntime(input, &output, &bytes.Buffer{}, runtime); exitCode != 0 || !runtime.closed {
@@ -1033,7 +1033,7 @@ func TestServeClosesRuntimeOnShutdown(t *testing.T) {
 
 func TestServeAcknowledgesShutdownAfterRuntimeCloseCompletes(t *testing.T) {
 	runtime := &fakeRuntime{closeEntered: make(chan struct{}), releaseClose: make(chan struct{})}
-	input := bytes.NewBufferString(`{"version":5,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n")
+	input := bytes.NewBufferString(`{"version":6,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n")
 	var output bytes.Buffer
 	done := make(chan int, 1)
 	go func() { done <- ServeWithRuntime(input, &output, &bytes.Buffer{}, runtime) }()
@@ -1111,8 +1111,8 @@ func (r *fakeRuntime) Close(context.Context) error {
 
 func TestServeAcknowledgesShutdownAndStops(t *testing.T) {
 	input := bytes.NewBufferString(
-		`{"version":5,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n" +
-			`{"version":5,"requestId":"ignored","command":"handshake","payload":{}}` + "\n",
+		`{"version":6,"requestId":"shutdown-1","command":"shutdown","payload":{}}` + "\n" +
+			`{"version":6,"requestId":"ignored","command":"handshake","payload":{}}` + "\n",
 	)
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
@@ -1122,7 +1122,7 @@ func TestServeAcknowledgesShutdownAndStops(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("Serve() exit code = %d, want 0", exitCode)
 	}
-	const want = "{\"version\":5,\"requestId\":\"shutdown-1\",\"result\":{\"accepted\":true}}\n"
+	const want = "{\"version\":6,\"requestId\":\"shutdown-1\",\"result\":{\"accepted\":true}}\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want %q", output.String(), want)
 	}
@@ -1132,12 +1132,12 @@ func TestServeAcknowledgesShutdownAndStops(t *testing.T) {
 }
 
 func TestServeReturnsCorrelatedErrorForUnknownCommand(t *testing.T) {
-	exitCode, output, diagnostics := serveOpenInput(t, `{"version":5,"requestId":"unknown-1","command":"surprise","payload":{}}`, 1, Serve)
+	exitCode, output, diagnostics := serveOpenInput(t, `{"version":6,"requestId":"unknown-1","command":"surprise","payload":{}}`, 1, Serve)
 
 	if exitCode != 0 {
 		t.Fatalf("Serve() exit code = %d, want 0", exitCode)
 	}
-	const want = "{\"version\":5,\"requestId\":\"unknown-1\",\"error\":{\"code\":\"unknownCommand\",\"message\":\"unsupported command\"}}\n"
+	const want = "{\"version\":6,\"requestId\":\"unknown-1\",\"error\":{\"code\":\"unknownCommand\",\"message\":\"unsupported command\"}}\n"
 	if output != want {
 		t.Fatalf("output = %q, want %q", output, want)
 	}
@@ -1146,24 +1146,30 @@ func TestServeReturnsCorrelatedErrorForUnknownCommand(t *testing.T) {
 	}
 }
 
-func TestServeRejectsVersionFourPeer(t *testing.T) {
-	exitCode, output, diagnostics := serveOpenInput(t, `{"version":4,"requestId":"version-4","command":"handshake","payload":{}}`, 1, Serve)
+func TestServeRejectsOlderVersionPeers(t *testing.T) {
+	for _, version := range []int{4, 5} {
+		t.Run(fmt.Sprintf("version-%d", version), func(t *testing.T) {
+			requestID := fmt.Sprintf("version-%d", version)
+			input := fmt.Sprintf(`{"version":%d,"requestId":"%s","command":"handshake","payload":{}}`, version, requestID)
+			exitCode, output, diagnostics := serveOpenInput(t, input, 1, Serve)
 
-	if exitCode != 0 {
-		t.Fatalf("Serve() exit code = %d, want 0", exitCode)
-	}
-	const want = "{\"version\":5,\"requestId\":\"version-4\",\"error\":{\"code\":\"unsupportedVersion\",\"message\":\"unsupported protocol version\"}}\n"
-	if output != want {
-		t.Fatalf("output = %q, want %q", output, want)
-	}
-	if diagnostics != "" {
-		t.Fatalf("diagnostics = %q, want empty", diagnostics)
+			if exitCode != 0 {
+				t.Fatalf("Serve() exit code = %d, want 0", exitCode)
+			}
+			want := fmt.Sprintf("{\"version\":6,\"requestId\":\"%s\",\"error\":{\"code\":\"unsupportedVersion\",\"message\":\"unsupported protocol version\"}}\n", requestID)
+			if output != want {
+				t.Fatalf("output = %q, want %q", output, want)
+			}
+			if diagnostics != "" {
+				t.Fatalf("diagnostics = %q, want empty", diagnostics)
+			}
+		})
 	}
 }
 
 func TestServeRejectsMalformedInputWithoutLeakingIt(t *testing.T) {
 	const secret = "token=do-not-copy"
-	input := bytes.NewBufferString(`{"version":5,"requestId":"` + secret + `"` + "\n")
+	input := bytes.NewBufferString(`{"version":6,"requestId":"` + secret + `"` + "\n")
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
 
@@ -1185,7 +1191,7 @@ func TestServeRejectsMalformedInputWithoutLeakingIt(t *testing.T) {
 }
 
 func TestServeRejectsTrailingContentAfterRequest(t *testing.T) {
-	input := bytes.NewBufferString(`{"version":5,"requestId":"request-1","command":"handshake","payload":{}} trailing` + "\n")
+	input := bytes.NewBufferString(`{"version":6,"requestId":"request-1","command":"handshake","payload":{}} trailing` + "\n")
 	var output bytes.Buffer
 	var diagnostics bytes.Buffer
 
@@ -1199,12 +1205,12 @@ func TestServeRejectsTrailingContentAfterRequest(t *testing.T) {
 func TestServeRejectsStructurallyInvalidRequests(t *testing.T) {
 	fixtures := map[string]string{
 		"missing version":    `{"requestId":"request-1","command":"handshake","payload":{}}`,
-		"missing request ID": `{"version":5,"command":"handshake","payload":{}}`,
-		"missing command":    `{"version":5,"requestId":"request-1","payload":{}}`,
-		"missing payload":    `{"version":5,"requestId":"request-1","command":"handshake"}`,
-		"non-object payload": `{"version":5,"requestId":"request-1","command":"handshake","payload":[]}`,
-		"non-empty payload":  `{"version":5,"requestId":"request-1","command":"handshake","payload":{"unexpected":true}}`,
-		"unknown field":      `{"version":5,"requestId":"request-1","command":"handshake","payload":{},"extra":true}`,
+		"missing request ID": `{"version":6,"command":"handshake","payload":{}}`,
+		"missing command":    `{"version":6,"requestId":"request-1","payload":{}}`,
+		"missing payload":    `{"version":6,"requestId":"request-1","command":"handshake"}`,
+		"non-object payload": `{"version":6,"requestId":"request-1","command":"handshake","payload":[]}`,
+		"non-empty payload":  `{"version":6,"requestId":"request-1","command":"handshake","payload":{"unexpected":true}}`,
+		"unknown field":      `{"version":6,"requestId":"request-1","command":"handshake","payload":{},"extra":true}`,
 	}
 
 	for name, fixture := range fixtures {

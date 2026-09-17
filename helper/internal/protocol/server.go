@@ -17,7 +17,7 @@ import (
 	"github.com/chrisbanes/portico/helper/internal/portal"
 )
 
-const Version = 5
+const Version = 6
 
 const invalidRequestDiagnostic = "portico-helper: invalid request\n"
 

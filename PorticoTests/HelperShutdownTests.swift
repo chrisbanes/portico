@@ -15,7 +15,7 @@ final class HelperShutdownTests: XCTestCase {
             shutdownGraceInterval: 1
         )
         supervisor.start(loggingPreference: .enabled)
-        launcher.receive(line: #"{"version":5,"requestId":"handshake-1","result":{"protocolVersion":5}}"#)
+        launcher.receive(line: #"{"version":6,"requestId":"handshake-1","result":{"protocolVersion":6}}"#)
         var completionCount = 0
 
         supervisor.shutdown { completionCount += 1 }
@@ -28,7 +28,7 @@ final class HelperShutdownTests: XCTestCase {
         XCTAssertEqual(request.requestId, "shutdown-1")
         XCTAssertEqual(request.command, .shutdown)
 
-        launcher.receive(line: #"{"version":5,"requestId":"shutdown-1","result":{"accepted":true}}"#)
+        launcher.receive(line: #"{"version":6,"requestId":"shutdown-1","result":{"accepted":true}}"#)
         XCTAssertEqual(completionCount, 0)
         launcher.exit(status: 0)
 
@@ -48,7 +48,7 @@ final class HelperShutdownTests: XCTestCase {
             handshakeTimeout: 60
         )
         supervisor.start(loggingPreference: .enabled)
-        launcher.receive(line: #"{"version":5,"requestId":"handshake-1","result":{"protocolVersion":5}}"#)
+        launcher.receive(line: #"{"version":6,"requestId":"handshake-1","result":{"protocolVersion":6}}"#)
         var completionCount = 0
 
         supervisor.shutdown { completionCount += 1 }
@@ -78,7 +78,7 @@ final class HelperShutdownTests: XCTestCase {
             handshakeTimeout: 60
         )
         supervisor.start(loggingPreference: .enabled)
-        launcher.receive(line: #"{"version":5,"requestId":"handshake-1","result":{"protocolVersion":5}}"#)
+        launcher.receive(line: #"{"version":6,"requestId":"handshake-1","result":{"protocolVersion":6}}"#)
         var completionCount = 0
 
         supervisor.shutdown { completionCount += 1 }
@@ -149,7 +149,7 @@ final class HelperShutdownTests: XCTestCase {
             shutdownGraceInterval: 1
         )
         supervisor.start(loggingPreference: .enabled)
-        launcher.receive(line: #"{"version":5,"requestId":"handshake-1","result":{"protocolVersion":5}}"#)
+        launcher.receive(line: #"{"version":6,"requestId":"handshake-1","result":{"protocolVersion":6}}"#)
         var completionCount = 0
 
         supervisor.shutdown { completionCount += 1 }
@@ -175,7 +175,7 @@ final class HelperShutdownTests: XCTestCase {
             handshakeTimeout: 60
         )
         supervisor.start(loggingPreference: .enabled)
-        launcher.receive(line: #"{"version":5,"requestId":"handshake-1","result":{"protocolVersion":5}}"#)
+        launcher.receive(line: #"{"version":6,"requestId":"handshake-1","result":{"protocolVersion":6}}"#)
         var results: [Result<[LocalAppCandidatePayload], Error>] = []
 
         supervisor.discoverLocalApps { results.append($0) }
@@ -198,7 +198,7 @@ final class HelperShutdownTests: XCTestCase {
             handshakeTimeout: 60
         )
         supervisor.start(loggingPreference: .enabled)
-        launcher.receive(line: #"{"version":5,"requestId":"handshake-1","result":{"protocolVersion":5}}"#)
+        launcher.receive(line: #"{"version":6,"requestId":"handshake-1","result":{"protocolVersion":6}}"#)
         supervisor.restart(loggingPreference: .disabled)
         var completionCount = 0
 
