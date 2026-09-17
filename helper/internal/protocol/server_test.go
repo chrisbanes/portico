@@ -310,6 +310,19 @@ func TestMessageWriterDrainsMoreThanCapacityInFIFOOrder(t *testing.T) {
 	}
 }
 
+func TestMessageWriterRejectsCanceledContextWithWritableQueue(t *testing.T) {
+	for attempt := 0; attempt < 64; attempt++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		writer := newMessageWriter(context.Background(), io.Discard, func() {})
+		if err := writer.writeContext(ctx, response{Version: Version, RequestID: "canceled", Result: acceptedResult{Accepted: true}}); !errors.Is(err, context.Canceled) {
+			writer.stopContext(context.Background())
+			t.Fatalf("attempt %d writeContext = %v, want context cancellation before queue admission", attempt, err)
+		}
+		writer.stopContext(context.Background())
+	}
+}
+
 func TestServeDrainsMoreThanOutputCapacityBeforeCorrelatedResponse(t *testing.T) {
 	runtime := &burstRuntime{}
 	line := `{"version":5,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[]}}`

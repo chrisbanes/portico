@@ -142,6 +142,14 @@ func (w *messageWriter) writeContext(ctx context.Context, value any) error {
 	select {
 	case <-w.failed:
 		return errors.New("write protocol output")
+	default:
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-w.failed:
+		return errors.New("write protocol output")
 	case <-ctx.Done():
 		return ctx.Err()
 	case w.queue <- outputFrame{value: value}:
