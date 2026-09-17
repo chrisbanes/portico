@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"log"
@@ -11,7 +12,19 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
+)
+
+const (
+	proxyReadHeaderTimeout      = 10 * time.Second
+	proxyIdleTimeout            = 60 * time.Second
+	remoteSetupTimeout          = 30 * time.Second
+	remoteTLSHandshakeTimeout   = 10 * time.Second
+	remoteResponseHeaderTimeout = 30 * time.Second
+	remoteIdleConnTimeout       = 90 * time.Second
+	remoteExpectContinueTimeout = time.Second
 )
 
 func newLoopbackProxy(port int) (http.Handler, error) {
@@ -47,7 +60,11 @@ func newDestinationProxy(destination Destination) (http.Handler, error) {
 		return newLoopbackProxy(int(destination.Port))
 	}
 	target := &url.URL{Scheme: destination.Scheme, Host: net.JoinHostPort(destination.Host, strconv.Itoa(int(destination.Port)))}
-	transport := &http.Transport{DialContext: safeRemoteDialer(net.DefaultResolver.LookupNetIP)}
+	dialer := &net.Dialer{}
+	transport := newRemoteAppTransport(remoteTransportDependencies{
+		resolve: net.DefaultResolver.LookupNetIP,
+		dial:    dialer.DialContext,
+	})
 	return newRemoteProxy(target, transport), nil
 }
 
@@ -58,6 +75,11 @@ func newRemoteProxy(target *url.URL, transport http.RoundTripper) http.Handler {
 			request.SetURL(target)
 			request.SetXForwarded()
 			request.Out.Header.Set("X-Forwarded-Proto", "https")
+			request.Out = request.Out.WithContext(context.WithValue(
+				request.Out.Context(),
+				remoteDialRequestContextKey{},
+				request.In.Context(),
+			))
 		},
 		FlushInterval: -1,
 		ErrorLog:      log.New(io.Discard, "", 0),
@@ -83,8 +105,67 @@ func (p *remoteProxy) CloseIdleConnections() {
 	}
 }
 
+type remoteDialRequestContextKey struct{}
+
+type remoteTransportDependencies struct {
+	resolve               func(context.Context, string, string) ([]netip.Addr, error)
+	dial                  func(context.Context, string, string) (net.Conn, error)
+	setupTimeout          time.Duration
+	tlsHandshakeTimeout   time.Duration
+	responseHeaderTimeout time.Duration
+}
+
+type remoteAppTransport struct {
+	ordinary *http.Transport
+	upgrade  *http.Transport
+}
+
+func newRemoteAppTransport(dependencies remoteTransportDependencies) *remoteAppTransport {
+	dependencies = normalizedRemoteTransportDependencies(dependencies)
+	return &remoteAppTransport{
+		ordinary: newRemoteHTTPTransport(dependencies, false),
+		upgrade:  newRemoteHTTPTransport(dependencies, true),
+	}
+}
+
+func newRemoteHTTPTransport(dependencies remoteTransportDependencies, onlyHTTP1 bool) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = safeRemoteDialerWithDependencies(dependencies)
+	transport.DialTLSContext = safeRemoteTLSDialer(transport, dependencies)
+	transport.TLSHandshakeTimeout = remoteTLSHandshakeTimeout
+	transport.ResponseHeaderTimeout = dependencies.responseHeaderTimeout
+	transport.IdleConnTimeout = remoteIdleConnTimeout
+	transport.ExpectContinueTimeout = remoteExpectContinueTimeout
+	if onlyHTTP1 {
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		transport.Protocols = protocols
+	}
+	return transport
+}
+
+func (t *remoteAppTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if isUpgradeRequest(request) {
+		return t.upgrade.RoundTrip(request)
+	}
+	return t.ordinary.RoundTrip(request)
+}
+
+func (t *remoteAppTransport) CloseIdleConnections() {
+	t.ordinary.CloseIdleConnections()
+	t.upgrade.CloseIdleConnections()
+}
+
 func safeRemoteDialer(resolve func(context.Context, string, string) ([]netip.Addr, error)) func(context.Context, string, string) (net.Conn, error) {
+	return safeRemoteDialerWithDependencies(remoteTransportDependencies{resolve: resolve})
+}
+
+func safeRemoteDialerWithDependencies(dependencies remoteTransportDependencies) func(context.Context, string, string) (net.Conn, error) {
+	dependencies = normalizedRemoteTransportDependencies(dependencies)
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		setupContext, stopSetup, setupError := newRemoteSetupContext(ctx, dependencies.setupTimeout)
+		defer stopSetup()
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, err
@@ -94,23 +175,169 @@ func safeRemoteDialer(resolve func(context.Context, string, string) ([]netip.Add
 			if literal.IsLoopback() || literal.IsUnspecified() {
 				return nil, errors.New("loopback Remote App destination")
 			}
-			return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(literal.String(), port))
+			connection, err := dependencies.dial(setupContext, network, net.JoinHostPort(literal.String(), port))
+			if contextErr := setupError(); contextErr != nil {
+				closeConnection(connection)
+				return nil, contextErr
+			}
+			return connection, err
 		}
-		addresses, err := resolve(ctx, "ip", host)
+		addresses, err := dependencies.resolve(setupContext, "ip", host)
 		if err != nil {
+			if contextErr := setupError(); contextErr != nil {
+				return nil, contextErr
+			}
 			return nil, err
 		}
 		for _, resolved := range addresses {
+			if contextErr := setupError(); contextErr != nil {
+				return nil, contextErr
+			}
 			resolved = resolved.Unmap()
 			if resolved.IsLoopback() || resolved.IsUnspecified() {
 				continue
 			}
-			if connection, err := (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(resolved.String(), port)); err == nil {
+			connection, err := dependencies.dial(setupContext, network, net.JoinHostPort(resolved.String(), port))
+			if contextErr := setupError(); contextErr != nil {
+				closeConnection(connection)
+				return nil, contextErr
+			}
+			if err == nil {
 				return connection, nil
 			}
 		}
 		return nil, errors.New("Remote App destination is unavailable")
 	}
+}
+
+func normalizedRemoteTransportDependencies(dependencies remoteTransportDependencies) remoteTransportDependencies {
+	if dependencies.resolve == nil {
+		dependencies.resolve = net.DefaultResolver.LookupNetIP
+	}
+	if dependencies.dial == nil {
+		dependencies.dial = (&net.Dialer{}).DialContext
+	}
+	if dependencies.setupTimeout == 0 {
+		dependencies.setupTimeout = remoteSetupTimeout
+	}
+	if dependencies.tlsHandshakeTimeout == 0 {
+		dependencies.tlsHandshakeTimeout = remoteTLSHandshakeTimeout
+	}
+	if dependencies.responseHeaderTimeout == 0 {
+		dependencies.responseHeaderTimeout = remoteResponseHeaderTimeout
+	}
+	return dependencies
+}
+
+func newRemoteSetupContext(transportContext context.Context, timeout time.Duration) (context.Context, func(), func() error) {
+	setupContext, cancel := context.WithTimeout(transportContext, timeout)
+	requestContext, _ := transportContext.Value(remoteDialRequestContextKey{}).(context.Context)
+	stopRequestCancellation := func() bool { return true }
+	if requestContext != nil {
+		stopRequestCancellation = context.AfterFunc(requestContext, cancel)
+	}
+	stop := func() {
+		stopRequestCancellation()
+		cancel()
+	}
+	setupError := func() error {
+		if requestContext != nil && requestContext.Err() != nil {
+			return requestContext.Err()
+		}
+		if transportContext.Err() != nil {
+			return transportContext.Err()
+		}
+		return setupContext.Err()
+	}
+	return setupContext, stop, setupError
+}
+
+func safeRemoteTLSDialer(transport *http.Transport, dependencies remoteTransportDependencies) func(context.Context, string, string) (net.Conn, error) {
+	dial := safeRemoteDialerWithDependencies(dependencies)
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		rawConnection, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		if rawConnection == nil {
+			return nil, errors.New("Remote App TLS dial returned no connection")
+		}
+		handedOff := false
+		defer func() {
+			if !handedOff {
+				_ = rawConnection.Close()
+			}
+		}()
+
+		config, err := remoteTLSConfig(transport, address)
+		if err != nil {
+			return nil, err
+		}
+		handshakeContext, stopHandshake, handshakeError := newRemoteSetupContext(ctx, dependencies.tlsHandshakeTimeout)
+		defer stopHandshake()
+		closeOnCancellation := context.AfterFunc(handshakeContext, func() {
+			_ = rawConnection.Close()
+		})
+		defer closeOnCancellation()
+
+		tlsConnection := tls.Client(rawConnection, config)
+		if err := tlsConnection.HandshakeContext(handshakeContext); err != nil {
+			if contextErr := handshakeError(); contextErr != nil {
+				return nil, contextErr
+			}
+			return nil, err
+		}
+		if contextErr := handshakeError(); contextErr != nil {
+			return nil, contextErr
+		}
+		if !closeOnCancellation() {
+			if contextErr := handshakeError(); contextErr != nil {
+				return nil, contextErr
+			}
+			return nil, context.Canceled
+		}
+		stopHandshake()
+		handedOff = true
+		return tlsConnection, nil
+	}
+}
+
+func remoteTLSConfig(transport *http.Transport, address string) (*tls.Config, error) {
+	config := transport.TLSClientConfig
+	if config == nil {
+		config = &tls.Config{}
+	} else {
+		config = config.Clone()
+	}
+	if config.ServerName == "" {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		config.ServerName = host
+	}
+	return config, nil
+}
+
+func closeConnection(connection net.Conn) {
+	if connection != nil {
+		_ = connection.Close()
+	}
+}
+
+func isUpgradeRequest(request *http.Request) bool {
+	return headerHasToken(request.Header.Values("Connection"), "upgrade") && strings.TrimSpace(request.Header.Get("Upgrade")) != ""
+}
+
+func headerHasToken(values []string, token string) bool {
+	for _, value := range values {
+		for _, candidate := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(candidate), token) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func loopbackDestination(port int) *url.URL {
@@ -131,10 +358,30 @@ type proxyServer struct {
 }
 
 func startProxyServer(ctx context.Context, listener net.Listener, handler http.Handler, onExit func(error)) *proxyServer {
+	return startProxyServerWithTimeouts(ctx, listener, handler, onExit, proxyServerTimeouts{
+		readHeader: proxyReadHeaderTimeout,
+		idle:       proxyIdleTimeout,
+	})
+}
+
+type proxyServerTimeouts struct {
+	readHeader time.Duration
+	idle       time.Duration
+}
+
+func startProxyServerWithTimeouts(
+	ctx context.Context,
+	listener net.Listener,
+	handler http.Handler,
+	onExit func(error),
+	timeouts proxyServerTimeouts,
+) *proxyServer {
 	serveContext, cancel := context.WithCancel(ctx)
 	tracked := newTrackedHandler(handler)
 	server := &http.Server{
-		Handler: tracked,
+		Handler:           tracked,
+		ReadHeaderTimeout: timeouts.readHeader,
+		IdleTimeout:       timeouts.idle,
 		BaseContext: func(net.Listener) context.Context {
 			return serveContext
 		},
