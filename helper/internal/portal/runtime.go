@@ -973,7 +973,7 @@ func (r *portalRuntime) ensureProxyLocked(ctx context.Context) error {
 		listener = tls.NewListener(listener, tlsConfig)
 	}
 	r.proxy = startProxyServer(ctx, listener, handler, func(err error) {
-		if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			r.fail()
 		}
 	})

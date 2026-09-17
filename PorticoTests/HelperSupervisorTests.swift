@@ -1081,7 +1081,7 @@ final class HelperSupervisorTests: XCTestCase {
         XCTAssertEqual(request.command, .removePortal)
         XCTAssertEqual(request.payload, RemovePortalPayload(portalId: portalID))
         XCTAssertEqual(try JSONSerialization.jsonObject(with: requestData) as? NSDictionary, [
-            "version": 5,
+            "version": 6,
             "requestId": "remove-1",
             "command": "removePortal",
             "payload": ["portalId": portalID.uuidString],

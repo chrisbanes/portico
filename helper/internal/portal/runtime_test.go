@@ -1549,6 +1549,54 @@ func TestProxyServeFailureEmitsOneErrorAndRecoversOnlyAfterConfirmedClose(t *tes
 	}
 }
 
+func TestUnexpectedProxyListenerCloseEmitsError(t *testing.T) {
+	listener := newUnexpectedClosedListener()
+	node := &fakeNode{
+		watcher:          newFakeWatcher(),
+		status:           Status{BackendState: "Running", DNSName: "hermes.example.ts.net.", CertDomains: []string{"hermes.example.ts.net"}},
+		listenerOverride: listener,
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	defer runtime.Close(context.Background())
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 2)
+	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	<-events
+	close(listener.release)
+	select {
+	case event := <-events:
+		if event.Status == nil || event.Status.State != StateError {
+			t.Fatalf("unexpected listener close event = %+v, want one sanitized error", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unexpected listener close did not fail portal health")
+	}
+}
+
+func TestRuntimeCloseSuppressesIntentionalProxyListenerClose(t *testing.T) {
+	node := &fakeNode{
+		watcher: newFakeWatcher(),
+		status:  Status{BackendState: "Running", DNSName: "hermes.example.ts.net.", CertDomains: []string{"hermes.example.ts.net"}},
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 2)
+	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	<-events
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("intentional proxy listener close emitted event = %+v", event)
+	default:
+	}
+}
+
 func TestProxyFailureDuringWatcherStatusEmitsOneErrorWithoutStaleOnline(t *testing.T) {
 	for _, test := range []struct {
 		name                     string
@@ -2680,6 +2728,32 @@ type controlledFailureListener struct {
 	closed  chan struct{}
 	close   sync.Once
 }
+
+type unexpectedClosedListener struct {
+	release chan struct{}
+	closed  chan struct{}
+	close   sync.Once
+}
+
+func newUnexpectedClosedListener() *unexpectedClosedListener {
+	return &unexpectedClosedListener{release: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (l *unexpectedClosedListener) Accept() (net.Conn, error) {
+	select {
+	case <-l.release:
+		return nil, net.ErrClosed
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *unexpectedClosedListener) Close() error {
+	l.close.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (*unexpectedClosedListener) Addr() net.Addr { return fakeAddr("tailnet") }
 
 func newControlledFailureListener() *controlledFailureListener {
 	return &controlledFailureListener{release: make(chan struct{}), closed: make(chan struct{})}
