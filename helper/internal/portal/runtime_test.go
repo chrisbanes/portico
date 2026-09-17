@@ -822,6 +822,57 @@ func TestRemovePortalDeadlineRetainsGateUntilNodeCloseCompletes(t *testing.T) {
 	}
 }
 
+func TestRuntimeCloseDeadlineRetainsPortalGateUntilWatcherCloseCompletes(t *testing.T) {
+	watcher := newBlockedCloseWatcher()
+	defer watcher.release()
+	node := &fakeNode{
+		watcherOverride: watcher,
+		status:          Status{BackendState: "Starting"},
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	if err := reconcileOne(runtime, config, func(Event) {}); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	portal := runtime.portal(testPortalID)
+	if portal == nil {
+		t.Fatal("initial Portal was not retained")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close(ctx) }()
+	waitForSignal(t, watcher.closeEntered, "Runtime.Close watcher close")
+	select {
+	case err := <-closeDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Runtime.Close = %v, want deadline", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Runtime.Close waited for watcher.Close after its deadline")
+	}
+	if runtime.portal(testPortalID) != portal {
+		t.Fatal("Runtime.Close deadline released UUID ownership")
+	}
+	acquireCtx, acquireCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer acquireCancel()
+	if err := portal.acquire(acquireCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Portal gate acquire = %v, want watcher close to retain the gate", err)
+	}
+
+	watcher.release()
+	acquireCtx, acquireCancel = context.WithTimeout(context.Background(), time.Second)
+	defer acquireCancel()
+	if err := portal.acquire(acquireCtx); err != nil {
+		t.Fatalf("Portal gate was not released after watcher close: %v", err)
+	}
+	portal.release()
+	if err := runtime.RemovePortal(context.Background(), testPortalID); err != nil {
+		t.Fatalf("RemovePortal retry: %v", err)
+	}
+}
+
 func TestRuntimeEmitsStartupEventAfterReleasingPortalGate(t *testing.T) {
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node {
 		return &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
@@ -2490,6 +2541,37 @@ func (w *fakeWatcher) Next() (Notification, error) {
 }
 func (w *fakeWatcher) Close() error                   { close(w.ch); return nil }
 func (w *fakeWatcher) send(notification Notification) { w.ch <- notification }
+
+type blockedCloseWatcher struct {
+	closed       chan struct{}
+	closeEntered chan struct{}
+	releaseClose chan struct{}
+	closeOnce    sync.Once
+	closedOnce   sync.Once
+	releaseOnce  sync.Once
+}
+
+func newBlockedCloseWatcher() *blockedCloseWatcher {
+	return &blockedCloseWatcher{
+		closed:       make(chan struct{}),
+		closeEntered: make(chan struct{}),
+		releaseClose: make(chan struct{}),
+	}
+}
+
+func (w *blockedCloseWatcher) Next() (Notification, error) {
+	<-w.closed
+	return Notification{}, errors.New("closed")
+}
+
+func (w *blockedCloseWatcher) Close() error {
+	w.closeOnce.Do(func() { close(w.closeEntered) })
+	<-w.releaseClose
+	w.closedOnce.Do(func() { close(w.closed) })
+	return nil
+}
+
+func (w *blockedCloseWatcher) release() { w.releaseOnce.Do(func() { close(w.releaseClose) }) }
 
 type controlledErrorWatcher struct{ release chan struct{} }
 

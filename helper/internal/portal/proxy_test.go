@@ -816,7 +816,7 @@ func TestRemoteProxyCloseCanRetryAfterUnconfirmedListenerClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	flaky := &flakyCloseListener{Listener: listener}
-	flaky.failuresRemaining.Store(2)
+	flaky.failuresRemaining.Store(1)
 	proxy := startProxyServer(
 		context.Background(),
 		flaky,
@@ -854,11 +854,42 @@ func TestProxyCloseHonorsDeadlineWhenListenerCloseDoesNotUnblockServe(t *testing
 	go func() { done <- proxy.close(ctx) }()
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("close = %v, want deadline", err)
+		if !errors.Is(err, errInjectedListenerClose) {
+			t.Fatalf("close = %v, want listener close error", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("close waited for Serve after its deadline")
+	}
+}
+
+func TestProxyCloseDeadlineRetainsCloseGateUntilListenerCloseCompletes(t *testing.T) {
+	listener := newBlockedCloseListener()
+	proxy := startProxyServer(context.Background(), listener, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), nil)
+	defer listener.release()
+	waitForSignal(t, listener.accepted, "proxy listener Accept")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := proxy.close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("close = %v, want deadline", err)
+	}
+	waitForSignal(t, listener.closeEntered, "proxy listener close")
+	select {
+	case <-proxy.closeGate:
+		proxy.closeGate <- struct{}{}
+		t.Fatal("proxy close gate was released before listener.Close completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	listener.release()
+	select {
+	case <-proxy.closeGate:
+		proxy.closeGate <- struct{}{}
+	case <-time.After(time.Second):
+		t.Fatal("proxy close gate was not released after listener.Close completed")
+	}
+	if err := proxy.close(context.Background()); err != nil {
+		t.Fatalf("retry close: %v", err)
 	}
 }
 
@@ -911,14 +942,53 @@ type unblockingFailureListener struct {
 	release chan struct{}
 }
 
+var errInjectedListenerClose = errors.New("injected listener close failure")
+
 func (l *unblockingFailureListener) Accept() (net.Conn, error) {
 	close(l.entered)
 	<-l.release
 	return nil, net.ErrClosed
 }
 
-func (*unblockingFailureListener) Close() error   { return errors.New("injected listener close failure") }
+func (*unblockingFailureListener) Close() error   { return errInjectedListenerClose }
 func (*unblockingFailureListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+type blockedCloseListener struct {
+	accepted     chan struct{}
+	closeEntered chan struct{}
+	releaseClose chan struct{}
+	closed       chan struct{}
+	acceptOnce   sync.Once
+	closeOnce    sync.Once
+	closedOnce   sync.Once
+	releaseOnce  sync.Once
+}
+
+func newBlockedCloseListener() *blockedCloseListener {
+	return &blockedCloseListener{
+		accepted:     make(chan struct{}),
+		closeEntered: make(chan struct{}),
+		releaseClose: make(chan struct{}),
+		closed:       make(chan struct{}),
+	}
+}
+
+func (l *blockedCloseListener) Accept() (net.Conn, error) {
+	l.acceptOnce.Do(func() { close(l.accepted) })
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *blockedCloseListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closeEntered) })
+	<-l.releaseClose
+	l.closedOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (*blockedCloseListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+func (l *blockedCloseListener) release() { l.releaseOnce.Do(func() { close(l.releaseClose) }) }
 
 type responseFailureRoundTripper struct {
 	err error

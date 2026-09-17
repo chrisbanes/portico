@@ -166,11 +166,37 @@ func (p *proxyServer) close(ctx context.Context) error {
 		return ctx.Err()
 	case <-p.closeGate:
 	}
-	defer func() { p.closeGate <- struct{}{} }()
+	releaseGate := true
+	defer func() {
+		if releaseGate {
+			p.closeGate <- struct{}{}
+		}
+	}()
 	p.stopOnce.Do(func() {
 		p.cancel()
 		p.handler.stopAccepting()
 	})
+	listenerDone := make(chan error, 1)
+	go func() {
+		listenerDone <- p.listener.Close()
+	}()
+	var listenerErr error
+	select {
+	case listenerErr = <-listenerDone:
+	case <-ctx.Done():
+		releaseGate = false
+		go func() {
+			<-listenerDone
+			p.closeGate <- struct{}{}
+		}()
+		return ctx.Err()
+	}
+	if errors.Is(listenerErr, net.ErrClosed) {
+		listenerErr = nil
+	}
+	if listenerErr != nil {
+		return listenerErr
+	}
 	shutdownDone := make(chan struct{})
 	go func() {
 		_ = p.server.Shutdown(ctx)
@@ -179,10 +205,26 @@ func (p *proxyServer) close(ctx context.Context) error {
 	select {
 	case <-shutdownDone:
 	case <-ctx.Done():
+		releaseGate = false
+		go func() {
+			<-shutdownDone
+			p.closeGate <- struct{}{}
+		}()
 		return ctx.Err()
 	}
-	closeErr := p.server.Close()
-	listenerErr := p.listener.Close()
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- p.server.Close() }()
+	var closeErr error
+	select {
+	case closeErr = <-serverDone:
+	case <-ctx.Done():
+		releaseGate = false
+		go func() {
+			<-serverDone
+			p.closeGate <- struct{}{}
+		}()
+		return ctx.Err()
+	}
 	waitDone := make(chan struct{})
 	go func() { p.handler.wait(); close(waitDone) }()
 	select {
@@ -203,9 +245,6 @@ func (p *proxyServer) close(ctx context.Context) error {
 	p.serveErr = nil
 	if errors.Is(closeErr, http.ErrServerClosed) || errors.Is(closeErr, net.ErrClosed) {
 		closeErr = nil
-	}
-	if errors.Is(listenerErr, net.ErrClosed) {
-		listenerErr = nil
 	}
 	if errors.Is(serveErr, http.ErrServerClosed) || errors.Is(serveErr, net.ErrClosed) {
 		serveErr = nil

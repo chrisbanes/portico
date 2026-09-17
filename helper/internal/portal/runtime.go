@@ -743,12 +743,31 @@ func (r *portalRuntime) closeHeld(ctx context.Context, releaseWhenDone bool, onC
 	watcher, proxy, node := r.watcher, r.proxy, r.node
 	r.mu.Unlock()
 	if watcher != nil {
-		_ = watcher.Close()
-		r.mu.Lock()
-		if r.watcher == watcher {
-			r.watcher = nil
+		watcherDone := make(chan struct{})
+		go func() {
+			_ = watcher.Close()
+			close(watcherDone)
+		}()
+		clearWatcher := func() {
+			r.mu.Lock()
+			if r.watcher == watcher {
+				r.watcher = nil
+			}
+			r.mu.Unlock()
 		}
-		r.mu.Unlock()
+		select {
+		case <-watcherDone:
+			clearWatcher()
+		case <-ctx.Done():
+			releaseGate = false
+			go func() {
+				<-watcherDone
+				clearWatcher()
+				r.markFailed()
+				r.release()
+			}()
+			return ctx.Err(), true
+		}
 	}
 	var errs []error
 	if proxy != nil {
