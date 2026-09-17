@@ -11,6 +11,7 @@ struct PorticoApp: App {
             PortalView(
                 controller: appDelegate.portalController,
                 supervisor: appDelegate.supervisor,
+                appName: appDelegate.appVariant.displayName,
                 launchAtLogin: appDelegate.launchAtLoginController,
                 managementRouting: appDelegate.managementRouting,
                 windowActivation: appDelegate.windowActivation,
@@ -924,6 +925,7 @@ private struct PortalView: View {
     @Environment(\.openWindow) private var openWindow
     @ObservedObject var controller: PortalController
     @ObservedObject var supervisor: HelperSupervisor
+    let appName: String
     let launchAtLogin: LaunchAtLoginController?
     @ObservedObject var managementRouting: ManagementRouting
     let windowActivation: AppWindowActivation
@@ -937,8 +939,8 @@ private struct PortalView: View {
                 .accessibilityIdentifier("tailnet-state")
             if requiresAttention {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Portico needs your attention.")
-                    Button("Review in Portico") { openOverview() }
+                    Text("\(appName) needs your attention.")
+                    Button("Review in \(appName)") { openOverview() }
                         .accessibilityIdentifier("compact-attention")
                 }
                 .accessibilityElement(children: .contain)
@@ -978,14 +980,14 @@ private struct PortalView: View {
                     presentWindow(id: "management")
                     dismiss()
                 } label: {
-                    Label("Open Portico", systemImage: "rectangle.on.rectangle")
+                    Label("Open \(appName)", systemImage: "rectangle.on.rectangle")
                 }
                 .labelStyle(.iconOnly)
-                .help("Open Portico")
+                .help("Open \(appName)")
                 .accessibilityIdentifier("open-portico")
             }
             Divider()
-            Button("Quit Portico") {
+            Button("Quit \(appName)") {
                 NSApp.terminate(nil)
             }
             .keyboardShortcut("q")

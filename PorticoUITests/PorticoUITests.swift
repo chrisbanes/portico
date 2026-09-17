@@ -517,7 +517,8 @@ final class PorticoUITests: XCTestCase {
         openMenuBarExtra(app)
         let attention = app.buttons["compact-attention"]
         XCTAssertTrue(attention.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(attention.label, "Review in Portico")
+        XCTAssertTrue(app.staticTexts["Portico Dev needs your attention."].waitForExistence(timeout: 3))
+        XCTAssertEqual(attention.label, "Review in Portico Dev")
         attention.click()
         XCTAssertTrue(app.descendants(matching: .any)["management-overview"].waitForExistence(timeout: 3))
 
@@ -545,8 +546,10 @@ final class PorticoUITests: XCTestCase {
         let quit = app.buttons["quit"]
         XCTAssertTrue(portalAction.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertTrue(openPortico.exists)
+        XCTAssertEqual(openPortico.label, "Open Portico Dev")
         XCTAssertTrue(settings.exists)
         XCTAssertTrue(diagnostics.exists)
+        XCTAssertEqual(quit.label, "Quit Portico Dev")
         XCTAssertLessThan(portalAction.frame.maxY, quit.frame.minY)
         let compactPortal = app.descendants(matching: .any)["compact-portal-portal-one"]
         XCTAssertLessThan(abs(portalAction.frame.midY - compactPortal.frame.midY), 8)
