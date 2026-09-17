@@ -10,7 +10,7 @@ struct SmokeLaunchConfiguration: Equatable {
 
     static let consentEnvironmentKey = "PORTICO_SMOKE_REAL_HELPER"
     static let expectedRootEnvironmentKey = "PORTICO_SMOKE_EXPECTED_ROOT"
-    static let consentValue = "accepted-v5"
+    static let consentValue = "accepted-v6"
 
     let expectedRootURL: URL
 
@@ -47,7 +47,7 @@ struct SmokeLaunchConfiguration: Equatable {
     }
 
     func recordAcceptedHandshake() throws {
-        try Data("accepted-v5\n".utf8).write(
+        try Data("accepted-v6\n".utf8).write(
             to: expectedRootURL.appendingPathComponent("smoke-handshake-witness", isDirectory: false),
             options: .atomic
         )

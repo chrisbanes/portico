@@ -98,7 +98,7 @@ printf '%s' 'production-sentinel-v1' > "$production_sentinel"
 cp "$production_sentinel" "$production_sentinel_expected"
 
 CFFIXED_USER_HOME="$smoke_home" \
-PORTICO_SMOKE_REAL_HELPER="accepted-v5" \
+PORTICO_SMOKE_REAL_HELPER="accepted-v6" \
 PORTICO_SMOKE_EXPECTED_ROOT="$dev_root" \
 "$app_executable" &
 app_pid=$!
@@ -135,8 +135,8 @@ for _ in {1..100}; do
   [[ -f "$dev_root/smoke-handshake-witness" ]] && break
   sleep 0.1
 done
-[[ -f "$dev_root/smoke-handshake-witness" ]] || { echo "Expected an accepted protocol-5 handshake witness" >&2; exit 1; }
-[[ "$(cat "$dev_root/smoke-handshake-witness")" == "accepted-v5" ]] || { echo "Smoke witness is invalid" >&2; exit 1; }
+[[ -f "$dev_root/smoke-handshake-witness" ]] || { echo "Expected an accepted protocol-6 handshake witness" >&2; exit 1; }
+[[ "$(cat "$dev_root/smoke-handshake-witness")" == "accepted-v6" ]] || { echo "Smoke witness is invalid" >&2; exit 1; }
 [[ -f "$dev_root/installation-v4.json" ]] || { echo "Dev installation was not created" >&2; exit 1; }
 [[ -d "$dev_root/tsnet" ]] || { echo "Dev helper state root was not created" >&2; exit 1; }
 cmp -s "$production_sentinel" "$production_sentinel_expected" || { echo "Production sentinel changed during startup" >&2; exit 1; }

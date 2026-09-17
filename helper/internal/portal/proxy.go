@@ -12,10 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
-	"time"
 )
-
-const proxyShutdownTimeout = 500 * time.Millisecond
 
 func newLoopbackProxy(port int) (http.Handler, error) {
 	return newLoopbackProxyWithTransport(port, nil)
@@ -121,18 +118,19 @@ func loopbackDestination(port int) *url.URL {
 }
 
 type proxyServer struct {
-	cancel   context.CancelFunc
-	server   *http.Server
-	listener net.Listener
-	handler  *trackedHandler
-	done     chan error
-	closeMu  sync.Mutex
-	stopOnce sync.Once
-	doneOnce sync.Once
-	serveErr error
+	cancel    context.CancelFunc
+	server    *http.Server
+	listener  net.Listener
+	handler   *trackedHandler
+	done      chan error
+	closeGate chan struct{}
+	stopOnce  sync.Once
+	serveDone bool
+	serveErr  error
+	onExit    func(error)
 }
 
-func startProxyServer(ctx context.Context, listener net.Listener, handler http.Handler) *proxyServer {
+func startProxyServer(ctx context.Context, listener net.Listener, handler http.Handler, onExit func(error)) *proxyServer {
 	serveContext, cancel := context.WithCancel(ctx)
 	tracked := newTrackedHandler(handler)
 	server := &http.Server{
@@ -143,40 +141,110 @@ func startProxyServer(ctx context.Context, listener net.Listener, handler http.H
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
 	proxy := &proxyServer{
-		cancel:   cancel,
-		server:   server,
-		listener: listener,
-		handler:  tracked,
-		done:     make(chan error, 1),
+		cancel:    cancel,
+		server:    server,
+		listener:  listener,
+		handler:   tracked,
+		done:      make(chan error, 1),
+		closeGate: make(chan struct{}, 1),
+		onExit:    onExit,
 	}
+	proxy.closeGate <- struct{}{}
 	go func() {
-		proxy.done <- server.Serve(listener)
+		err := server.Serve(listener)
+		proxy.done <- err
+		if proxy.onExit != nil {
+			proxy.onExit(err)
+		}
 	}()
 	return proxy
 }
 
-func (p *proxyServer) close() error {
-	p.closeMu.Lock()
-	defer p.closeMu.Unlock()
+func (p *proxyServer) close(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.closeGate:
+	}
+	releaseGate := true
+	defer func() {
+		if releaseGate {
+			p.closeGate <- struct{}{}
+		}
+	}()
 	p.stopOnce.Do(func() {
 		p.cancel()
 		p.handler.stopAccepting()
 	})
-	shutdownContext, cancel := context.WithTimeout(context.Background(), proxyShutdownTimeout)
-	_ = p.server.Shutdown(shutdownContext)
-	cancel()
-	closeErr := p.server.Close()
-	listenerErr := p.listener.Close()
-	p.handler.wait()
+	listenerDone := make(chan error, 1)
+	go func() {
+		listenerDone <- p.listener.Close()
+	}()
+	var listenerErr error
+	select {
+	case listenerErr = <-listenerDone:
+	case <-ctx.Done():
+		releaseGate = false
+		go func() {
+			<-listenerDone
+			p.closeGate <- struct{}{}
+		}()
+		return ctx.Err()
+	}
+	if errors.Is(listenerErr, net.ErrClosed) {
+		listenerErr = nil
+	}
+	if listenerErr != nil {
+		return listenerErr
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		_ = p.server.Shutdown(ctx)
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+	case <-ctx.Done():
+		releaseGate = false
+		go func() {
+			<-shutdownDone
+			p.closeGate <- struct{}{}
+		}()
+		return ctx.Err()
+	}
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- p.server.Close() }()
+	var closeErr error
+	select {
+	case closeErr = <-serverDone:
+	case <-ctx.Done():
+		releaseGate = false
+		go func() {
+			<-serverDone
+			p.closeGate <- struct{}{}
+		}()
+		return ctx.Err()
+	}
+	waitDone := make(chan struct{})
+	go func() { p.handler.wait(); close(waitDone) }()
+	select {
+	case <-waitDone:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	p.handler.closeIdleConnections()
-	p.doneOnce.Do(func() { p.serveErr = <-p.done })
+	if !p.serveDone {
+		select {
+		case p.serveErr = <-p.done:
+			p.serveDone = true
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	serveErr := p.serveErr
 	p.serveErr = nil
 	if errors.Is(closeErr, http.ErrServerClosed) || errors.Is(closeErr, net.ErrClosed) {
 		closeErr = nil
-	}
-	if errors.Is(listenerErr, net.ErrClosed) {
-		listenerErr = nil
 	}
 	if errors.Is(serveErr, http.ErrServerClosed) || errors.Is(serveErr, net.ErrClosed) {
 		serveErr = nil

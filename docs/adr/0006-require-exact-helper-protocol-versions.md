@@ -26,6 +26,12 @@ older helper does not provide this timing contract, so a version-5 app and
 helper reject version-4 and earlier peers during the exact-version handshake.
 The version-4 destination shape and commands are retained.
 
+Bounded shutdown cancellation introduces protocol version 6. Cancellation of
+active and staged work, and the shared close deadline, are semantic lifecycle
+contracts that a version-5 helper cannot certify. A version-6 app and helper
+therefore exact-match and reject version-5 and earlier peers. Version 6 retains
+the version-5 JSONL command names, payloads, fields, results, and errors.
+
 The persistence record's version 4 (`InstallationRecord.currentVersion` and
 `installation-v4.json`) also introduced Remote App records, but it is a
 separate migration domain. Persistence and helper-protocol versions have

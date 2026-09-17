@@ -2,8 +2,14 @@ package portal
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -121,7 +127,7 @@ func TestRuntimeReconcileContinuesAfterStartFailureAndRetainsOwnershipUntilClean
 	if entries[0].Outcome != OutcomeStartFailed || len(created[secondPortalID]) != 1 {
 		t.Fatalf("conflicting immutable name = (%+v, %d nodes), want retained identity", entries, len(created[secondPortalID]))
 	}
-	_ = runtime.Close()
+	_ = runtime.Close(context.Background())
 }
 
 func TestRuntimePortEditPreservesIdentityAndDrainsAcceptedHTTPAndWebSocketTraffic(t *testing.T) {
@@ -172,7 +178,7 @@ func TestRuntimePortEditPreservesIdentityAndDrainsAcceptedHTTPAndWebSocketTraffi
 	if entries, reconcileErr := runtime.Reconcile(context.Background(), desired, func(Event) {}); reconcileErr != nil || entries[0].Outcome != OutcomeConverged {
 		t.Fatalf("initial Reconcile = (%+v, %v), want converged", entries, reconcileErr)
 	}
-	t.Cleanup(func() { _ = runtime.Close() })
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 	proxyURL := "http://" + tailnetListener.Addr().String()
 
 	oldHTTPResponse := make(chan *http.Response, 1)
@@ -272,7 +278,7 @@ func TestRuntimeDestinationReplacementFailureRetainsServingPortalAndCanRetry(t *
 	if entries, reconcileErr := runtime.Reconcile(context.Background(), desired, func(Event) {}); reconcileErr != nil || entries[0].Outcome != OutcomeConverged {
 		t.Fatalf("initial Reconcile = (%+v, %v), want converged", entries, reconcileErr)
 	}
-	t.Cleanup(func() { _ = runtime.Close() })
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 	proxyURL := "http://" + tailnetListener.Addr().String()
 
 	desired[0].Destination = localAppDestination(uint16(newPort))
@@ -348,7 +354,7 @@ func TestRuntimeDestinationReplacementReroutesNewRequestsToRemoteTLSOrigin(t *te
 	if entries, reconcileErr := runtime.Reconcile(context.Background(), desired, func(Event) {}); reconcileErr != nil || entries[0].Outcome != OutcomeConverged {
 		t.Fatalf("initial Reconcile = (%+v, %v), want converged", entries, reconcileErr)
 	}
-	t.Cleanup(func() { _ = runtime.Close() })
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 	proxyURL := "http://" + tailnetListener.Addr().String()
 
 	desired[0].Destination = newDestination
@@ -550,7 +556,7 @@ func TestRuntimeKeepsTwoIndependentPortalsOnline(t *testing.T) {
 	if _, err := runtime.Reconcile(context.Background(), configs, emit); err != nil {
 		t.Fatalf("Reconcile Portals: %v", err)
 	}
-	t.Cleanup(func() { _ = runtime.Close() })
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 
 	first, firstOK := events[testPortalID]
 	second, secondOK := events[secondPortalID]
@@ -582,9 +588,9 @@ func TestCleanupRejectedPortalClosesAndDeletesOnlyAddressedPortal(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	t.Cleanup(func() { _ = runtime.Close() })
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 
-	if err := runtime.CleanupRejectedPortal(testPortalID); err != nil {
+	if err := runtime.CleanupRejectedPortal(context.Background(), testPortalID); err != nil {
 		t.Fatalf("CleanupRejectedPortal: %v", err)
 	}
 	if !nodes[testPortalID].closed {
@@ -602,7 +608,7 @@ func TestCleanupRejectedPortalClosesAndDeletesOnlyAddressedPortal(t *testing.T) 
 	if err := runtime.Authenticate(context.Background(), secondPortalID); err != nil {
 		t.Fatalf("unrelated Portal is no longer online: %v", err)
 	}
-	if err := runtime.CleanupRejectedPortal(testPortalID); err != nil {
+	if err := runtime.CleanupRejectedPortal(context.Background(), testPortalID); err != nil {
 		t.Fatalf("repeated cleanup should be idempotent: %v", err)
 	}
 }
@@ -627,9 +633,9 @@ func TestRemovePortalClosesAndDeletesOnlyAddressedPortal(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	t.Cleanup(func() { _ = runtime.Close() })
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 
-	if err := runtime.RemovePortal(strings.ToUpper(testPortalID)); err != nil {
+	if err := runtime.RemovePortal(context.Background(), strings.ToUpper(testPortalID)); err != nil {
 		t.Fatalf("RemovePortal: %v", err)
 	}
 	if !nodes[testPortalID].closed {
@@ -644,7 +650,7 @@ func TestRemovePortalClosesAndDeletesOnlyAddressedPortal(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, secondPortalID)); err != nil {
 		t.Fatalf("unrelated Portal state was affected: %v", err)
 	}
-	if err := runtime.RemovePortal(testPortalID); err != nil {
+	if err := runtime.RemovePortal(context.Background(), testPortalID); err != nil {
 		t.Fatalf("repeated removal should be idempotent: %v", err)
 	}
 }
@@ -664,11 +670,408 @@ func TestRemovePortalDeletesStateCreatedWhileRuntimeCloses(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	if err := runtime.RemovePortal(testPortalID); err != nil {
+	if err := runtime.RemovePortal(context.Background(), testPortalID); err != nil {
 		t.Fatalf("RemovePortal: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, testPortalID)); !os.IsNotExist(err) {
 		t.Fatalf("close-time Portal state still exists: %v", err)
+	}
+}
+
+func TestCleanupDoesNotDeleteStateOfConcurrentSamePortalReplacement(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, testPortalID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	first := &fakeNode{
+		watcher:      newFakeWatcher(),
+		status:       Status{BackendState: "Starting"},
+		closeEntered: make(chan struct{}),
+		releaseClose: make(chan struct{}),
+	}
+	replacementState := filepath.Join(root, testPortalID, "replacement")
+	replacement := &fakeNode{
+		watcher: newFakeWatcher(),
+		status:  Status{BackendState: "Starting"},
+		startHook: func() {
+			if err := os.MkdirAll(filepath.Dir(replacementState), 0o700); err != nil {
+				t.Errorf("create replacement state directory: %v", err)
+				return
+			}
+			if err := os.WriteFile(replacementState, []byte("new"), 0o600); err != nil {
+				t.Errorf("create replacement state: %v", err)
+			}
+		},
+	}
+	created := 0
+	runtime := NewRuntime(root, func(_, _ string) Node {
+		created++
+		if created == 1 {
+			return first
+		}
+		return replacement
+	})
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	if err := reconcileOne(runtime, config, func(Event) {}); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+
+	cleanupDone := make(chan error, 1)
+	go func() { cleanupDone <- runtime.RemovePortal(context.Background(), testPortalID) }()
+	waitForSignal(t, first.closeEntered, "initial Portal close")
+	reconciled := make(chan error, 1)
+	go func() { reconciled <- reconcileOne(runtime, config, func(Event) {}) }()
+	close(first.releaseClose)
+	if err := <-reconciled; err != nil {
+		t.Fatalf("replacement Reconcile: %v", err)
+	}
+	if err := <-cleanupDone; err != nil {
+		t.Fatalf("RemovePortal: %v", err)
+	}
+	if _, err := os.Stat(replacementState); err != nil {
+		t.Fatalf("replacement Portal state was deleted: %v", err)
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestRuntimeCloseRetainsPortalGateUntilRegistryRemoval(t *testing.T) {
+	node := &fakeNode{
+		watcher:      newFakeWatcher(),
+		status:       Status{BackendState: "Starting"},
+		closeEntered: make(chan struct{}),
+		releaseClose: make(chan struct{}),
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	if err := reconcileOne(runtime, config, func(Event) {}); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	portal := runtime.portal(testPortalID)
+	if portal == nil {
+		t.Fatal("initial Portal was not retained")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close(context.Background()) }()
+	waitForSignal(t, node.closeEntered, "Runtime.Close Portal close")
+	runtime.mu.Lock()
+	close(node.releaseClose)
+	acquireContext, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := portal.acquire(acquireContext); !errors.Is(err, context.DeadlineExceeded) {
+		runtime.mu.Unlock()
+		t.Fatalf("Portal gate acquire = %v, want it to remain held until registry removal", err)
+	}
+	runtime.mu.Unlock()
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Runtime.Close: %v", err)
+	}
+	if runtime.portal(testPortalID) != nil {
+		t.Fatal("Runtime.Close retained a Portal after its confirmed close")
+	}
+}
+
+func TestRemovePortalDeadlineRetainsGateUntilNodeCloseCompletes(t *testing.T) {
+	node := &fakeNode{
+		watcher:      newFakeWatcher(),
+		status:       Status{BackendState: "Starting"},
+		closeEntered: make(chan struct{}),
+		releaseClose: make(chan struct{}),
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	if err := reconcileOne(runtime, config, func(Event) {}); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	portal := runtime.portal(testPortalID)
+	if portal == nil {
+		t.Fatal("initial Portal was not retained")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	removeDone := make(chan error, 1)
+	go func() { removeDone <- runtime.RemovePortal(ctx, testPortalID) }()
+	waitForSignal(t, node.closeEntered, "RemovePortal node close")
+	if err := <-removeDone; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RemovePortal = %v, want deadline", err)
+	}
+	if runtime.portal(testPortalID) != portal {
+		t.Fatal("RemovePortal deadline released UUID ownership")
+	}
+	acquireCtx, acquireCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer acquireCancel()
+	if err := portal.acquire(acquireCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Portal gate acquire = %v, want node close to retain the gate", err)
+	}
+
+	close(node.releaseClose)
+	acquireCtx, acquireCancel = context.WithTimeout(context.Background(), time.Second)
+	defer acquireCancel()
+	if err := portal.acquire(acquireCtx); err != nil {
+		t.Fatalf("Portal gate was not released after node close: %v", err)
+	}
+	portal.release()
+	node.mu.Lock()
+	node.closeEntered, node.releaseClose = nil, nil
+	node.mu.Unlock()
+	if err := runtime.RemovePortal(context.Background(), testPortalID); err != nil {
+		t.Fatalf("RemovePortal retry: %v", err)
+	}
+}
+
+func TestRuntimeCloseDeadlineRetainsPortalGateUntilWatcherCloseCompletes(t *testing.T) {
+	watcher := newBlockedCloseWatcher()
+	defer watcher.release()
+	node := &fakeNode{
+		watcherOverride: watcher,
+		status:          Status{BackendState: "Starting"},
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	if err := reconcileOne(runtime, config, func(Event) {}); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	portal := runtime.portal(testPortalID)
+	if portal == nil {
+		t.Fatal("initial Portal was not retained")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close(ctx) }()
+	waitForSignal(t, watcher.closeEntered, "Runtime.Close watcher close")
+	select {
+	case err := <-closeDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Runtime.Close = %v, want deadline", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Runtime.Close waited for watcher.Close after its deadline")
+	}
+	if runtime.portal(testPortalID) != portal {
+		t.Fatal("Runtime.Close deadline released UUID ownership")
+	}
+	acquireCtx, acquireCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer acquireCancel()
+	if err := portal.acquire(acquireCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Portal gate acquire = %v, want watcher close to retain the gate", err)
+	}
+
+	watcher.release()
+	acquireCtx, acquireCancel = context.WithTimeout(context.Background(), time.Second)
+	defer acquireCancel()
+	if err := portal.acquire(acquireCtx); err != nil {
+		t.Fatalf("Portal gate was not released after watcher close: %v", err)
+	}
+	portal.release()
+	if err := runtime.RemovePortal(context.Background(), testPortalID); err != nil {
+		t.Fatalf("RemovePortal retry: %v", err)
+	}
+}
+
+func TestRuntimeEmitsStartupEventAfterReleasingPortalGate(t *testing.T) {
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node {
+		return &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+	})
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(Event) {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		if err := runtime.Authenticate(ctx, testPortalID); err != nil {
+			t.Errorf("startup event held the Portal gate: %v", err)
+		}
+	}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestWatcherOnlineFollowsInitialStartupEvent(t *testing.T) {
+	watcher := newStartupBarrierWatcher(Notification{})
+	node := &fakeNode{
+		watcherOverride: watcher,
+		statusResults: []Status{
+			{BackendState: "Starting"},
+			{BackendState: "Running"},
+		},
+		statusEntered:   make(chan struct{}),
+		releaseStatus:   make(chan struct{}),
+		blockStatusCall: 1,
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 2)
+	result := make(chan []ReconcileEntry, 1)
+	go func() {
+		entries, _ := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event })
+		result <- entries
+	}()
+
+	waitForSignal(t, node.statusEntered, "startup status read")
+	watcher.releaseNext()
+	waitForSignal(t, watcher.nextReturned, "watcher notification")
+	close(node.releaseStatus)
+	entries := <-result
+	if len(entries) != 1 || entries[0].Outcome != OutcomeConverged {
+		t.Fatalf("Reconcile entries = %+v, want converged", entries)
+	}
+	first := <-events
+	if first.Status == nil || first.Status.State != StateConnecting {
+		t.Fatalf("first event = %+v, want initial connecting", first)
+	}
+	second := <-events
+	if second.Status == nil || second.Status.State != StateOnline {
+		t.Fatalf("second event = %+v, want watcher online", second)
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestRuntimeCloseFromStartupCallbackCancelsBarrierWatcher(t *testing.T) {
+	watcher := newStartupBarrierWatcher(Notification{})
+	node := &fakeNode{
+		watcherOverride: watcher,
+		statusResults: []Status{
+			{BackendState: "Starting"},
+			{BackendState: "Running"},
+		},
+		statusEntered:   make(chan struct{}),
+		releaseStatus:   make(chan struct{}),
+		blockStatusCall: 1,
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 2)
+	closed := make(chan error, 1)
+	result := make(chan []ReconcileEntry, 1)
+	go func() {
+		entries, _ := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) {
+			events <- event
+			if event.Status != nil && event.Status.State == StateConnecting {
+				closed <- runtime.Close(context.Background())
+			}
+		})
+		result <- entries
+	}()
+
+	waitForSignal(t, node.statusEntered, "startup status read")
+	watcher.releaseNext()
+	waitForSignal(t, watcher.nextReturned, "barrier watcher notification")
+	close(node.releaseStatus)
+	if err := <-closed; err != nil {
+		t.Fatalf("Close from startup callback: %v", err)
+	}
+	<-result
+	first := <-events
+	if first.Status == nil || first.Status.State != StateConnecting {
+		t.Fatalf("first event = %+v, want connecting", first)
+	}
+	select {
+	case stale := <-events:
+		t.Fatalf("stale watcher event after close = %+v", stale)
+	default:
+	}
+}
+
+func TestRuntimeCloseFromStartupCallbackDoesNotWaitForWatcherFailureDelivery(t *testing.T) {
+	watcher := &controlledErrorWatcher{release: make(chan struct{})}
+	node := &fakeNode{watcherOverride: watcher, status: Status{BackendState: "Starting"}}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 2)
+	closed := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		_, _ = runtime.Reconcile(context.Background(), []Config{config}, func(event Event) {
+			events <- event
+			if event.Status != nil && event.Status.State == StateConnecting {
+				close(watcher.release)
+				waitForPortalPhase(t, runtime.portal(testPortalID), portalFailed)
+				closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				closed <- runtime.Close(closeCtx)
+			}
+		})
+		close(done)
+	}()
+
+	if err := <-closed; err != nil {
+		t.Fatalf("Close from startup callback: %v", err)
+	}
+	waitForSignal(t, done, "startup callback reconciliation")
+	first := <-events
+	if first.Status == nil || first.Status.State != StateConnecting {
+		t.Fatalf("first event = %+v, want connecting", first)
+	}
+	select {
+	case stale := <-events:
+		t.Fatalf("stale watcher failure after close = %+v", stale)
+	default:
+	}
+}
+
+func TestPortalWatchWaitsForStartupDeliveryBarrier(t *testing.T) {
+	watcher := newStartupBarrierWatcher(Notification{})
+	barrier := make(chan struct{})
+	statusEntered := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	portal := &portalRuntime{
+		gate:            make(chan struct{}, 1),
+		phase:           portalRunning,
+		config:          &Config{ID: testPortalID},
+		node:            &fakeNode{status: Status{BackendState: "Running"}, statusEntered: statusEntered},
+		emit:            func(Event) {},
+		startupDelivery: barrier,
+	}
+	portal.gate <- struct{}{}
+	portal.watchDone.Add(1)
+	go portal.watch(ctx, watcher, barrier)
+
+	watcher.releaseNext()
+	waitForSignal(t, watcher.nextReturned, "watcher notification")
+	select {
+	case <-statusEntered:
+		t.Fatal("watcher mapped a notification before startup delivery")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(barrier)
+	waitForSignal(t, statusEntered, "watcher status after startup delivery")
+	cancel()
+	if err := watcher.Close(); err != nil {
+		t.Fatalf("watcher Close: %v", err)
+	}
+	done := make(chan struct{})
+	go func() { portal.watchDone.Wait(); close(done) }()
+	waitForSignal(t, done, "barrier watcher exit")
+}
+
+func TestPortalSuppressesStartupOnlineAfterFailureDelivered(t *testing.T) {
+	events := make(chan Event, 2)
+	portal := &portalRuntime{
+		gate:   make(chan struct{}, 1),
+		phase:  portalRunning,
+		config: &Config{ID: testPortalID},
+		emit:   func(event Event) { events <- event },
+	}
+	portal.gate <- struct{}{}
+	portal.fail()
+	portal.emitStartupEvents([]Event{{PortalID: testPortalID, Status: &StatusEvent{State: StateOnline}}})
+	event := <-events
+	if event.Status == nil || event.Status.State != StateError {
+		t.Fatalf("first event = %+v, want StateError", event)
+	}
+	select {
+	case stale := <-events:
+		t.Fatalf("stale startup event after failure = %+v", stale)
+	default:
 	}
 }
 
@@ -684,12 +1087,12 @@ func TestRemovePortalRejectsUntrustedTargetsWithoutClosingRuntime(t *testing.T) 
 	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	t.Cleanup(func() { _ = runtime.Close() })
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 	if err := os.Symlink(outside, filepath.Join(root, testPortalID)); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := runtime.RemovePortal(testPortalID); err == nil {
+	if err := runtime.RemovePortal(context.Background(), testPortalID); err == nil {
 		t.Fatal("RemovePortal = nil, want symlink rejection")
 	}
 	if node.closeCalls != 0 {
@@ -725,9 +1128,9 @@ func TestRemovePortalPreservesStateAndOwnershipWhenCloseFails(t *testing.T) {
 	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = runtime.Close() })
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 
-	if err := runtime.RemovePortal(testPortalID); err == nil {
+	if err := runtime.RemovePortal(context.Background(), testPortalID); err == nil {
 		t.Fatal("RemovePortal = nil, want close failure")
 	}
 	if got, err := os.ReadFile(sentinel); err != nil || string(got) != "keep" {
@@ -736,7 +1139,7 @@ func TestRemovePortalPreservesStateAndOwnershipWhenCloseFails(t *testing.T) {
 	if err := runtime.Authenticate(context.Background(), testPortalID); err != nil {
 		t.Fatalf("runtime ownership was lost: %v", err)
 	}
-	if err := runtime.RemovePortal(testPortalID); err != nil {
+	if err := runtime.RemovePortal(context.Background(), testPortalID); err != nil {
 		t.Fatalf("RemovePortal retry: %v", err)
 	}
 	if _, err := os.Stat(stateDirectory); !os.IsNotExist(err) {
@@ -748,7 +1151,7 @@ func TestRemovePortalTreatsMissingStateRootAsAbsentState(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "missing")
 	runtime := NewRuntime(root, func(_, _ string) Node { return &fakeNode{watcher: newFakeWatcher()} })
 
-	if err := runtime.RemovePortal(testPortalID); err != nil {
+	if err := runtime.RemovePortal(context.Background(), testPortalID); err != nil {
 		t.Fatalf("RemovePortal: %v", err)
 	}
 }
@@ -769,7 +1172,7 @@ func TestRemovePortalCanonicalizesSymlinkedTrustedRoot(t *testing.T) {
 	}
 	runtime := NewRuntime(root, func(_, _ string) Node { return &fakeNode{watcher: newFakeWatcher()} })
 
-	if err := runtime.RemovePortal(testPortalID); err != nil {
+	if err := runtime.RemovePortal(context.Background(), testPortalID); err != nil {
 		t.Fatalf("RemovePortal: %v", err)
 	}
 	if _, err := os.Stat(stateDirectory); !os.IsNotExist(err) {
@@ -789,7 +1192,7 @@ func TestCleanupRejectedPortalRejectsUntrustedDeletionTargets(t *testing.T) {
 	runtime := NewRuntime(root, func(_, _ string) Node { return &fakeNode{watcher: newFakeWatcher()} })
 
 	for _, portalID := range []string{"../" + secondPortalID, "not-a-uuid", testPortalID + "/child"} {
-		if err := runtime.CleanupRejectedPortal(portalID); err == nil {
+		if err := runtime.CleanupRejectedPortal(context.Background(), portalID); err == nil {
 			t.Fatalf("CleanupRejectedPortal(%q) = nil, want error", portalID)
 		}
 	}
@@ -816,7 +1219,7 @@ func TestCleanupWaitsForStartBeforeDeletingAnyPortalState(t *testing.T) {
 	}()
 	<-blocked.startEntered
 	cleanupDone := make(chan error, 1)
-	go func() { cleanupDone <- runtime.CleanupRejectedPortal(secondPortalID) }()
+	go func() { cleanupDone <- runtime.CleanupRejectedPortal(context.Background(), secondPortalID) }()
 
 	select {
 	case <-cleanupDone:
@@ -833,7 +1236,7 @@ func TestCleanupWaitsForStartBeforeDeletingAnyPortalState(t *testing.T) {
 	if err := <-cleanupDone; err != nil {
 		t.Fatalf("CleanupRejectedPortal: %v", err)
 	}
-	_ = runtime.Close()
+	_ = runtime.Close(context.Background())
 }
 
 func TestRuntimeUsesUUIDStateDirectoryAndStableIdentity(t *testing.T) {
@@ -846,7 +1249,7 @@ func TestRuntimeUsesUUIDStateDirectoryAndStableIdentity(t *testing.T) {
 		if err := reconcileOne(runtime, config, func(Event) {}); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		if err := runtime.Close(); err != nil {
+		if err := runtime.Close(context.Background()); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 	}
@@ -943,7 +1346,7 @@ func TestAuthenticateEmitsTransientURLFromFreshNotification(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer runtime.Close()
+	defer runtime.Close(context.Background())
 	<-events
 
 	if err := runtime.Authenticate(context.Background(), testPortalID); err != nil {
@@ -961,6 +1364,383 @@ func TestAuthenticateEmitsTransientURLFromFreshNotification(t *testing.T) {
 	}
 }
 
+func TestAuthenticationCanBringANeedsLoginPortalOnlineAndStartListener(t *testing.T) {
+	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "NeedsLogin"}}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	events := make(chan Event, 4)
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	initial := <-events
+	if initial.Status == nil || initial.Status.State != StateAuthenticating {
+		t.Fatalf("initial event = %+v, want NeedsLogin authentication state", initial)
+	}
+	if err := runtime.Authenticate(context.Background(), testPortalID); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	node.status = Status{BackendState: "Running", DNSName: "hermes.example.ts.net.", CertDomains: []string{"hermes.example.ts.net"}}
+	node.watcher.send(Notification{AuthURL: "https://login.tailscale.com/a/transient"})
+	var authentication, online bool
+	for range 2 {
+		event := <-events
+		authentication = authentication || event.AuthenticationURL != ""
+		online = online || event.Status != nil && event.Status.State == StateOnline
+	}
+	if !authentication || !online {
+		t.Fatalf("events did not report authentication then online state: authentication=%v online=%v", authentication, online)
+	}
+	if node.listenNetwork != "tcp" || node.listenAddress != ":443" {
+		t.Fatalf("Listen = (%q, %q), want raw tailnet TCP :443 after Running", node.listenNetwork, node.listenAddress)
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestStartupCancellationReachesTSNetReadiness(t *testing.T) {
+	node := &fakeNode{
+		watcher:    newFakeWatcher(),
+		status:     Status{BackendState: "Running", DNSName: "hermes.example.ts.net.", CertDomains: []string{"hermes.example.ts.net"}},
+		upEntered:  make(chan struct{}),
+		upCanceled: make(chan struct{}),
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan []ReconcileEntry, 1)
+	go func() {
+		entries, _ := runtime.Reconcile(ctx, []Config{{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}}, func(Event) {})
+		done <- entries
+	}()
+	waitForSignal(t, node.upEntered, "tsnet readiness")
+	cancel()
+	waitForSignal(t, node.upCanceled, "tsnet readiness cancellation")
+	entries := <-done
+	if len(entries) != 1 || entries[0].Outcome != OutcomeStartFailed {
+		t.Fatalf("Reconcile entries = %+v, want cancelled startup failure", entries)
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestWatcherFailureEmitsOneErrorAndPreventsFalseConvergence(t *testing.T) {
+	failingWatcher := &controlledErrorWatcher{release: make(chan struct{})}
+	first := &fakeNode{watcherOverride: failingWatcher, status: Status{BackendState: "Starting"}}
+	second := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+	created := 0
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node {
+		created++
+		if created == 1 {
+			return first
+		}
+		return second
+	})
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 4)
+	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	<-events
+	close(failingWatcher.release)
+	errorEvent := <-events
+	if errorEvent.Status == nil || errorEvent.Status.State != StateError {
+		t.Fatalf("watcher event = %+v, want one sanitized error", errorEvent)
+	}
+	entries, err := runtime.Reconcile(context.Background(), []Config{config}, func(Event) {})
+	if err != nil || len(entries) != 1 || entries[0].Outcome != OutcomeConverged || created != 2 {
+		t.Fatalf("reconcile after watcher failure = (%+v, %v, nodes=%d), want confirmed replacement", entries, err, created)
+	}
+	select {
+	case extra := <-events:
+		t.Fatalf("extra watcher failure event = %+v", extra)
+	default:
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestWatcherFailureDuringStartupReturnsStartFailedWithoutOnline(t *testing.T) {
+	watcher := &controlledErrorWatcher{release: make(chan struct{})}
+	node := &fakeNode{
+		watcherOverride: watcher,
+		status:          Status{BackendState: "Starting"},
+		statusEntered:   make(chan struct{}),
+		releaseStatus:   make(chan struct{}),
+	}
+	defer close(node.releaseStatus)
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 2)
+	result := make(chan []ReconcileEntry, 1)
+	go func() {
+		entries, _ := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event })
+		result <- entries
+	}()
+	waitForSignal(t, node.statusEntered, "startup status read")
+	close(watcher.release)
+	var entries []ReconcileEntry
+	select {
+	case entries = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("watcher failure did not cancel the initial status read")
+	}
+	if len(entries) != 1 || entries[0].Outcome != OutcomeStartFailed {
+		t.Fatalf("Reconcile entries = %+v, want start failure", entries)
+	}
+	if portal := runtime.portal(testPortalID); portal != nil {
+		t.Fatal("failed startup retained portal ownership")
+	}
+	event := <-events
+	if event.Status == nil || event.Status.State != StateError {
+		t.Fatalf("watcher failure event = %+v, want one sanitized error", event)
+	}
+	select {
+	case stale := <-events:
+		t.Fatalf("unexpected startup event after watcher failure = %+v", stale)
+	default:
+	}
+}
+
+func TestProxyServeFailureEmitsOneErrorAndRecoversOnlyAfterConfirmedClose(t *testing.T) {
+	failingListener := newControlledFailureListener()
+	first := &fakeNode{
+		watcher:          newFakeWatcher(),
+		status:           Status{BackendState: "Running", DNSName: "hermes.example.ts.net.", CertDomains: []string{"hermes.example.ts.net"}},
+		listenerOverride: failingListener,
+		closeResults:     []error{errors.New("node close failed")},
+	}
+	second := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+	created := 0
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node {
+		created++
+		if created == 1 {
+			return first
+		}
+		return second
+	})
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 4)
+	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	<-events
+	close(failingListener.release)
+	errorEvent := <-events
+	if errorEvent.Status == nil || errorEvent.Status.State != StateError {
+		t.Fatalf("proxy Serve failure event = %+v, want one sanitized error", errorEvent)
+	}
+	entries, err := runtime.Reconcile(context.Background(), []Config{config}, func(Event) {})
+	if err != nil || len(entries) != 1 || entries[0].Outcome != OutcomeStartFailed || created != 1 {
+		t.Fatalf("reconcile before confirmed close = (%+v, %v, nodes=%d), want retained failure", entries, err, created)
+	}
+	entries, err = runtime.Reconcile(context.Background(), []Config{config}, func(Event) {})
+	if err != nil || len(entries) != 1 || entries[0].Outcome != OutcomeConverged || created != 2 {
+		t.Fatalf("reconcile after confirmed close = (%+v, %v, nodes=%d), want replacement", entries, err, created)
+	}
+	select {
+	case extra := <-events:
+		t.Fatalf("extra proxy Serve failure event = %+v", extra)
+	default:
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestUnexpectedProxyListenerCloseEmitsError(t *testing.T) {
+	listener := newUnexpectedClosedListener()
+	node := &fakeNode{
+		watcher:          newFakeWatcher(),
+		status:           Status{BackendState: "Running", DNSName: "hermes.example.ts.net.", CertDomains: []string{"hermes.example.ts.net"}},
+		listenerOverride: listener,
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	defer runtime.Close(context.Background())
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 2)
+	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	<-events
+	close(listener.release)
+	select {
+	case event := <-events:
+		if event.Status == nil || event.Status.State != StateError {
+			t.Fatalf("unexpected listener close event = %+v, want one sanitized error", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unexpected listener close did not fail portal health")
+	}
+}
+
+func TestRuntimeCloseSuppressesIntentionalProxyListenerClose(t *testing.T) {
+	node := &fakeNode{
+		watcher: newFakeWatcher(),
+		status:  Status{BackendState: "Running", DNSName: "hermes.example.ts.net.", CertDomains: []string{"hermes.example.ts.net"}},
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 2)
+	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	<-events
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("intentional proxy listener close emitted event = %+v", event)
+	default:
+	}
+}
+
+func TestProxyFailureDuringWatcherStatusEmitsOneErrorWithoutStaleOnline(t *testing.T) {
+	for _, test := range []struct {
+		name                     string
+		ignoreStatusCancellation bool
+	}{
+		{name: "context error"},
+		{name: "stale success", ignoreStatusCancellation: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			listener := newControlledFailureListener()
+			node := &fakeNode{
+				watcher:                  newFakeWatcher(),
+				status:                   Status{BackendState: "Running", DNSName: "hermes.example.ts.net.", CertDomains: []string{"hermes.example.ts.net"}},
+				listenerOverride:         listener,
+				blockStatusCall:          2,
+				statusEntered:            make(chan struct{}),
+				statusReturned:           make(chan struct{}),
+				releaseStatus:            make(chan struct{}),
+				ignoreStatusCancellation: test.ignoreStatusCancellation,
+			}
+			runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+			config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+			events := make(chan Event, 3)
+			if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
+				t.Fatalf("initial Reconcile: %v", err)
+			}
+			<-events
+			node.watcher.send(Notification{})
+			waitForSignal(t, node.statusEntered, "watcher status read")
+			close(listener.release)
+			waitForPortalPhase(t, runtime.portal(testPortalID), portalFailed)
+			close(node.releaseStatus)
+			waitForSignal(t, node.statusReturned, "watcher status completion")
+			event := <-events
+			if event.Status == nil || event.Status.State != StateError {
+				t.Fatalf("proxy failure event = %+v, want one sanitized error", event)
+			}
+			select {
+			case stale := <-events:
+				t.Fatalf("stale watcher status after proxy failure = %+v", stale)
+			default:
+			}
+			_ = runtime.Close(context.Background())
+		})
+	}
+}
+
+func TestRuntimeCloseDoesNotEmitErrorForCanceledWatcherStatus(t *testing.T) {
+	node := &fakeNode{
+		watcher:         newFakeWatcher(),
+		status:          Status{BackendState: "Starting"},
+		blockStatusCall: 2,
+		statusEntered:   make(chan struct{}),
+		statusReturned:  make(chan struct{}),
+		releaseStatus:   make(chan struct{}),
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 2)
+	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	<-events
+	node.watcher.send(Notification{})
+	waitForSignal(t, node.statusEntered, "watcher status read")
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close(context.Background()) }()
+	waitForSignal(t, node.statusReturned, "canceled watcher status read")
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("close emitted watcher event = %+v", event)
+	default:
+	}
+}
+
+func TestRuntimeCloseSuppressesQueuedAuthenticationAfterWatcherCancellation(t *testing.T) {
+	node := &fakeNode{
+		watcher:         newFakeWatcher(),
+		status:          Status{BackendState: "Starting"},
+		blockStatusCall: 2,
+		statusEntered:   make(chan struct{}),
+		statusReturned:  make(chan struct{}),
+		releaseStatus:   make(chan struct{}),
+	}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 3)
+	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
+		t.Fatalf("initial Reconcile: %v", err)
+	}
+	<-events
+	if err := runtime.Authenticate(context.Background(), testPortalID); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	node.watcher.send(Notification{AuthURL: "https://login.tailscale.com/a/transient"})
+	waitForSignal(t, node.statusEntered, "watcher status read")
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close(context.Background()) }()
+	waitForSignal(t, node.statusReturned, "canceled watcher status read")
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("close emitted queued authentication = %+v", event)
+	default:
+	}
+}
+
+func TestStatusReadFailurePreventsFalseConvergence(t *testing.T) {
+	first := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+	second := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+	created := 0
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node {
+		created++
+		if created == 1 {
+			return first
+		}
+		return second
+	})
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	events := make(chan Event, 3)
+	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
+		t.Fatal(err)
+	}
+	<-events
+	first.statusErr = errors.New("status failed")
+	first.watcher.send(Notification{})
+	event := <-events
+	if event.Status == nil || event.Status.State != StateError {
+		t.Fatalf("status event = %+v, want sanitized error", event)
+	}
+	entries, err := runtime.Reconcile(context.Background(), []Config{config}, func(Event) {})
+	if err != nil || len(entries) != 1 || entries[0].Outcome != OutcomeConverged || created != 2 {
+		t.Fatalf("reconcile after status failure = (%+v, %v, nodes=%d), want confirmed replacement", entries, err, created)
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStartAndCloseAreSerialized(t *testing.T) {
 	factory := newFakeFactory()
 	factory.node.startEntered = make(chan struct{})
@@ -972,7 +1752,7 @@ func TestStartAndCloseAreSerialized(t *testing.T) {
 	}()
 	<-factory.node.startEntered
 	closeDone := make(chan error, 1)
-	go func() { closeDone <- runtime.Close() }()
+	go func() { closeDone <- runtime.Close(context.Background()) }()
 
 	select {
 	case <-closeDone:
@@ -991,6 +1771,94 @@ func TestStartAndCloseAreSerialized(t *testing.T) {
 	}
 }
 
+func TestPortalWatcherUsesRuntimeCancellationContext(t *testing.T) {
+	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	ctx, cancel := context.WithCancel(context.Background())
+	if _, err := runtime.Reconcile(ctx, []Config{{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}}, func(Event) {}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if node.watchContext == nil {
+		t.Fatal("Watch was not called")
+	}
+	cancel()
+	select {
+	case <-node.watchContext.Done():
+	case <-time.After(time.Second):
+		t.Fatal("watch context did not inherit runtime cancellation")
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestPortalFailureDoesNotWaitForLifecycleGate(t *testing.T) {
+	portal := &portalRuntime{gate: make(chan struct{}, 1), phase: portalRunning}
+	portal.gate <- struct{}{}
+	if err := portal.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	failed := make(chan struct{})
+	go func() {
+		portal.fail()
+		close(failed)
+	}()
+	waitForSignal(t, failed, "background failure while Portal gate is held")
+	phase, _, _ := portal.snapshot()
+	if phase != portalFailed {
+		t.Fatalf("Portal phase = %q, want failed", phase)
+	}
+	portal.release()
+}
+
+func TestRuntimeCloseStartsIndependentPortalsUnderOneDeadline(t *testing.T) {
+	first := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}, closeEntered: make(chan struct{}), releaseClose: make(chan struct{})}
+	second := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}, closeEntered: make(chan struct{}), releaseClose: make(chan struct{})}
+	created := 0
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node {
+		created++
+		if created == 1 {
+			return first
+		}
+		return second
+	})
+	configs := []Config{{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}, {ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled}}
+	if _, err := runtime.Reconcile(context.Background(), configs, func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runtime.Close(ctx) }()
+	waitForSignal(t, first.closeEntered, "first Portal close")
+	waitForSignal(t, second.closeEntered, "second Portal close")
+	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close = %v, want shared deadline", err)
+	}
+	close(first.releaseClose)
+	close(second.releaseClose)
+}
+
+func TestLateNodeCloseRetainsPortalOwnershipUntilItCompletes(t *testing.T) {
+	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}, closeEntered: make(chan struct{}), releaseClose: make(chan struct{})}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	err := runtime.Close(ctx)
+	cancel()
+	waitForSignal(t, node.closeEntered, "late node close")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close = %v, want deadline", err)
+	}
+	if runtime.portal(testPortalID) == nil {
+		t.Fatal("late node close released UUID ownership")
+	}
+	close(node.releaseClose)
+}
+
 func TestOnlineRuntimeListensTLSAndClosesListenerBeforeNode(t *testing.T) {
 	factory := newFakeFactory()
 	factory.status = Status{
@@ -1003,13 +1871,49 @@ func TestOnlineRuntimeListensTLSAndClosesListenerBeforeNode(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	if factory.node.listenNetwork != "tcp" || factory.node.listenAddress != ":443" {
-		t.Fatalf("ListenTLS = (%q, %q), want (tcp, :443)", factory.node.listenNetwork, factory.node.listenAddress)
+		t.Fatalf("Listen = (%q, %q), want (tcp, :443)", factory.node.listenNetwork, factory.node.listenAddress)
 	}
-	if err := runtime.Close(); err != nil {
+	if err := runtime.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if !factory.node.listener.closed || !factory.node.listenerClosedBeforeNode {
 		t.Fatal("TLS listener was not closed before the tsnet node")
+	}
+}
+
+func TestOnlineRuntimeTLSHandshakeUsesNodeCertificateCallback(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := newFakeFactory()
+	factory.status = Status{
+		BackendState: "Running",
+		DNSName:      "hermes.example.ts.net.",
+		CertDomains:  []string{"hermes.example.ts.net"},
+	}
+	certificate := testTLSCertificate(t)
+	certificateRequested := make(chan struct{}, 1)
+	factory.node.realListener = listener
+	factory.node.tlsConfig = &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		certificateRequested <- struct{}{}
+		return &certificate, nil
+	}}
+	runtime := NewRuntime(t.TempDir(), factory.New)
+	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	connection, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         "hermes.example.ts.net",
+	})
+	if err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	_ = connection.Close()
+	waitForSignal(t, certificateRequested, "node certificate callback")
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
 
@@ -1026,7 +1930,7 @@ func TestRuntimeCloseReturnsListenerFailure(t *testing.T) {
 	}
 	factory.node.listener.closeErr = errors.New("close failed")
 
-	if err := runtime.Close(); err == nil {
+	if err := runtime.Close(context.Background()); err == nil {
 		t.Fatal("Runtime.Close error = nil, want listener shutdown failure")
 	}
 	if !factory.node.listenerClosedBeforeNode {
@@ -1069,13 +1973,58 @@ func TestRuntimeCloseCancelsActiveRequest(t *testing.T) {
 	}()
 	waitForSignal(t, requestEntered, "active Local App request")
 	closeDone := make(chan error, 1)
-	go func() { closeDone <- runtime.Close() }()
+	go func() { closeDone <- runtime.Close(context.Background()) }()
 	if err := waitForRuntimeClose(t, closeDone); err != nil {
 		t.Fatal(err)
 	}
 	_ = waitForError(t, requestDone, "client request")
 	if !cancellationDeliveredBeforeNode {
 		t.Fatal("tsnet node closed before cancellation reached the active Local App proxy request")
+	}
+}
+
+func TestPortalCloseRetainsProxyUntilDeadlineDrainingCanBeRetried(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handlerEntered := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	proxy := startProxyServer(context.Background(), listener, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(handlerEntered)
+		<-releaseHandler
+	}), nil)
+	node := &fakeNode{watcher: newFakeWatcher()}
+	portal := &portalRuntime{gate: make(chan struct{}, 1), phase: portalRunning, proxy: proxy, node: node}
+	portal.gate <- struct{}{}
+	requestDone := make(chan struct{})
+	go func() {
+		response, _ := http.Get("http://" + listener.Addr().String())
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		close(requestDone)
+	}()
+	waitForSignal(t, handlerEntered, "blocking proxy request")
+	closeContext, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	err = portal.close(closeContext)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close = %v, want shared deadline", err)
+	}
+	if portal.proxy != proxy {
+		t.Fatal("Portal dropped its proxy after a close deadline")
+	}
+	if node.closeCalls != 0 {
+		t.Fatal("Portal closed the node before proxy draining completed")
+	}
+	close(releaseHandler)
+	if err := portal.close(context.Background()); err != nil {
+		t.Fatalf("retry Close: %v", err)
+	}
+	<-requestDone
+	if node.closeCalls != 1 {
+		t.Fatalf("node close calls = %d, want one after proxy drain", node.closeCalls)
 	}
 }
 
@@ -1094,7 +2043,7 @@ func TestRuntimeCloseClosesIdleConnection(t *testing.T) {
 	_ = response.Body.Close()
 
 	closeDone := make(chan error, 1)
-	go func() { closeDone <- runtime.Close() }()
+	go func() { closeDone <- runtime.Close(context.Background()) }()
 	if err := waitForRuntimeClose(t, closeDone); err != nil {
 		t.Fatal(err)
 	}
@@ -1134,7 +2083,7 @@ func TestRuntimeCloseClosesWebSocket(t *testing.T) {
 	defer connection.CloseNow()
 	waitForSignal(t, handlerEntered, "Local App WebSocket handler")
 	closeDone := make(chan error, 1)
-	go func() { closeDone <- runtime.Close() }()
+	go func() { closeDone <- runtime.Close(context.Background()) }()
 	waitForSignal(t, handlerExited, "Local App WebSocket handler exit")
 	if _, _, err := connection.Read(ctx); err == nil {
 		t.Fatal("client WebSocket remained open after Runtime.Close")
@@ -1190,7 +2139,7 @@ func TestRuntimeCloseCancelsActiveRemoteAppRequestBeforeNodeClose(t *testing.T) 
 	}()
 	waitForSignal(t, requestEntered, "active Remote App request")
 	closeDone := make(chan error, 1)
-	go func() { closeDone <- runtime.Close() }()
+	go func() { closeDone <- runtime.Close(context.Background()) }()
 	if err := waitForRuntimeClose(t, closeDone); err != nil {
 		t.Fatal(err)
 	}
@@ -1213,7 +2162,7 @@ func TestRuntimeCloseClosesIdleRemoteAppTransport(t *testing.T) {
 	_, _ = io.Copy(io.Discard, response.Body)
 	_ = response.Body.Close()
 
-	if err := runtime.Close(); err != nil {
+	if err := runtime.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !transport.closed.Load() {
@@ -1278,7 +2227,7 @@ func TestRuntimeCloseClosesTrustedHTTPSRemoteAppWebSocket(t *testing.T) {
 	defer connection.CloseNow()
 	waitForSignal(t, handlerEntered, "trusted HTTPS Remote App WebSocket handler")
 	closeDone := make(chan error, 1)
-	go func() { closeDone <- runtime.Close() }()
+	go func() { closeDone <- runtime.Close(context.Background()) }()
 	waitForSignal(t, handlerExited, "trusted HTTPS Remote App WebSocket handler exit")
 	if _, _, err := connection.Read(ctx); err == nil {
 		t.Fatal("client WebSocket remained open after Runtime.Close")
@@ -1363,7 +2312,7 @@ func TestRemoteAppPortalsKeepTrafficAndFailuresIsolated(t *testing.T) {
 		entries[0].Outcome != OutcomeConverged || entries[1].Outcome != OutcomeConverged {
 		t.Fatalf("Reconcile = (%+v, %v), want both Remote Apps online", entries, err)
 	}
-	t.Cleanup(func() { _ = runtime.Close() })
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 
 	assertRemoteAppResponse(t, "http://"+firstListener.Addr().String(), "/", http.StatusOK, "first")
 	assertRemoteAppResponse(t, "http://"+secondListener.Addr().String(), "/", http.StatusOK, "second")
@@ -1419,7 +2368,7 @@ func newOnlineRuntimeWithLocalAppWithProxy(
 		_ = listener.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = runtime.Close() })
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 	return runtime, "http://" + listener.Addr().String(), factory
 }
 
@@ -1481,7 +2430,7 @@ func newOnlineRuntimeWithRemoteAppWithProxy(
 		_ = listener.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = runtime.Close() })
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 	return runtime, "http://" + listener.Addr().String(), factory, trackedTransport
 }
 
@@ -1503,6 +2452,22 @@ func waitForSignal(t *testing.T, signal <-chan struct{}, description string) {
 	case <-signal:
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func waitForPortalPhase(t *testing.T, portal *portalRuntime, want portalPhase) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		phase, _, _ := portal.snapshot()
+		if phase == want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("Portal phase = %q, want %q", phase, want)
+		default:
+		}
 	}
 }
 
@@ -1567,14 +2532,27 @@ func (f *fakeFactory) New(dir, hostname string) Node {
 type fakeNode struct {
 	mu                        sync.Mutex
 	status                    Status
+	statusErr                 error
+	statusCalls               int
+	statusResults             []Status
+	blockStatusCall           int
+	statusEntered             chan struct{}
+	statusReturned            chan struct{}
+	releaseStatus             chan struct{}
+	ignoreStatusCancellation  bool
 	nodeID                    string
 	watcher                   *fakeWatcher
+	watcherOverride           Watcher
+	watchContext              context.Context
 	startErr                  error
 	closeResults              []error
 	closeCalls                int
 	loginRequested            bool
 	startEntered              chan struct{}
 	releaseStart              chan struct{}
+	startHook                 func()
+	upEntered                 chan struct{}
+	upCanceled                chan struct{}
 	startReturned             bool
 	closedBeforeStartReturned bool
 	closed                    bool
@@ -1582,8 +2560,12 @@ type fakeNode struct {
 	listenAddress             string
 	listener                  *fakeListener
 	realListener              net.Listener
+	listenerOverride          net.Listener
+	tlsConfig                 *tls.Config
 	listenerClosedBeforeNode  bool
 	observeClose              func()
+	closeEntered              chan struct{}
+	releaseClose              chan struct{}
 }
 
 func (n *fakeNode) clone() *fakeNode {
@@ -1594,6 +2576,9 @@ func (n *fakeNode) clone() *fakeNode {
 }
 
 func (n *fakeNode) Start() error {
+	if n.startHook != nil {
+		n.startHook()
+	}
 	if n.startEntered != nil {
 		close(n.startEntered)
 		<-n.releaseStart
@@ -1604,25 +2589,74 @@ func (n *fakeNode) Start() error {
 	return n.startErr
 }
 
-func (n *fakeNode) Status(context.Context) (Status, error) { return n.status, nil }
-func (n *fakeNode) Watch(context.Context) (Watcher, error) { return n.watcher, nil }
+func (n *fakeNode) Status(ctx context.Context) (Status, error) {
+	n.mu.Lock()
+	n.statusCalls++
+	status := n.status
+	if n.statusCalls <= len(n.statusResults) {
+		status = n.statusResults[n.statusCalls-1]
+	}
+	block := n.blockStatusCall == 0 || n.statusCalls == n.blockStatusCall
+	statusErr := n.statusErr
+	n.mu.Unlock()
+	if n.statusEntered != nil && block {
+		close(n.statusEntered)
+		if n.statusReturned != nil {
+			defer close(n.statusReturned)
+		}
+		if n.ignoreStatusCancellation {
+			<-n.releaseStatus
+			return status, statusErr
+		}
+		select {
+		case <-n.releaseStatus:
+		case <-ctx.Done():
+			return Status{}, ctx.Err()
+		}
+	}
+	return status, statusErr
+}
+func (n *fakeNode) Watch(ctx context.Context) (Watcher, error) {
+	n.watchContext = ctx
+	if n.watcherOverride != nil {
+		return n.watcherOverride, nil
+	}
+	return n.watcher, nil
+}
 func (n *fakeNode) StartLoginInteractive(context.Context) error {
 	n.loginRequested = true
 	return nil
 }
-func (n *fakeNode) ListenTLS(network, address string) (net.Listener, error) {
+func (n *fakeNode) Up(ctx context.Context) (Status, error) {
+	if n.upEntered != nil {
+		close(n.upEntered)
+		<-ctx.Done()
+		close(n.upCanceled)
+		return Status{}, ctx.Err()
+	}
+	return n.status, nil
+}
+func (n *fakeNode) Listen(network, address string) (net.Listener, error) {
 	n.listenNetwork = network
 	n.listenAddress = address
+	if n.listenerOverride != nil {
+		return n.listenerOverride, nil
+	}
 	if n.realListener != nil {
 		return n.realListener, nil
 	}
 	n.listener = newFakeListener()
 	return n.listener, nil
 }
+func (n *fakeNode) TLSConfig() *tls.Config { return n.tlsConfig }
 func (n *fakeNode) Close() error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.closeCalls++
+	if n.closeEntered != nil {
+		close(n.closeEntered)
+		<-n.releaseClose
+	}
 	if n.observeClose != nil {
 		n.observeClose()
 	}
@@ -1641,6 +2675,24 @@ func (n *fakeNode) Close() error {
 		return n.closeResults[n.closeCalls-1]
 	}
 	return nil
+}
+
+func testTLSCertificate(t *testing.T) tls.Certificate {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Minute),
+		DNSNames:     []string{"hermes.example.ts.net"},
+	}, &x509.Certificate{}, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: privateKey}
 }
 
 type fakeListener struct {
@@ -1671,6 +2723,58 @@ type fakeAddr string
 func (a fakeAddr) Network() string { return string(a) }
 func (a fakeAddr) String() string  { return string(a) }
 
+type controlledFailureListener struct {
+	release chan struct{}
+	closed  chan struct{}
+	close   sync.Once
+}
+
+type unexpectedClosedListener struct {
+	release chan struct{}
+	closed  chan struct{}
+	close   sync.Once
+}
+
+func newUnexpectedClosedListener() *unexpectedClosedListener {
+	return &unexpectedClosedListener{release: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (l *unexpectedClosedListener) Accept() (net.Conn, error) {
+	select {
+	case <-l.release:
+		return nil, net.ErrClosed
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *unexpectedClosedListener) Close() error {
+	l.close.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (*unexpectedClosedListener) Addr() net.Addr { return fakeAddr("tailnet") }
+
+func newControlledFailureListener() *controlledFailureListener {
+	return &controlledFailureListener{release: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (l *controlledFailureListener) Accept() (net.Conn, error) {
+	select {
+	case <-l.release:
+		return nil, errors.New("tailnet listener failed")
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *controlledFailureListener) Close() error {
+	l.close.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (*controlledFailureListener) Addr() net.Addr { return fakeAddr("tailnet") }
+
 type fakeWatcher struct {
 	ch chan Notification
 }
@@ -1685,6 +2789,91 @@ func (w *fakeWatcher) Next() (Notification, error) {
 }
 func (w *fakeWatcher) Close() error                   { close(w.ch); return nil }
 func (w *fakeWatcher) send(notification Notification) { w.ch <- notification }
+
+type blockedCloseWatcher struct {
+	closed       chan struct{}
+	closeEntered chan struct{}
+	releaseClose chan struct{}
+	closeOnce    sync.Once
+	closedOnce   sync.Once
+	releaseOnce  sync.Once
+}
+
+func newBlockedCloseWatcher() *blockedCloseWatcher {
+	return &blockedCloseWatcher{
+		closed:       make(chan struct{}),
+		closeEntered: make(chan struct{}),
+		releaseClose: make(chan struct{}),
+	}
+}
+
+func (w *blockedCloseWatcher) Next() (Notification, error) {
+	<-w.closed
+	return Notification{}, errors.New("closed")
+}
+
+func (w *blockedCloseWatcher) Close() error {
+	w.closeOnce.Do(func() { close(w.closeEntered) })
+	<-w.releaseClose
+	w.closedOnce.Do(func() { close(w.closed) })
+	return nil
+}
+
+func (w *blockedCloseWatcher) release() { w.releaseOnce.Do(func() { close(w.releaseClose) }) }
+
+type controlledErrorWatcher struct{ release chan struct{} }
+
+func (w *controlledErrorWatcher) Next() (Notification, error) {
+	<-w.release
+	return Notification{}, errors.New("watch failed")
+}
+
+func (*controlledErrorWatcher) Close() error { return nil }
+
+type startupBarrierWatcher struct {
+	mu           sync.Mutex
+	notification Notification
+	release      chan struct{}
+	nextReturned chan struct{}
+	closed       chan struct{}
+	releaseOnce  sync.Once
+	closeOnce    sync.Once
+	delivered    bool
+}
+
+func newStartupBarrierWatcher(notification Notification) *startupBarrierWatcher {
+	return &startupBarrierWatcher{
+		notification: notification,
+		release:      make(chan struct{}),
+		nextReturned: make(chan struct{}),
+		closed:       make(chan struct{}),
+	}
+}
+
+func (w *startupBarrierWatcher) Next() (Notification, error) {
+	select {
+	case <-w.release:
+		w.mu.Lock()
+		if !w.delivered {
+			w.delivered = true
+			w.mu.Unlock()
+			close(w.nextReturned)
+			return w.notification, nil
+		}
+		w.mu.Unlock()
+		<-w.closed
+		return Notification{}, errors.New("closed")
+	case <-w.closed:
+		return Notification{}, errors.New("closed")
+	}
+}
+
+func (w *startupBarrierWatcher) Close() error {
+	w.closeOnce.Do(func() { close(w.closed) })
+	return nil
+}
+
+func (w *startupBarrierWatcher) releaseNext() { w.releaseOnce.Do(func() { close(w.release) }) }
 
 type cancellationTrackingTransport struct {
 	transport  http.RoundTripper
