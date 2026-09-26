@@ -15,11 +15,11 @@ func TestRuntimeDoesNotHoldRegistryDuringAnotherPortalStartup(t *testing.T) {
 	releaseStart := make(chan struct{})
 	factory := &lifecycleFactory{blockedStart: blockedStart, releaseStart: releaseStart}
 	runtime := NewRuntime(t.TempDir(), factory.new)
-	initial := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	initial := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	if _, err := runtime.Reconcile(context.Background(), []Config{initial}, func(Event) {}); err != nil {
 		t.Fatal(err)
 	}
-	slow := Config{ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled}
+	slow := Config{PublicAccess: PublicAccessModePrivate, ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled}
 	done := make(chan struct{})
 	go func() {
 		_, _ = runtime.Reconcile(context.Background(), []Config{initial, slow}, func(Event) {})
@@ -70,7 +70,7 @@ func TestRuntimeDoesNotAdmitPortalsAfterCancellationOrCloseSnapshot(t *testing.T
 		created <- name
 		return &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
 	})
-	first := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	first := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	if _, err := runtime.Reconcile(context.Background(), []Config{first}, func(Event) {}); err != nil {
 		t.Fatalf("initial Reconcile: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestRuntimeDoesNotAdmitPortalsAfterCancellationOrCloseSnapshot(t *testing.T
 
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := runtime.Reconcile(cancelled, []Config{{
+	if _, err := runtime.Reconcile(cancelled, []Config{{PublicAccess: PublicAccessModePrivate,
 		ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled,
 	}}, func(Event) {}); !errors.Is(err, context.Canceled) {
 		t.Errorf("cancelled Reconcile = %v, want context cancellation", err)
@@ -94,7 +94,7 @@ func TestRuntimeDoesNotAdmitPortalsAfterCancellationOrCloseSnapshot(t *testing.T
 
 	liveReconcile := make(chan error, 1)
 	go func() {
-		_, err := runtime.Reconcile(context.Background(), []Config{{
+		_, err := runtime.Reconcile(context.Background(), []Config{{PublicAccess: PublicAccessModePrivate,
 			ID: "7ea74329-3144-4ba2-925f-138d14d61fcc", Name: "selina", Destination: localAppDestination(8789), DesiredState: DesiredStateEnabled,
 		}}, func(Event) {})
 		liveReconcile <- err

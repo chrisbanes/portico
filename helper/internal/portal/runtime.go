@@ -32,7 +32,24 @@ type Config struct {
 	Name         string
 	Destination  Destination
 	DesiredState DesiredState
+	PublicAccess PublicAccessMode
 }
+
+type PublicAccessMode string
+
+const (
+	PublicAccessModePrivate PublicAccessMode = "private"
+	PublicAccessModePublic  PublicAccessMode = "public"
+)
+
+type PublicAccessStatus string
+
+const (
+	PublicAccessStatusOff        PublicAccessStatus = "off"
+	PublicAccessStatusPublishing PublicAccessStatus = "publishing"
+	PublicAccessStatusEnabled    PublicAccessStatus = "enabled"
+	PublicAccessStatusBlocked    PublicAccessStatus = "blocked"
+)
 
 type Destination struct {
 	Kind   string `json:"kind"`
@@ -166,6 +183,15 @@ func (c Config) Validate() error {
 	if !uuidPattern.MatchString(c.ID) || !dnsLabelPattern.MatchString(c.Name) || c.Destination.Validate() != nil {
 		return errors.New("invalid portal configuration")
 	}
+	switch c.PublicAccess {
+	case PublicAccessModePrivate:
+	case PublicAccessModePublic:
+		if c.Destination.Kind != DestinationLocalApp {
+			return errors.New("public access requires a Local App")
+		}
+	default:
+		return errors.New("invalid public access mode")
+	}
 	return nil
 }
 
@@ -217,13 +243,14 @@ type Node interface {
 type NodeFactory func(dir, hostname string) Node
 
 type StatusEvent struct {
-	State          State    `json:"state"`
-	StableNodeID   string   `json:"stableNodeId,omitempty"`
-	AssignedName   string   `json:"assignedName,omitempty"`
-	PortalURL      string   `json:"portalURL,omitempty"`
-	Addresses      []string `json:"addresses"`
-	TailnetName    string   `json:"tailnetName,omitempty"`
-	MagicDNSSuffix string   `json:"magicDNSSuffix,omitempty"`
+	State              State              `json:"state"`
+	PublicAccessStatus PublicAccessStatus `json:"publicAccessStatus"`
+	StableNodeID       string             `json:"stableNodeId,omitempty"`
+	AssignedName       string             `json:"assignedName,omitempty"`
+	PortalURL          string             `json:"portalURL,omitempty"`
+	Addresses          []string           `json:"addresses"`
+	TailnetName        string             `json:"tailnetName,omitempty"`
+	MagicDNSSuffix     string             `json:"magicDNSSuffix,omitempty"`
 }
 
 type Event struct {
@@ -376,12 +403,16 @@ func (r *Runtime) reconcilePortal(
 		if phase == portalRunning && previous.Name == config.Name {
 			if previous.Destination != config.Destination {
 				err := portal.updateDestinationLocked(config.Destination)
+				if err == nil {
+					portal.updatePublicAccessLocked(config.PublicAccess)
+				}
 				portal.release()
 				if err != nil {
 					return OutcomeStartFailed
 				}
 				return OutcomeConverged
 			}
+			portal.updatePublicAccessLocked(config.PublicAccess)
 			portal.release()
 			return OutcomeConverged
 		}
@@ -715,8 +746,18 @@ func (r *portalRuntime) updateDestinationLocked(destination Destination) error {
 	if r.proxy != nil {
 		r.proxy.replaceHandler(handler)
 	}
+	r.mu.Lock()
 	r.config.Destination = destination
+	r.mu.Unlock()
 	return nil
+}
+
+func (r *portalRuntime) updatePublicAccessLocked(publicAccess PublicAccessMode) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.config != nil {
+		r.config.PublicAccess = publicAccess
+	}
 }
 
 func (r *portalRuntime) authenticate(ctx context.Context) error {
@@ -866,7 +907,9 @@ func (r *portalRuntime) errorEventLocked() Event {
 	if r.config == nil {
 		return Event{}
 	}
-	return Event{PortalID: r.config.ID, Status: &StatusEvent{State: StateError, Addresses: []string{}}}
+	return Event{PortalID: r.config.ID, Status: &StatusEvent{
+		State: StateError, PublicAccessStatus: PublicAccessStatusOff, Addresses: []string{},
+	}}
 }
 
 func (r *portalRuntime) watch(ctx context.Context, watcher Watcher, startupDelivery <-chan struct{}) {
@@ -1074,11 +1117,12 @@ func (r *portalRuntime) emitEventLocked(event Event) {
 
 func mapStatus(status Status) StatusEvent {
 	mapped := StatusEvent{
-		State:          mapBackendState(status.BackendState),
-		StableNodeID:   status.StableNodeID,
-		Addresses:      append([]string{}, status.Addresses...),
-		TailnetName:    status.TailnetName,
-		MagicDNSSuffix: status.MagicDNSSuffix,
+		State:              mapBackendState(status.BackendState),
+		PublicAccessStatus: PublicAccessStatusOff,
+		StableNodeID:       status.StableNodeID,
+		Addresses:          append([]string{}, status.Addresses...),
+		TailnetName:        status.TailnetName,
+		MagicDNSSuffix:     status.MagicDNSSuffix,
 	}
 	dnsName := strings.TrimSuffix(status.DNSName, ".")
 	if dnsName != "" {
