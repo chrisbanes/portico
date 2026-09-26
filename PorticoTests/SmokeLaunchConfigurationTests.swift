@@ -3,6 +3,43 @@ import XCTest
 @testable import PorticoApplication
 
 final class SmokeLaunchConfigurationTests: XCTestCase {
+    func testLocalSmokeHandshakeRequiresProtocolSevenConsentAndRecordsProtocolSevenWitness() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PorticoSmokeHandshakeTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+            .appendingPathComponent("Portico Dev", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(
+                at: root.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            )
+        }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let configuration = try XCTUnwrap(try SmokeLaunchConfiguration.current(
+            environment: [
+                SmokeLaunchConfiguration.consentEnvironmentKey: "accepted-v7",
+                SmokeLaunchConfiguration.expectedRootEnvironmentKey: root.path,
+            ],
+            variant: .dev
+        ))
+
+        XCTAssertThrowsError(try SmokeLaunchConfiguration.current(
+            environment: [
+                SmokeLaunchConfiguration.consentEnvironmentKey: "accepted-v6",
+                SmokeLaunchConfiguration.expectedRootEnvironmentKey: root.path,
+            ],
+            variant: .dev
+        ))
+
+        try configuration.recordAcceptedHandshake()
+        let witness = try String(
+            contentsOf: root.appendingPathComponent("smoke-handshake-witness"),
+            encoding: .utf8
+        )
+        XCTAssertEqual(witness, "accepted-v7\n")
+    }
+
     func testAdmissionRejectsMismatchedFoundationRootBeforeStoreClosure() throws {
         var called = false
         let expected = URL(fileURLWithPath: "/private/tmp/PorticoSmokeTests/Library/Application Support/Portico Dev", isDirectory: true)
