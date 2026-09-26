@@ -3,8 +3,8 @@ import XCTest
 
 final class HelperProtocolTests: XCTestCase {
     func testVersionSevenReconciliationFixturesRoundTrip() throws {
-        let requestFixture = #"{"version":7,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","destination":{"kind":"localApp","port":8787},"desiredState":"enabled","publicAccess":"private"},{"portalId":"5EA74329-3144-4BA2-925F-138D14D61FCC","portalName":"atlas","destination":{"kind":"localApp","port":8788},"desiredState":"stopped","publicAccess":"public"}]}}"#
-        let responseFixture = #"{"version":7,"requestId":"reconcile-1","result":{"entries":[{"portalId":"5EA74329-3144-4BA2-925F-138D14D61FCC","outcome":"converged"},{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","outcome":"startFailed"}]}}"#
+        let requestFixture = #"{"version":7,"requestId":"reconcile-1","command":"reconcilePortals","payload":{"portals":[{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","portalName":"hermes","destination":{"kind":"localApp","port":8787},"desiredState":"enabled","publicAccess":"private"},{"portalId":"5EA74329-3144-4BA2-925F-138D14D61FCC","portalName":"atlas","destination":{"kind":"remoteApp","scheme":"https","host":"app.example.com","port":443},"desiredState":"stopped","publicAccess":"private"},{"portalId":"C883C3CF-A143-4B42-AE22-B60CDB3B7B32","portalName":"public-app","destination":{"kind":"localApp","port":8788},"desiredState":"enabled","publicAccess":"public"}]}}"#
+        let responseFixture = #"{"version":7,"requestId":"reconcile-1","result":{"entries":[{"portalId":"5EA74329-3144-4BA2-925F-138D14D61FCC","outcome":"converged"},{"portalId":"9F55CA93-D7B3-4EAB-A871-310EA576005A","outcome":"startFailed"},{"portalId":"C883C3CF-A143-4B42-AE22-B60CDB3B7B32","outcome":"converged"}]}}"#
 
         try assertRoundTrip(requestFixture, as: HelperRequest<ReconcilePortalsPayload>.self)
         let response = try JSONDecoder().decode(
@@ -22,6 +22,10 @@ final class HelperProtocolTests: XCTestCase {
                 ReconcilePortalEntry(
                     portalId: UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!,
                     outcome: .startFailed
+                ),
+                ReconcilePortalEntry(
+                    portalId: UUID(uuidString: "c883c3cf-a143-4b42-ae22-b60cdb3b7b32")!,
+                    outcome: .converged
                 ),
             ]
         )
