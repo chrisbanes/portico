@@ -272,7 +272,8 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
                         portalId: $0.id,
                         portalName: $0.name,
                         destination: $0.destination,
-                        desiredState: $0.desiredState
+                        desiredState: $0.desiredState,
+                        publicAccess: $0.publicAccess
                     )
                 }
         )

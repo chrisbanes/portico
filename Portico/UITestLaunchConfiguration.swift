@@ -460,6 +460,7 @@ private final class UITestHelperProcess: HelperProcess {
                     assignedName: "\(portal.portalName)-1",
                     portalURL: URL(string: "https://\(portal.portalName)-1.example.ts.net"),
                     addresses: portal.portalName == "second-portal" ? ["100.64.0.11"] : ["100.64.0.10"],
+                    publicAccessStatus: .off,
                     tailnetName: "test-tailnet",
                     magicDNSSuffix: "example.ts.net"
                 )

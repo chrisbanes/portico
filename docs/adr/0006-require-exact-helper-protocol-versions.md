@@ -32,7 +32,15 @@ contracts that a version-5 helper cannot certify. A version-6 app and helper
 therefore exact-match and reject version-5 and earlier peers. Version 6 retains
 the version-5 JSONL command names, payloads, fields, results, and errors.
 
-The persistence record's version 4 (`InstallationRecord.currentVersion` and
-`installation-v4.json`) also introduced Remote App records, but it is a
-separate migration domain. Persistence and helper-protocol versions have
-independent migration and compatibility rules even when a feature changes both.
+Public Access mode and listener status introduce protocol version 7. Every
+reconciliation entry now requires a closed `publicAccess` mode, and every
+Portal status event requires a closed `publicAccessStatus` fact. A version-7
+app and helper exact-match and reject version-6 and earlier peers. The helper
+still runs only its private listener in version 7 and reports `off`; public
+listener lifecycle belongs to the later Funnel work.
+
+Persistence record version 4 introduced Remote App records and is now
+historical; version 5 (`InstallationRecord.currentVersion` and
+`installation-v5.json`) adds the current Public Access mode. Persistence and
+helper-protocol versions have independent migration and compatibility rules
+even when a feature changes both.

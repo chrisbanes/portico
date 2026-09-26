@@ -30,6 +30,7 @@ final class PortalPresentationTests: XCTestCase {
             assignedName: "hermes-1",
             portalURL: URL(string: "https://hermes-1.example.ts.net/"),
             addresses: [],
+            publicAccessStatus: .off,
             magicDNSSuffix: "example.ts.net"
         )
 
@@ -66,6 +67,7 @@ final class PortalPresentationTests: XCTestCase {
             assignedName: "hermes",
             portalURL: URL(string: "https://hermes.example.ts.net/"),
             addresses: [],
+            publicAccessStatus: .off,
             magicDNSSuffix: "example.ts.net"
         )
 
