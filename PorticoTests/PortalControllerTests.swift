@@ -738,6 +738,44 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(try store.loadInstallation().portals.first?.destination, .localApp(port: 4321))
     }
 
+    func testPublicPortalRejectsRemoteDestinationBeforeWriteAndReconciliation() throws {
+        let saved = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date(),
+            publicAccess: .public
+        )
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(saved)
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+        let original = try Data(contentsOf: store.installationURL)
+        let originalReconciliationCount = client.reconciliations.count
+
+        controller.updateDestination(id: portalID, edit: PortalDestinationEdit(
+            kind: .remoteApp,
+            remoteAppScheme: .https,
+            remoteAppHost: "app.example.com",
+            remoteAppPort: "443"
+        ))
+
+        XCTAssertEqual(controller.message, "Make this Portal private before choosing a Remote App.")
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), original)
+        XCTAssertEqual(try store.loadInstallation().portals, [saved])
+        XCTAssertEqual(client.reconciliations.count, originalReconciliationCount)
+
+        controller.updateDestination(id: portalID, edit: PortalDestinationEdit(
+            kind: .localApp,
+            localAppPort: "8788"
+        ))
+
+        let changed = try XCTUnwrap(store.loadInstallation().portals.first)
+        XCTAssertEqual(changed.destination, .localApp(port: 8788))
+        XCTAssertEqual(changed.publicAccess, .public)
+        XCTAssertEqual(client.reconciliations.count, originalReconciliationCount + 1)
+    }
+
     func testAlreadySatisfiedStartAndStopAreHarmless() throws {
         let saved = PortalConfiguration(
             id: portalID,

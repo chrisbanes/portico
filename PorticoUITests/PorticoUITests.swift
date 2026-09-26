@@ -210,6 +210,26 @@ final class PorticoUITests: XCTestCase {
         XCTAssertFalse(app.buttons["selected-open-portal-url"].exists)
     }
 
+    func testSelectedPortalPublicAccessContract() {
+        let app = launch(scenario: "public-access")
+        app.typeKey("o", modifierFlags: [.command, .shift])
+        app.buttons["management-sidebar-portal-portal-one"].click()
+
+        let publicAccess = app.staticTexts["selected-public-access-state"]
+        XCTAssertTrue(publicAccess.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertEqual(publicAccess.label, "Public Access")
+        XCTAssertTrue(waitForValue("Public — Off", element: publicAccess, timeout: 3), app.debugDescription)
+        XCTAssertFalse(app.buttons["selected-edit-destination-remote"].isEnabled)
+        let localPort = app.textFields["selected-edit-local-app-port"]
+        XCTAssertTrue(localPort.waitForExistence(timeout: 3), app.debugDescription)
+        localPort.click()
+        localPort.typeKey("a", modifierFlags: .command)
+        localPort.typeText("8081")
+        XCTAssertTrue(app.buttons["selected-update-destination"].isEnabled)
+        app.buttons["selected-update-destination"].click()
+        XCTAssertTrue(waitForValue("8081", element: localPort, timeout: 3), app.debugDescription)
+    }
+
     func testSelectedPortalDetailDailyActionsAndIsolation() {
         let app = launch(scenario: "management")
         app.typeKey("o", modifierFlags: [.command, .shift])

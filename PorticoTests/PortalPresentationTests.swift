@@ -87,6 +87,76 @@ final class PortalPresentationTests: XCTestCase {
         XCTAssertNil(presentation.collisionExplanation)
     }
 
+    func testPublicAccessPresentationUsesOnlyStoredModeAndStructuredStatus() {
+        let states: [PortalTailscaleState] = [.online, .connecting, .error]
+        let reachabilities: [LocalAppReachabilityState] = [.reachable, .unavailable]
+        let configurations: [(PortalPublicAccess, PortalStatusPayload?, Bool, String)] = [
+            (.private, nil, false, "Private — Off"),
+            (.private, nil, true, "Private — Off"),
+            (.private, PortalStatusPayload(
+                state: .error,
+                stableNodeId: nil,
+                assignedName: nil,
+                portalURL: nil,
+                addresses: [],
+                publicAccessStatus: .blocked
+            ), true, "Private — Off"),
+            (.public, nil, false, "Public — Status unavailable"),
+            (.public, nil, true, "Public — Status unavailable"),
+            (.public, PortalStatusPayload(
+                state: .online,
+                stableNodeId: nil,
+                assignedName: nil,
+                portalURL: nil,
+                addresses: [],
+                publicAccessStatus: .off
+            ), false, "Public — Off"),
+            (.public, PortalStatusPayload(
+                state: .connecting,
+                stableNodeId: nil,
+                assignedName: nil,
+                portalURL: nil,
+                addresses: [],
+                publicAccessStatus: .off
+            ), true, "Public — Off — Last Known"),
+        ]
+
+        for desiredState in [PortalDesiredState.enabled, .stopped] {
+            for state in states {
+                for reachability in reachabilities {
+                    for (publicAccess, status, isStale, expected) in configurations {
+                        let portal = PortalConfiguration(
+                            id: UUID(),
+                            name: "hermes",
+                            destination: .localApp(port: 8787),
+                            createdAt: Date(),
+                            desiredState: desiredState,
+                            publicAccess: publicAccess
+                        )
+                        let stateStatus = status.map { status in
+                            PortalStatusPayload(
+                                state: state,
+                                stableNodeId: status.stableNodeId,
+                                assignedName: status.assignedName,
+                                portalURL: status.portalURL,
+                                addresses: status.addresses,
+                                publicAccessStatus: status.publicAccessStatus
+                            )
+                        }
+                        let presentation = PortalPresentation(
+                            portal: portal,
+                            status: stateStatus,
+                            reachability: reachability,
+                            isStale: isStale
+                        )
+
+                        XCTAssertEqual(presentation.publicAccessState, expected)
+                    }
+                }
+            }
+        }
+    }
+
     func testAnnouncementsAreFixedAndContainNoRuntimeFacts() {
         XCTAssertEqual(PorticoAnnouncement.text(for: .helperConnected), "Helper connected.")
         XCTAssertEqual(PorticoAnnouncement.text(for: .helperTerminalFailure), "Helper unavailable.")

@@ -99,4 +99,43 @@ final class PortalActionAvailabilityTests: XCTestCase {
             XCTAssertFalse(invalid.editDestination)
         }
     }
+
+    func testPublicPortalAllowsLocalEditsButBlocksRemoteSelectionAndSubmission() {
+        let localEdit = PortalActionAvailability(context: PortalActionContext(
+            loggingPreference: .enabled,
+            inputsValid: true,
+            helperAvailability: .connected,
+            lifecycle: .active,
+            desiredState: .enabled,
+            isEditedDestinationValid: true,
+            isEditedDestinationRemoteApp: false,
+            publicAccess: .public
+        ))
+        XCTAssertTrue(localEdit.editDestination)
+        XCTAssertFalse(localEdit.selectRemoteApp)
+
+        let remoteEdit = PortalActionAvailability(context: PortalActionContext(
+            loggingPreference: .enabled,
+            inputsValid: true,
+            helperAvailability: .connected,
+            lifecycle: .active,
+            desiredState: .enabled,
+            isEditedDestinationValid: true,
+            isEditedDestinationRemoteApp: true,
+            publicAccess: .public
+        ))
+        XCTAssertFalse(remoteEdit.editDestination)
+        XCTAssertFalse(remoteEdit.selectRemoteApp)
+
+        let privatePortal = PortalActionAvailability(context: PortalActionContext(
+            loggingPreference: .enabled,
+            inputsValid: true,
+            helperAvailability: .connected,
+            lifecycle: .active,
+            desiredState: .enabled,
+            isEditedDestinationValid: true
+        ))
+        XCTAssertTrue(privatePortal.editDestination)
+        XCTAssertTrue(privatePortal.selectRemoteApp)
+    }
 }
