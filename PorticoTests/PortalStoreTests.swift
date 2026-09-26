@@ -80,6 +80,24 @@ final class PortalStoreTests: XCTestCase {
         XCTAssertEqual(installation.launchAtLoginOffer, .notOffered)
         XCTAssertEqual(installation.portals.count, 1)
         XCTAssertEqual(installation.portals.first?.publicAccess, .private)
+        XCTAssertEqual(
+            installation,
+            InstallationRecord(
+                portals: [
+                    PortalConfiguration(
+                        id: UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!,
+                        name: "hermes",
+                        localAppPort: 8787,
+                        createdAt: Date(timeIntervalSince1970: 1_786_000_000),
+                        desiredState: .enabled,
+                        lifecycle: .active,
+                        publicAccess: .private
+                    )
+                ],
+                operationalLogging: .enabled,
+                launchAtLoginOffer: .notOffered
+            )
+        )
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.legacyConfigurationURL.path))
     }
 
@@ -92,6 +110,10 @@ final class PortalStoreTests: XCTestCase {
 
         XCTAssertEqual(installation.operationalLogging, .undecided)
         XCTAssertEqual(installation.launchAtLoginOffer, .notOffered)
+        XCTAssertEqual(
+            installation,
+            InstallationRecord(operationalLogging: .undecided, launchAtLoginOffer: .notOffered)
+        )
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.versionTwoInstallationURL.path))
     }
 
@@ -99,15 +121,85 @@ final class PortalStoreTests: XCTestCase {
         let store = PortalStore(rootURL: temporaryRoot())
         try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
         try Data(
-            #"{"version":3,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"lifecycle":"active"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}"#.utf8
+            #"{"version":3,"tailnetBinding":{"name":"opaque-tailnet-id","magicDNSSuffix":"one.ts.net"},"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"desiredState":"stopped","lifecycle":"pendingTailnetRejection"}],"alerts":[{"id":"1F93E456-69EC-445A-8374-D7FC5558D0C7","kind":"crossTailnetRejection","portalName":"hermes","assignedName":"hermes-1","expectedMagicDNSSuffix":"one.ts.net","rejectedMagicDNSSuffix":"two.ts.net","createdAt":807692900}],"operationalLogging":"disabled","launchAtLoginOffer":"accepted"}"#.utf8
         ).write(to: store.versionThreeInstallationURL)
 
         let installation = try store.loadInstallation()
 
-        XCTAssertEqual(installation.portals.first?.destination, .localApp(port: 8787))
-        XCTAssertEqual(installation.portals.first?.publicAccess, .private)
+        XCTAssertEqual(
+            installation,
+            InstallationRecord(
+                tailnetBinding: TailnetBinding(name: "opaque-tailnet-id", magicDNSSuffix: "one.ts.net"),
+                portals: [
+                    PortalConfiguration(
+                        id: UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!,
+                        name: "hermes",
+                        localAppPort: 8787,
+                        createdAt: Date(timeIntervalSince1970: 1_786_000_000),
+                        desiredState: .stopped,
+                        lifecycle: .pendingTailnetRejection,
+                        publicAccess: .private
+                    )
+                ],
+                alerts: [
+                    InstallationAlert(
+                        id: UUID(uuidString: "1f93e456-69ec-445a-8374-d7fc5558d0c7")!,
+                        kind: .crossTailnetRejection,
+                        portalName: "hermes",
+                        assignedName: "hermes-1",
+                        expectedMagicDNSSuffix: "one.ts.net",
+                        rejectedMagicDNSSuffix: "two.ts.net",
+                        createdAt: Date(timeIntervalSince1970: 1_786_000_100)
+                    )
+                ],
+                operationalLogging: .disabled,
+                launchAtLoginOffer: .accepted
+            )
+        )
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.installationURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.versionThreeInstallationURL.path))
+    }
+
+    func testVersionTwoMigrationPreservesAllApplicableFactsAndAddsPrivateAccess() throws {
+        let store = PortalStore(rootURL: temporaryRoot())
+        try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
+        try Data(
+            #"{"version":2,"tailnetBinding":{"name":"opaque-tailnet-id","magicDNSSuffix":"one.ts.net"},"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"desiredState":"stopped","lifecycle":"pendingRemoval","removalAssignedName":"hermes-1"}],"alerts":[{"id":"1F93E456-69EC-445A-8374-D7FC5558D0C7","kind":"crossTailnetRejection","portalName":"hermes","assignedName":"hermes-1","expectedMagicDNSSuffix":"one.ts.net","rejectedMagicDNSSuffix":"two.ts.net","createdAt":807692900}]}"#.utf8
+        ).write(to: store.versionTwoInstallationURL)
+
+        let installation = try store.loadInstallation()
+
+        XCTAssertEqual(
+            installation,
+            InstallationRecord(
+                tailnetBinding: TailnetBinding(name: "opaque-tailnet-id", magicDNSSuffix: "one.ts.net"),
+                portals: [
+                    PortalConfiguration(
+                        id: UUID(uuidString: "9f55ca93-d7b3-4eab-a871-310ea576005a")!,
+                        name: "hermes",
+                        localAppPort: 8787,
+                        createdAt: Date(timeIntervalSince1970: 1_786_000_000),
+                        desiredState: .stopped,
+                        lifecycle: .pendingRemoval,
+                        removalAssignedName: "hermes-1",
+                        publicAccess: .private
+                    )
+                ],
+                alerts: [
+                    InstallationAlert(
+                        id: UUID(uuidString: "1f93e456-69ec-445a-8374-d7fc5558d0c7")!,
+                        kind: .crossTailnetRejection,
+                        portalName: "hermes",
+                        assignedName: "hermes-1",
+                        expectedMagicDNSSuffix: "one.ts.net",
+                        rejectedMagicDNSSuffix: "two.ts.net",
+                        createdAt: Date(timeIntervalSince1970: 1_786_000_100)
+                    )
+                ],
+                operationalLogging: .enabled,
+                launchAtLoginOffer: .notOffered
+            )
+        )
     }
 
     func testInvalidVersionThreeDestinationFailsClosedWithoutRemovingSource() throws {
