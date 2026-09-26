@@ -29,10 +29,10 @@ final class PortalConfigurationTests: XCTestCase {
         XCTAssertNil(PortalDestination(localAppPort: 0))
     }
 
-    func testVersionFourInstallationDefaultsRequireLoggingChoiceAndHaveNotOfferedLogin() {
+    func testVersionFiveInstallationDefaultsRequireLoggingChoiceAndHaveNotOfferedLogin() {
         let installation = InstallationRecord()
 
-        XCTAssertEqual(installation.version, 4)
+        XCTAssertEqual(installation.version, 5)
         XCTAssertEqual(installation.operationalLogging, .undecided)
         XCTAssertEqual(installation.launchAtLoginOffer, .notOffered)
     }

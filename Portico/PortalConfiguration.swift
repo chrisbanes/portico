@@ -6,6 +6,11 @@ enum RemoteAppScheme: String, Codable, Equatable {
     case https
 }
 
+enum PortalPublicAccess: String, Codable, Equatable {
+    case `private`
+    case `public`
+}
+
 enum PortalDestination: Codable, Equatable {
     case localApp(port: UInt16)
     case remoteApp(scheme: RemoteAppScheme, host: String, port: UInt16)
@@ -150,6 +155,7 @@ struct PortalConfiguration: Codable, Equatable {
     let id: UUID
     let name: String
     var destination: PortalDestination
+    var publicAccess: PortalPublicAccess
     let createdAt: Date
     var desiredState: PortalDesiredState = .enabled
     var lifecycle: PortalLifecycle = .active
@@ -162,7 +168,8 @@ struct PortalConfiguration: Codable, Equatable {
         createdAt: Date,
         desiredState: PortalDesiredState = .enabled,
         lifecycle: PortalLifecycle = .active,
-        removalAssignedName: String? = nil
+        removalAssignedName: String? = nil,
+        publicAccess: PortalPublicAccess = .private
     ) {
         guard let destination = PortalDestination(localAppPort: localAppPort) else {
             preconditionFailure("Portal destinations require a port from 1 through 65535.")
@@ -174,7 +181,8 @@ struct PortalConfiguration: Codable, Equatable {
             createdAt: createdAt,
             desiredState: desiredState,
             lifecycle: lifecycle,
-            removalAssignedName: removalAssignedName
+            removalAssignedName: removalAssignedName,
+            publicAccess: publicAccess
         )
     }
 
@@ -185,11 +193,13 @@ struct PortalConfiguration: Codable, Equatable {
         createdAt: Date,
         desiredState: PortalDesiredState = .enabled,
         lifecycle: PortalLifecycle = .active,
-        removalAssignedName: String? = nil
+        removalAssignedName: String? = nil,
+        publicAccess: PortalPublicAccess = .private
     ) {
         self.id = id
         self.name = name
         self.destination = destination
+        self.publicAccess = publicAccess
         self.createdAt = createdAt
         self.desiredState = desiredState
         self.lifecycle = lifecycle
@@ -217,6 +227,7 @@ extension PortalConfiguration {
         case id
         case name
         case destination
+        case publicAccess
         case createdAt
         case desiredState
         case lifecycle
@@ -228,6 +239,7 @@ extension PortalConfiguration {
         id = try container.decode(UUID.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
         destination = try container.decode(PortalDestination.self, forKey: .destination)
+        publicAccess = try container.decode(PortalPublicAccess.self, forKey: .publicAccess)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         desiredState = try container.decode(PortalDesiredState.self, forKey: .desiredState)
         lifecycle = try container.decode(PortalLifecycle.self, forKey: .lifecycle)
@@ -250,6 +262,7 @@ extension PortalConfiguration {
         try container.encode(id, forKey: .id)
         try container.encode(name, forKey: .name)
         try container.encode(destination, forKey: .destination)
+        try container.encode(publicAccess, forKey: .publicAccess)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(desiredState, forKey: .desiredState)
         try container.encode(lifecycle, forKey: .lifecycle)
@@ -298,7 +311,7 @@ enum LaunchAtLoginOfferState: String, Codable, Equatable {
 }
 
 struct InstallationRecord: Codable, Equatable {
-    static let currentVersion = 4
+    static let currentVersion = 5
 
     let version: Int
     var tailnetBinding: TailnetBinding?
@@ -330,7 +343,8 @@ extension InstallationRecord {
         }
         for portal in portals {
             guard isValidDNSLabel(portal.name.utf8),
-                  portal.lifecycle != .pendingRemoval || portal.removalAssignedName.map({ isValidDNSLabel($0.utf8) }) != false
+                  portal.lifecycle != .pendingRemoval || portal.removalAssignedName.map({ isValidDNSLabel($0.utf8) }) != false,
+                  portal.publicAccess != .public || portal.destination.isLocalApp
             else {
                 throw PortalStoreError.invalidInstallation
             }

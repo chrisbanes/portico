@@ -33,6 +33,10 @@ struct PortalStore {
     }
 
     var installationURL: URL {
+        rootURL.appendingPathComponent("installation-v5.json", isDirectory: false)
+    }
+
+    var versionFourInstallationURL: URL {
         rootURL.appendingPathComponent("installation-v4.json", isDirectory: false)
     }
 
@@ -77,6 +81,17 @@ struct PortalStore {
                 throw PortalStoreError.unsupportedVersion(installation.version)
             }
             try installation.validateCurrentRecord()
+            removeOlderFiles()
+            return installation
+        }
+        if let data = try storedDataIfPresent(at: versionFourInstallationURL) {
+            let historical = try JSONDecoder().decode(VersionFourInstallationRecord.self, from: data)
+            guard historical.version == VersionFourInstallationRecord.currentVersion else {
+                throw PortalStoreError.unsupportedVersion(historical.version)
+            }
+            let installation = historical.migrate()
+            try installation.validateCurrentRecord()
+            try save(installation)
             removeOlderFiles()
             return installation
         }
@@ -143,6 +158,10 @@ struct PortalStore {
     }
 
     func save(_ installation: InstallationRecord) throws {
+        guard installation.version == InstallationRecord.currentVersion else {
+            throw PortalStoreError.unsupportedVersion(installation.version)
+        }
+        try installation.validateCurrentRecord()
         try FileManager.default.createDirectory(
             at: rootURL,
             withIntermediateDirectories: true,
@@ -154,10 +173,86 @@ struct PortalStore {
     }
 
     private func removeOlderFiles() {
-        for url in [versionThreeInstallationURL, versionTwoInstallationURL, legacyConfigurationURL]
+        for url in [versionFourInstallationURL, versionThreeInstallationURL, versionTwoInstallationURL, legacyConfigurationURL]
         where FileManager.default.fileExists(atPath: url.path) {
             try? FileManager.default.removeItem(at: url)
         }
+    }
+}
+
+private struct VersionFourInstallationRecord: Decodable {
+    static let currentVersion = 4
+
+    let version: Int
+    let tailnetBinding: TailnetBinding?
+    let portals: [VersionFourPortalConfiguration]
+    let alerts: [InstallationAlert]
+    let operationalLogging: OperationalLoggingPreference
+    let launchAtLoginOffer: LaunchAtLoginOfferState
+
+    func migrate() -> InstallationRecord {
+        InstallationRecord(
+            tailnetBinding: tailnetBinding,
+            portals: portals.map { $0.migrate() },
+            alerts: alerts,
+            operationalLogging: operationalLogging,
+            launchAtLoginOffer: launchAtLoginOffer
+        )
+    }
+}
+
+private struct VersionFourPortalConfiguration: Decodable {
+    let id: UUID
+    let name: String
+    let destination: PortalDestination
+    let createdAt: Date
+    let desiredState: PortalDesiredState
+    let lifecycle: PortalLifecycle
+    let removalAssignedName: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case destination
+        case createdAt
+        case desiredState
+        case lifecycle
+        case removalAssignedName
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        destination = try container.decode(PortalDestination.self, forKey: .destination)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        desiredState = try container.decode(PortalDesiredState.self, forKey: .desiredState)
+        lifecycle = try container.decode(PortalLifecycle.self, forKey: .lifecycle)
+        if lifecycle == .pendingRemoval {
+            removalAssignedName = try container.decodeIfPresent(String.self, forKey: .removalAssignedName)
+        } else {
+            guard !container.contains(.removalAssignedName) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .removalAssignedName,
+                    in: container,
+                    debugDescription: "Only removing Portals may retain an assigned name."
+                )
+            }
+            removalAssignedName = nil
+        }
+    }
+
+    func migrate() -> PortalConfiguration {
+        PortalConfiguration(
+            id: id,
+            name: name,
+            destination: destination,
+            createdAt: createdAt,
+            desiredState: desiredState,
+            lifecycle: lifecycle,
+            removalAssignedName: removalAssignedName,
+            publicAccess: .private
+        )
     }
 }
 
