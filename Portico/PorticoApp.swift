@@ -537,6 +537,8 @@ private struct SelectedPortalView: View {
                     .accessibilityIdentifier("selected-tailscale-state")
                 LabeledContent("Public Access", value: presentation.publicAccessState)
                     .accessibilityIdentifier("selected-public-access-state")
+                    .accessibilityLabel("Public Access")
+                    .accessibilityValue(presentation.publicAccessState)
                 if portal.localAppPort != nil {
                     LabeledContent("Local App", value: presentation.localAppReachability)
                         .accessibilityIdentifier("selected-local-app-state")
