@@ -13,6 +13,7 @@ enum UITestScenario: String {
     case resetEligible = "reset-eligible"
     case online
     case stopped
+    case publicAccess = "public-access"
     case remoteOnline = "remote-online"
     case authenticating
     case awaitingApproval = "awaiting-approval"
@@ -174,6 +175,13 @@ struct UITestLaunchConfiguration {
                 operationalLogging: .enabled,
                 launchAtLoginOffer: .declined
             ))
+        case .publicAccess:
+            try store.save(InstallationRecord(
+                tailnetBinding: Self.tailnetBinding,
+                portals: [Self.portal(publicAccess: .public)],
+                operationalLogging: .enabled,
+                launchAtLoginOffer: .declined
+            ))
         case .online, .stopped, .authenticating, .awaitingApproval, .stale, .staleAuthenticating, .restarting, .terminalFailure:
             try store.save(InstallationRecord(
                 tailnetBinding: Self.tailnetBinding,
@@ -224,6 +232,7 @@ struct UITestLaunchConfiguration {
         id: UUID = portalID,
         name: String = "portal-one",
         destination: PortalDestination = .localApp(port: 8080),
+        publicAccess: PortalPublicAccess = .private,
         createdAt: Date = Date(timeIntervalSince1970: 1_700_000_000),
         lifecycle: PortalLifecycle = .active,
         desiredState: PortalDesiredState = .enabled,
@@ -236,7 +245,8 @@ struct UITestLaunchConfiguration {
             createdAt: createdAt,
             desiredState: desiredState,
             lifecycle: lifecycle,
-            removalAssignedName: removalAssignedName
+            removalAssignedName: removalAssignedName,
+            publicAccess: publicAccess
         )
     }
 }
@@ -436,7 +446,7 @@ private final class UITestHelperProcess: HelperProcess {
     }
 
     private func emitStatuses(for portals: [ReconcilePortalPayload]) {
-        guard [.online, .stopped, .remoteOnline, .authenticating, .awaitingApproval, .stale, .staleAuthenticating, .restarting, .loginOffer, .loginOfferApproval, .loginOfferError, .management, .durableManagement, .creation].contains(scenario) else { return }
+        guard [.online, .stopped, .publicAccess, .remoteOnline, .authenticating, .awaitingApproval, .stale, .staleAuthenticating, .restarting, .loginOffer, .loginOfferApproval, .loginOfferError, .management, .durableManagement, .creation].contains(scenario) else { return }
         for portal in portals {
             let state: PortalTailscaleState
             if scenario == .stopped {
@@ -460,6 +470,7 @@ private final class UITestHelperProcess: HelperProcess {
                     assignedName: "\(portal.portalName)-1",
                     portalURL: URL(string: "https://\(portal.portalName)-1.example.ts.net"),
                     addresses: portal.portalName == "second-portal" ? ["100.64.0.11"] : ["100.64.0.10"],
+                    publicAccessStatus: .off,
                     tailnetName: "test-tailnet",
                     magicDNSSuffix: "example.ts.net"
                 )

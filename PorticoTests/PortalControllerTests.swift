@@ -54,6 +54,7 @@ final class PortalControllerTests: XCTestCase {
             assignedName: "hermes-1",
             portalURL: URL(string: "https://hermes-1.example.ts.net/"),
             addresses: [],
+            publicAccessStatus: .off,
             magicDNSSuffix: "example.ts.net"
         ), generation: client.generation))
 
@@ -313,6 +314,7 @@ final class PortalControllerTests: XCTestCase {
             assignedName: "hermes",
             portalURL: url,
             addresses: [],
+            publicAccessStatus: .off,
             magicDNSSuffix: "example.ts.net"
         ), generation: client.generation))
 
@@ -736,6 +738,44 @@ final class PortalControllerTests: XCTestCase {
         XCTAssertEqual(try store.loadInstallation().portals.first?.destination, .localApp(port: 4321))
     }
 
+    func testPublicPortalRejectsRemoteDestinationBeforeWriteAndReconciliation() throws {
+        let saved = PortalConfiguration(
+            id: portalID,
+            name: "hermes",
+            localAppPort: 8787,
+            createdAt: Date(),
+            publicAccess: .public
+        )
+        let store = PortalStore(rootURL: temporaryRoot())
+        try store.save(saved)
+        let client = FakePortalHelperClient()
+        let controller = PortalController(store: store, helper: client, openURL: { _ in })
+        let original = try Data(contentsOf: store.installationURL)
+        let originalReconciliationCount = client.reconciliations.count
+
+        controller.updateDestination(id: portalID, edit: PortalDestinationEdit(
+            kind: .remoteApp,
+            remoteAppScheme: .https,
+            remoteAppHost: "app.example.com",
+            remoteAppPort: "443"
+        ))
+
+        XCTAssertEqual(controller.message, "Make this Portal private before choosing a Remote App.")
+        XCTAssertEqual(try Data(contentsOf: store.installationURL), original)
+        XCTAssertEqual(try store.loadInstallation().portals, [saved])
+        XCTAssertEqual(client.reconciliations.count, originalReconciliationCount)
+
+        controller.updateDestination(id: portalID, edit: PortalDestinationEdit(
+            kind: .localApp,
+            localAppPort: "8788"
+        ))
+
+        let changed = try XCTUnwrap(store.loadInstallation().portals.first)
+        XCTAssertEqual(changed.destination, .localApp(port: 8788))
+        XCTAssertEqual(changed.publicAccess, .public)
+        XCTAssertEqual(client.reconciliations.count, originalReconciliationCount + 1)
+    }
+
     func testAlreadySatisfiedStartAndStopAreHarmless() throws {
         let saved = PortalConfiguration(
             id: portalID,
@@ -859,7 +899,8 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: "secret-node",
             assignedName: "hermes-1",
             portalURL: nil,
-            addresses: []
+            addresses: [],
+            publicAccessStatus: .off,
         ), generation: client.generation))
 
         XCTAssertEqual(
@@ -949,7 +990,8 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: "stale-node",
             assignedName: "stale-name",
             portalURL: URL(string: "https://stale.example.ts.net/"),
-            addresses: ["100.64.0.1"]
+            addresses: ["100.64.0.1"],
+            publicAccessStatus: .off,
         ), generation: client.generation))
         client.send(.authenticationURL(portalID, URL(string: "https://login.tailscale.com/a/stale")!, generation: client.generation))
 
@@ -1025,6 +1067,7 @@ final class PortalControllerTests: XCTestCase {
             assignedName: "hermes-1",
             portalURL: URL(string: "https://hermes-1.example.ts.net/"),
             addresses: ["100.64.0.1"],
+            publicAccessStatus: .off,
             magicDNSSuffix: "example.ts.net"
         )
         let displayStatus = PortalStatusPayload(
@@ -1033,6 +1076,7 @@ final class PortalControllerTests: XCTestCase {
             assignedName: "hermes-1",
             portalURL: URL(string: "https://hermes-1.example.ts.net/"),
             addresses: ["100.64.0.1"],
+            publicAccessStatus: .off,
             magicDNSSuffix: "example.ts.net"
         )
 
@@ -1055,7 +1099,8 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: nil,
             assignedName: nil,
             portalURL: nil,
-            addresses: []
+            addresses: [],
+            publicAccessStatus: .off,
         ), generation: client.generation))
 
         client.send(.authenticationURL(portalID, transient, generation: client.generation))
@@ -1084,7 +1129,8 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: nil,
             assignedName: nil,
             portalURL: nil,
-            addresses: []
+            addresses: [],
+            publicAccessStatus: .off,
         ), generation: client.generation))
 
         controller.authenticate()
@@ -1098,7 +1144,8 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: nil,
             assignedName: nil,
             portalURL: nil,
-            addresses: []
+            addresses: [],
+            publicAccessStatus: .off,
         ), generation: client.generation))
         controller.authenticate()
         XCTAssertEqual(client.authenticated, [portalID, portalID])
@@ -1133,7 +1180,8 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: nil,
             assignedName: nil,
             portalURL: nil,
-            addresses: []
+            addresses: [],
+            publicAccessStatus: .off,
         ), generation: client.generation))
 
         controller.authenticate()
@@ -1172,7 +1220,8 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: nil,
             assignedName: nil,
             portalURL: nil,
-            addresses: []
+            addresses: [],
+            publicAccessStatus: .off,
         ), generation: client.generation))
 
         controller.authenticate()
@@ -1196,7 +1245,8 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: nil,
             assignedName: nil,
             portalURL: nil,
-            addresses: []
+            addresses: [],
+            publicAccessStatus: .off,
         ), generation: client.generation))
         controller.authenticate()
         client.disconnect(as: .connecting)
@@ -1207,7 +1257,8 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: nil,
             assignedName: nil,
             portalURL: nil,
-            addresses: []
+            addresses: [],
+            publicAccessStatus: .off,
         ), generation: client.generation))
         controller.authenticate()
 
@@ -1234,7 +1285,8 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: nil,
             assignedName: nil,
             portalURL: nil,
-            addresses: []
+            addresses: [],
+            publicAccessStatus: .off,
         ), generation: client.generation))
         controller.authenticate()
         client.disconnect(as: .connecting)
@@ -1245,7 +1297,8 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: nil,
             assignedName: nil,
             portalURL: nil,
-            addresses: []
+            addresses: [],
+            publicAccessStatus: .off,
         ), generation: client.generation))
         controller.authenticate()
 
@@ -1270,7 +1323,8 @@ final class PortalControllerTests: XCTestCase {
             stableNodeId: nil,
             assignedName: nil,
             portalURL: nil,
-            addresses: []
+            addresses: [],
+            publicAccessStatus: .off,
         ), generation: client.generation))
 
         let firstURL = URL(string: "https://login.tailscale.com/a/first")!
@@ -1549,6 +1603,7 @@ final class PortalControllerTests: XCTestCase {
             assignedName: "hermes-1",
             portalURL: URL(string: "https://hermes-1.example.ts.net/"),
             addresses: ["100.64.0.1"],
+            publicAccessStatus: .off,
             magicDNSSuffix: "example.ts.net"
         ), generation: client.generation))
         XCTAssertFalse(controller.staleStatusIDs.contains(portalID))
@@ -1576,19 +1631,19 @@ final class PortalControllerTests: XCTestCase {
         )
         let controller = PortalController(store: store, helper: supervisor, openURL: { _ in })
         supervisor.start(loggingPreference: .enabled)
-        launcher.receive(line: #"{"version":6,"requestId":"handshake-1","result":{"protocolVersion":6}}"#)
+        launcher.receive(line: #"{"version":7,"requestId":"handshake-1","result":{"protocolVersion":7}}"#)
         controller.stopPortal(id: portalID)
 
         launcher.exit(status: 1)
         scheduler.run(delay: 1)
-        launcher.receive(line: #"{"version":6,"requestId":"handshake-2","result":{"protocolVersion":6}}"#)
+        launcher.receive(line: #"{"version":7,"requestId":"handshake-2","result":{"protocolVersion":7}}"#)
 
         let discovery = try JSONDecoder().decode(
             HelperRequest<EmptyPayload>.self,
             from: XCTUnwrap(launcher.process.sent.last)
         )
         XCTAssertEqual(discovery.command, .discoverLocalApps)
-        launcher.receive(line: #"{"version":6,"requestId":"discover-2","result":{"candidates":[]}}"#)
+        launcher.receive(line: #"{"version":7,"requestId":"discover-2","result":{"candidates":[]}}"#)
 
         let request = try JSONDecoder().decode(
             HelperRequest<ReconcilePortalsPayload>.self,
@@ -1611,6 +1666,7 @@ final class PortalControllerTests: XCTestCase {
             assignedName: "login",
             portalURL: URL(string: "file:///Users/chris/private/auth"),
             addresses: ["Authorization: Bearer secret"],
+            publicAccessStatus: .off,
             magicDNSSuffix: "tailscale.com"
         ), generation: client.generation))
 
@@ -1639,6 +1695,7 @@ final class PortalControllerTests: XCTestCase {
             assignedName: "bad\nname",
             portalURL: URL(string: "file:///Users/chris/private/auth"),
             addresses: ["Authorization: Bearer secret"],
+            publicAccessStatus: .off,
             tailnetName: "opaque-first",
             magicDNSSuffix: unsafeSuffix
         ), generation: client.generation))
@@ -1657,6 +1714,7 @@ final class PortalControllerTests: XCTestCase {
             assignedName: "bad\nname",
             portalURL: URL(string: "file:///Users/chris/private/auth"),
             addresses: ["Authorization: Bearer secret"],
+            publicAccessStatus: .off,
             tailnetName: "opaque-different",
             magicDNSSuffix: unsafeSuffix
         ), generation: client.generation))
@@ -1678,6 +1736,7 @@ final class PortalControllerTests: XCTestCase {
             assignedName: assignedName,
             portalURL: URL(string: "https://\(assignedName).\(suffix)/"),
             addresses: ["100.64.0.1"],
+            publicAccessStatus: .off,
             tailnetName: tailnetName,
             magicDNSSuffix: suffix
         )

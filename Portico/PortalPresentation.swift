@@ -12,6 +12,7 @@ struct PortalPresentation {
     let assignedName: String?
     let desiredState: String
     let tailscaleState: String
+    let publicAccessState: String
     let localAppReachability: String
     let portalURLLabel: String
     let collisionExplanation: String?
@@ -27,6 +28,24 @@ struct PortalPresentation {
         desiredState = portal.desiredState.title
         let state = status?.state.title ?? "Unknown"
         tailscaleState = isStale ? "\(state) — Last Known" : state
+        switch portal.publicAccess {
+        case .private:
+            publicAccessState = "Private — Off"
+        case .public:
+            guard let status else {
+                publicAccessState = "Public — Status unavailable"
+                break
+            }
+            let listenerState: String
+            switch status.publicAccessStatus {
+            case .off: listenerState = "Off"
+            case .publishing: listenerState = "Publishing"
+            case .enabled: listenerState = "Enabled"
+            case .blocked: listenerState = "Blocked"
+            }
+            publicAccessState = "Public — \(listenerState)"
+                + (isStale ? " — Last Known" : "")
+        }
         localAppReachability = reachability.title
         portalURLLabel = isStale ? "Portal URL — Last Known" : "Portal URL"
         if let assignedName = status?.assignedName, assignedName != portal.name {

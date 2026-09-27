@@ -14,7 +14,9 @@ struct PortalActionContext {
     var hasTailnetBinding: Bool
     var portalCount: Int
     var isEditedDestinationValid: Bool
+    var isEditedDestinationRemoteApp: Bool
     var isRefreshingLocalApps: Bool
+    var publicAccess: PortalPublicAccess
 
     init(
         loggingPreference: OperationalLoggingPreference,
@@ -30,7 +32,9 @@ struct PortalActionContext {
         hasTailnetBinding: Bool = false,
         portalCount: Int = 0,
         isEditedDestinationValid: Bool = false,
-        isRefreshingLocalApps: Bool = false
+        isRefreshingLocalApps: Bool = false,
+        isEditedDestinationRemoteApp: Bool = false,
+        publicAccess: PortalPublicAccess = .private
     ) {
         self.loggingPreference = loggingPreference
         self.inputsValid = inputsValid
@@ -45,7 +49,9 @@ struct PortalActionContext {
         self.hasTailnetBinding = hasTailnetBinding
         self.portalCount = portalCount
         self.isEditedDestinationValid = isEditedDestinationValid
+        self.isEditedDestinationRemoteApp = isEditedDestinationRemoteApp
         self.isRefreshingLocalApps = isRefreshingLocalApps
+        self.publicAccess = publicAccess
     }
 }
 
@@ -55,6 +61,7 @@ struct PortalActionAvailability: Equatable {
     let start: Bool
     let stop: Bool
     let editDestination: Bool
+    let selectRemoteApp: Bool
     let authenticate: Bool
     let copyPortalURL: Bool
     let openPortalURL: Bool
@@ -71,7 +78,10 @@ struct PortalActionAvailability: Equatable {
         refreshLocalApps = helperConnected && !context.isRefreshingLocalApps
         start = isActive && context.desiredState == .stopped
         stop = isActive && context.desiredState == .enabled
-        editDestination = isActive && context.isEditedDestinationValid
+        let publicPortalRemoteEdit = context.publicAccess == .public
+            && context.isEditedDestinationRemoteApp
+        editDestination = isActive && context.isEditedDestinationValid && !publicPortalRemoteEdit
+        selectRemoteApp = isActive && context.publicAccess != .public
         authenticate = isActive
             && context.desiredState == .enabled
             && helperConnected

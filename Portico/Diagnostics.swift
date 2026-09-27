@@ -178,6 +178,7 @@ extension PortalStatusPayload {
                 magicDNSSuffix: safeSuffix
             ),
             addresses: addresses.filter(SafePortalFact.isIPAddress),
+            publicAccessStatus: publicAccessStatus,
             magicDNSSuffix: safeSuffix
         )
     }

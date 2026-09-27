@@ -454,6 +454,10 @@ final class PortalController: ObservableObject {
             message = "Enter valid destination details."
             return
         }
+        guard installation.portals[index].publicAccess != .public || destination.isLocalApp else {
+            message = "Make this Portal private before choosing a Remote App."
+            return
+        }
         guard installation.portals[index].destination != destination else { return }
         var updated = installation
         updated.portals[index].destination = destination
@@ -533,11 +537,14 @@ final class PortalController: ObservableObject {
         }
         let addInputsValid = portal == nil && (try? newPortalDestination()) != nil
         let editedDestinationValid: Bool
+        let isEditedDestinationRemoteApp: Bool
         if let portal, let editedDestination,
            let destination = try? editedDestination.validated(name: portal.name) {
             editedDestinationValid = destination != portal.destination
+            isEditedDestinationRemoteApp = !destination.isLocalApp
         } else {
             editedDestinationValid = false
+            isEditedDestinationRemoteApp = false
         }
         let status = portal.flatMap { statuses[$0.id] }
         return PortalActionAvailability(context: PortalActionContext(
@@ -554,7 +561,9 @@ final class PortalController: ObservableObject {
             hasTailnetBinding: installation.tailnetBinding != nil,
             portalCount: installation.portals.count,
             isEditedDestinationValid: editedDestinationValid,
-            isRefreshingLocalApps: isRefreshingLocalApps
+            isRefreshingLocalApps: isRefreshingLocalApps,
+            isEditedDestinationRemoteApp: isEditedDestinationRemoteApp,
+            publicAccess: portal?.publicAccess ?? .private
         ))
     }
 

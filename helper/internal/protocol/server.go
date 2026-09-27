@@ -17,7 +17,7 @@ import (
 	"github.com/chrisbanes/portico/helper/internal/portal"
 )
 
-const Version = 6
+const Version = 7
 
 const invalidRequestDiagnostic = "portico-helper: invalid request\n"
 
@@ -70,10 +70,11 @@ type discoverLocalAppsResult struct {
 }
 
 type reconcilePortalPayload struct {
-	PortalID     string              `json:"portalId"`
-	PortalName   string              `json:"portalName"`
-	Destination  portal.Destination  `json:"destination"`
-	DesiredState portal.DesiredState `json:"desiredState"`
+	PortalID     string                  `json:"portalId"`
+	PortalName   string                  `json:"portalName"`
+	Destination  portal.Destination      `json:"destination"`
+	DesiredState portal.DesiredState     `json:"desiredState"`
+	PublicAccess portal.PublicAccessMode `json:"publicAccess"`
 }
 
 type reconcilePortalsPayload struct {
@@ -535,6 +536,7 @@ func validatedPortalID(raw string) (string, bool) {
 	portalID := strings.ToLower(raw)
 	err := (portal.Config{
 		ID: portalID, Name: "a", Destination: portal.Destination{Kind: portal.DestinationLocalApp, Port: 1},
+		PublicAccess: portal.PublicAccessModePrivate,
 	}).Validate()
 	return portalID, err == nil
 }
@@ -552,6 +554,7 @@ func decodeReconcilePortalsPayload(raw json.RawMessage) ([]portal.Config, error)
 			Name:         requested.PortalName,
 			Destination:  requested.Destination,
 			DesiredState: requested.DesiredState,
+			PublicAccess: requested.PublicAccess,
 		}
 		if err := config.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid reconcile payload")

@@ -1,6 +1,6 @@
 import Foundation
 
-let helperProtocolVersion = 6
+let helperProtocolVersion = 7
 
 enum HelperCommand: String, Codable {
     case handshake
@@ -41,7 +41,7 @@ struct ReconcilePortalPayload: Codable, Equatable {
     let portalName: String
     let destination: PortalDestination
     let desiredState: PortalDesiredState
-
+    let publicAccess: PortalPublicAccess
 }
 
 struct ReconcilePortalsPayload: Codable, Equatable {
@@ -118,6 +118,13 @@ enum PortalTailscaleState: String, Codable, Equatable {
     case error
 }
 
+enum PortalPublicAccessStatus: String, Codable, Equatable {
+    case off
+    case publishing
+    case enabled
+    case blocked
+}
+
 struct PortalStatusPayload: Codable, Equatable {
     let state: PortalTailscaleState
     let stableNodeId: String?
@@ -126,6 +133,7 @@ struct PortalStatusPayload: Codable, Equatable {
     let addresses: [String]
     let tailnetName: String?
     let magicDNSSuffix: String?
+    let publicAccessStatus: PortalPublicAccessStatus
 
     init(
         state: PortalTailscaleState,
@@ -133,6 +141,7 @@ struct PortalStatusPayload: Codable, Equatable {
         assignedName: String?,
         portalURL: URL?,
         addresses: [String],
+        publicAccessStatus: PortalPublicAccessStatus,
         tailnetName: String? = nil,
         magicDNSSuffix: String? = nil
     ) {
@@ -143,6 +152,7 @@ struct PortalStatusPayload: Codable, Equatable {
         self.addresses = addresses
         self.tailnetName = tailnetName
         self.magicDNSSuffix = magicDNSSuffix
+        self.publicAccessStatus = publicAccessStatus
     }
 }
 

@@ -90,8 +90,8 @@ func TestRuntimeReconcileContinuesAfterStartFailureAndRetainsOwnershipUntilClean
 		return node
 	})
 	desired := []Config{
-		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
-		{ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
+		{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
+		{PublicAccess: PublicAccessModePrivate, ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
 	}
 
 	entries, err := runtime.Reconcile(context.Background(), desired, func(Event) {})
@@ -172,7 +172,7 @@ func TestRuntimePortEditPreservesIdentityAndDrainsAcceptedHTTPAndWebSocketTraffi
 	}
 	factory.node.realListener = tailnetListener
 	runtime := NewRuntime(t.TempDir(), factory.New)
-	desired := []Config{{
+	desired := []Config{{PublicAccess: PublicAccessModePrivate,
 		ID: testPortalID, Name: "hermes", Destination: localAppDestination(uint16(oldPort)), DesiredState: DesiredStateEnabled,
 	}}
 	if entries, reconcileErr := runtime.Reconcile(context.Background(), desired, func(Event) {}); reconcileErr != nil || entries[0].Outcome != OutcomeConverged {
@@ -272,7 +272,7 @@ func TestRuntimeDestinationReplacementFailureRetainsServingPortalAndCanRetry(t *
 		}
 		return newDestinationProxy(destination)
 	}
-	desired := []Config{{
+	desired := []Config{{PublicAccess: PublicAccessModePrivate,
 		ID: testPortalID, Name: "hermes", Destination: localAppDestination(uint16(oldPort)), DesiredState: DesiredStateEnabled,
 	}}
 	if entries, reconcileErr := runtime.Reconcile(context.Background(), desired, func(Event) {}); reconcileErr != nil || entries[0].Outcome != OutcomeConverged {
@@ -348,7 +348,7 @@ func TestRuntimeDestinationReplacementReroutesNewRequestsToRemoteTLSOrigin(t *te
 			return nil, errors.New("unexpected Remote App destination")
 		}
 	}
-	desired := []Config{{
+	desired := []Config{{PublicAccess: PublicAccessModePrivate,
 		ID: testPortalID, Name: "hermes", Destination: oldDestination, DesiredState: DesiredStateEnabled,
 	}}
 	if entries, reconcileErr := runtime.Reconcile(context.Background(), desired, func(Event) {}); reconcileErr != nil || entries[0].Outcome != OutcomeConverged {
@@ -386,8 +386,8 @@ func TestRuntimeReconcileStopsAndOmitsPortalsWithoutDeletingIdentity(t *testing.
 		return node
 	})
 	desired := []Config{
-		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
-		{ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
+		{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
+		{PublicAccess: PublicAccessModePrivate, ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
 	}
 	if _, err := runtime.Reconcile(context.Background(), desired, func(Event) {}); err != nil {
 		t.Fatal(err)
@@ -398,7 +398,7 @@ func TestRuntimeReconcileStopsAndOmitsPortalsWithoutDeletingIdentity(t *testing.
 		}
 	}
 
-	entries, err := runtime.Reconcile(context.Background(), []Config{{
+	entries, err := runtime.Reconcile(context.Background(), []Config{{PublicAccess: PublicAccessModePrivate,
 		ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateStopped,
 	}}, func(Event) {})
 
@@ -421,7 +421,7 @@ func TestRuntimeReconcileStopsAndOmitsPortalsWithoutDeletingIdentity(t *testing.
 		}
 	}
 
-	entries, err = runtime.Reconcile(context.Background(), []Config{{
+	entries, err = runtime.Reconcile(context.Background(), []Config{{PublicAccess: PublicAccessModePrivate,
 		ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateStopped,
 	}}, func(Event) {})
 	if err != nil || len(entries) != 1 || entries[0].PortalID != testPortalID || entries[0].Outcome != OutcomeConverged {
@@ -440,7 +440,7 @@ func TestRuntimeReconcileRetainsOwnershipAfterCloseFailure(t *testing.T) {
 		created = append(created, node)
 		return node
 	})
-	enabled := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	enabled := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	if _, err := runtime.Reconcile(context.Background(), []Config{enabled}, func(Event) {}); err != nil {
 		t.Fatal(err)
 	}
@@ -464,8 +464,8 @@ func TestRuntimeReconcileRejectsWholeInvalidSnapshotBeforeMutation(t *testing.T)
 		return &fakeNode{watcher: newFakeWatcher()}
 	})
 	configs := []Config{
-		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
-		{ID: secondPortalID, Name: "Atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
+		{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
+		{PublicAccess: PublicAccessModePrivate, ID: secondPortalID, Name: "Atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
 	}
 
 	if entries, err := runtime.Reconcile(context.Background(), configs, func(Event) {}); err == nil || entries != nil {
@@ -473,6 +473,102 @@ func TestRuntimeReconcileRejectsWholeInvalidSnapshotBeforeMutation(t *testing.T)
 	}
 	if created != 0 {
 		t.Fatalf("created %d nodes before validating the full snapshot", created)
+	}
+}
+
+func TestConfigRequiresClosedPublicAccessModeAndRejectsPublicRemoteApp(t *testing.T) {
+	base := Config{
+		ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787),
+		PublicAccess: PublicAccessModePrivate,
+	}
+	for _, test := range []struct {
+		name   string
+		config Config
+		valid  bool
+	}{
+		{name: "private Local App", config: base, valid: true},
+		{name: "public Local App", config: func() Config { c := base; c.PublicAccess = PublicAccessModePublic; return c }(), valid: true},
+		{name: "missing mode", config: func() Config { c := base; c.PublicAccess = ""; return c }()},
+		{name: "unknown mode", config: func() Config { c := base; c.PublicAccess = "future"; return c }()},
+		{name: "public Remote App", config: func() Config {
+			c := base
+			c.Destination = Destination{Kind: DestinationRemoteApp, Scheme: "https", Host: "app.example.com", Port: 443}
+			c.PublicAccess = PublicAccessModePublic
+			return c
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.config.Validate()
+			if test.valid && err != nil {
+				t.Fatalf("Validate() = %v, want accepted configuration", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("Validate() = nil, want invalid Public Access configuration")
+			}
+		})
+	}
+}
+
+func TestRuntimeRejectsPublicRemoteAppInWholeSnapshotBeforeMutation(t *testing.T) {
+	created := 0
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node {
+		created++
+		return &fakeNode{watcher: newFakeWatcher()}
+	})
+	configs := []Config{
+		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled, PublicAccess: PublicAccessModePrivate},
+		{ID: secondPortalID, Name: "atlas", Destination: Destination{Kind: DestinationRemoteApp, Scheme: "https", Host: "app.example.com", Port: 443}, DesiredState: DesiredStateEnabled, PublicAccess: PublicAccessModePublic},
+	}
+
+	if entries, err := runtime.Reconcile(context.Background(), configs, func(Event) {}); err == nil || entries != nil {
+		t.Fatalf("Reconcile = (%+v, %v), want whole-snapshot rejection", entries, err)
+	}
+	if created != 0 || runtime.portal(testPortalID) != nil {
+		t.Fatalf("runtime mutation = (%d created nodes, first Portal %v), want none", created, runtime.portal(testPortalID))
+	}
+}
+
+func TestRuntimeRetainsPublicAccessChangesWithoutReplacingPrivateListener(t *testing.T) {
+	factory := newFakeFactory()
+	factory.status = Status{
+		BackendState: "Running",
+		DNSName:      "hermes.example.ts.net.",
+		CertDomains:  []string{"hermes.example.ts.net"},
+	}
+	runtime := NewRuntime(t.TempDir(), factory.New)
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+	config := Config{
+		ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787),
+		DesiredState: DesiredStateEnabled, PublicAccess: PublicAccessModePrivate,
+	}
+	if entries, err := runtime.Reconcile(context.Background(), []Config{config}, func(Event) {}); err != nil || entries[0].Outcome != OutcomeConverged {
+		t.Fatalf("initial Reconcile = (%+v, %v), want converged", entries, err)
+	}
+	privateListener := factory.node.listener
+	if privateListener == nil || factory.node.listenNetwork != "tcp" || factory.node.listenAddress != ":443" {
+		t.Fatalf("initial listener = (%v, %q, %q), want private HTTPS listener", privateListener, factory.node.listenNetwork, factory.node.listenAddress)
+	}
+
+	config.PublicAccess = PublicAccessModePublic
+	if entries, err := runtime.Reconcile(context.Background(), []Config{config}, func(Event) {}); err != nil || entries[0].Outcome != OutcomeConverged {
+		t.Fatalf("mode-only Reconcile = (%+v, %v), want converged", entries, err)
+	}
+	_, running, _ := runtime.portal(testPortalID).snapshot()
+	if running.PublicAccess != PublicAccessModePublic || running.Destination != config.Destination {
+		t.Fatalf("mode-only running config = %+v, want public mode and original destination", running)
+	}
+
+	config.Destination = localAppDestination(8788)
+	config.PublicAccess = PublicAccessModePrivate
+	if entries, err := runtime.Reconcile(context.Background(), []Config{config}, func(Event) {}); err != nil || entries[0].Outcome != OutcomeConverged {
+		t.Fatalf("combined mode and destination Reconcile = (%+v, %v), want converged", entries, err)
+	}
+	_, running, _ = runtime.portal(testPortalID).snapshot()
+	if running.PublicAccess != PublicAccessModePrivate || running.Destination != config.Destination {
+		t.Fatalf("combined running config = %+v, want private mode and replacement destination", running)
+	}
+	if len(factory.created) != 1 || factory.node.listener != privateListener || factory.node.listenAddress != ":443" {
+		t.Fatalf("reconciliation replaced the private listener: nodes=%d listener=%v address=%q", len(factory.created), factory.node.listener, factory.node.listenAddress)
 	}
 }
 
@@ -550,8 +646,8 @@ func TestRuntimeKeepsTwoIndependentPortalsOnline(t *testing.T) {
 	}
 
 	configs := []Config{
-		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
-		{ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
+		{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
+		{PublicAccess: PublicAccessModePrivate, ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
 	}
 	if _, err := runtime.Reconcile(context.Background(), configs, emit); err != nil {
 		t.Fatalf("Reconcile Portals: %v", err)
@@ -577,8 +673,8 @@ func TestCleanupRejectedPortalClosesAndDeletesOnlyAddressedPortal(t *testing.T) 
 		return node
 	})
 	configs := []Config{
-		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
-		{ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
+		{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
+		{PublicAccess: PublicAccessModePrivate, ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
 	}
 	if _, err := runtime.Reconcile(context.Background(), configs, func(Event) {}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -622,8 +718,8 @@ func TestRemovePortalClosesAndDeletesOnlyAddressedPortal(t *testing.T) {
 		return node
 	})
 	configs := []Config{
-		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
-		{ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
+		{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled},
+		{PublicAccess: PublicAccessModePrivate, ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled},
 	}
 	if _, err := runtime.Reconcile(context.Background(), configs, func(Event) {}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -664,7 +760,7 @@ func TestRemovePortalDeletesStateCreatedWhileRuntimeCloses(t *testing.T) {
 		}
 	}
 	runtime := NewRuntime(root, func(_, _ string) Node { return node })
-	if _, err := runtime.Reconcile(context.Background(), []Config{{
+	if _, err := runtime.Reconcile(context.Background(), []Config{{PublicAccess: PublicAccessModePrivate,
 		ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled,
 	}}, func(Event) {}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -711,7 +807,7 @@ func TestCleanupDoesNotDeleteStateOfConcurrentSamePortalReplacement(t *testing.T
 		}
 		return replacement
 	})
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	if err := reconcileOne(runtime, config, func(Event) {}); err != nil {
 		t.Fatalf("initial Reconcile: %v", err)
 	}
@@ -744,7 +840,7 @@ func TestRuntimeCloseRetainsPortalGateUntilRegistryRemoval(t *testing.T) {
 		releaseClose: make(chan struct{}),
 	}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	if err := reconcileOne(runtime, config, func(Event) {}); err != nil {
 		t.Fatalf("initial Reconcile: %v", err)
 	}
@@ -781,7 +877,7 @@ func TestRemovePortalDeadlineRetainsGateUntilNodeCloseCompletes(t *testing.T) {
 		releaseClose: make(chan struct{}),
 	}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	if err := reconcileOne(runtime, config, func(Event) {}); err != nil {
 		t.Fatalf("initial Reconcile: %v", err)
 	}
@@ -830,7 +926,7 @@ func TestRuntimeCloseDeadlineRetainsPortalGateUntilWatcherCloseCompletes(t *test
 		status:          Status{BackendState: "Starting"},
 	}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	if err := reconcileOne(runtime, config, func(Event) {}); err != nil {
 		t.Fatalf("initial Reconcile: %v", err)
 	}
@@ -877,7 +973,7 @@ func TestRuntimeEmitsStartupEventAfterReleasingPortalGate(t *testing.T) {
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node {
 		return &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
 	})
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(Event) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 		defer cancel()
@@ -905,7 +1001,7 @@ func TestWatcherOnlineFollowsInitialStartupEvent(t *testing.T) {
 		blockStatusCall: 1,
 	}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	events := make(chan Event, 2)
 	result := make(chan []ReconcileEntry, 1)
 	go func() {
@@ -947,7 +1043,7 @@ func TestRuntimeCloseFromStartupCallbackCancelsBarrierWatcher(t *testing.T) {
 		blockStatusCall: 1,
 	}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	events := make(chan Event, 2)
 	closed := make(chan error, 1)
 	result := make(chan []ReconcileEntry, 1)
@@ -984,7 +1080,7 @@ func TestRuntimeCloseFromStartupCallbackDoesNotWaitForWatcherFailureDelivery(t *
 	watcher := &controlledErrorWatcher{release: make(chan struct{})}
 	node := &fakeNode{watcherOverride: watcher, status: Status{BackendState: "Starting"}}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	events := make(chan Event, 2)
 	closed := make(chan error, 1)
 	done := make(chan struct{})
@@ -1026,7 +1122,7 @@ func TestPortalWatchWaitsForStartupDeliveryBarrier(t *testing.T) {
 	portal := &portalRuntime{
 		gate:            make(chan struct{}, 1),
 		phase:           portalRunning,
-		config:          &Config{ID: testPortalID},
+		config:          &Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID},
 		node:            &fakeNode{status: Status{BackendState: "Running"}, statusEntered: statusEntered},
 		emit:            func(Event) {},
 		startupDelivery: barrier,
@@ -1058,12 +1154,12 @@ func TestPortalSuppressesStartupOnlineAfterFailureDelivered(t *testing.T) {
 	portal := &portalRuntime{
 		gate:   make(chan struct{}, 1),
 		phase:  portalRunning,
-		config: &Config{ID: testPortalID},
+		config: &Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID},
 		emit:   func(event Event) { events <- event },
 	}
 	portal.gate <- struct{}{}
 	portal.fail()
-	portal.emitStartupEvents([]Event{{PortalID: testPortalID, Status: &StatusEvent{State: StateOnline}}})
+	portal.emitStartupEvents([]Event{{PortalID: testPortalID, Status: &StatusEvent{State: StateOnline, PublicAccessStatus: PublicAccessStatusOff}}})
 	event := <-events
 	if event.Status == nil || event.Status.State != StateError {
 		t.Fatalf("first event = %+v, want StateError", event)
@@ -1084,7 +1180,7 @@ func TestRemovePortalRejectsUntrustedTargetsWithoutClosingRuntime(t *testing.T) 
 	root := t.TempDir()
 	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
 	runtime := NewRuntime(root, func(_, _ string) Node { return node })
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
+	if err := reconcileOne(runtime, Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
@@ -1117,7 +1213,7 @@ func TestRemovePortalPreservesStateAndOwnershipWhenCloseFails(t *testing.T) {
 		closeResults: []error{errors.New("close failed"), nil},
 	}
 	runtime := NewRuntime(root, func(_, _ string) Node { return node })
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
+	if err := reconcileOne(runtime, Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	stateDirectory := filepath.Join(root, testPortalID)
@@ -1215,7 +1311,7 @@ func TestCleanupWaitsForStartBeforeDeletingAnyPortalState(t *testing.T) {
 	}
 	startDone := make(chan error, 1)
 	go func() {
-		startDone <- reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {})
+		startDone <- reconcileOne(runtime, Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {})
 	}()
 	<-blocked.startEntered
 	cleanupDone := make(chan error, 1)
@@ -1242,7 +1338,7 @@ func TestCleanupWaitsForStartBeforeDeletingAnyPortalState(t *testing.T) {
 func TestRuntimeUsesUUIDStateDirectoryAndStableIdentity(t *testing.T) {
 	factory := newFakeFactory()
 	root := t.TempDir()
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}
 
 	for range 2 {
 		runtime := NewRuntime(root, factory.New)
@@ -1265,9 +1361,9 @@ func TestRuntimeUsesUUIDStateDirectoryAndStableIdentity(t *testing.T) {
 
 func TestConfigRejectsUntrustedPathsAndDestinations(t *testing.T) {
 	invalid := []Config{
-		{ID: "../escape", Name: "hermes", Destination: localAppDestination(8787)},
-		{ID: testPortalID, Name: "Hermes", Destination: localAppDestination(8787)},
-		{ID: testPortalID, Name: "hermes", Destination: localAppDestination(0)},
+		{PublicAccess: PublicAccessModePrivate, ID: "../escape", Name: "hermes", Destination: localAppDestination(8787)},
+		{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "Hermes", Destination: localAppDestination(8787)},
+		{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(0)},
 	}
 	for _, config := range invalid {
 		if err := config.Validate(); err == nil {
@@ -1300,7 +1396,7 @@ func TestRuntimeMapsStructuredStatus(t *testing.T) {
 			}
 			var events []Event
 			runtime := NewRuntime(t.TempDir(), factory.New)
-			if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(event Event) {
+			if err := reconcileOne(runtime, Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(event Event) {
 				events = append(events, event)
 			}); err != nil {
 				t.Fatalf("Start: %v", err)
@@ -1308,6 +1404,9 @@ func TestRuntimeMapsStructuredStatus(t *testing.T) {
 			event := events[0]
 			if event.Status == nil || event.Status.State != test.want {
 				t.Fatalf("status = %+v, want %q", event.Status, test.want)
+			}
+			if event.Status.PublicAccessStatus != PublicAccessStatusOff {
+				t.Fatalf("publicAccessStatus = %q, want off for %s state", event.Status.PublicAccessStatus, test.want)
 			}
 			if test.want == StateOnline {
 				if event.Status.AssignedName != "hermes-1" || event.Status.PortalURL != "https://hermes-1.example.ts.net/" {
@@ -1341,7 +1440,7 @@ func TestAuthenticateEmitsTransientURLFromFreshNotification(t *testing.T) {
 	factory := newFakeFactory()
 	events := make(chan Event, 8)
 	runtime := NewRuntime(t.TempDir(), factory.New)
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(event Event) {
+	if err := reconcileOne(runtime, Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(event Event) {
 		events <- event
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -1368,7 +1467,7 @@ func TestAuthenticationCanBringANeedsLoginPortalOnlineAndStartListener(t *testin
 	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "NeedsLogin"}}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
 	events := make(chan Event, 4)
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
 		t.Fatalf("initial Reconcile: %v", err)
 	}
@@ -1409,7 +1508,7 @@ func TestStartupCancellationReachesTSNetReadiness(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan []ReconcileEntry, 1)
 	go func() {
-		entries, _ := runtime.Reconcile(ctx, []Config{{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}}, func(Event) {})
+		entries, _ := runtime.Reconcile(ctx, []Config{{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}}, func(Event) {})
 		done <- entries
 	}()
 	waitForSignal(t, node.upEntered, "tsnet readiness")
@@ -1436,7 +1535,7 @@ func TestWatcherFailureEmitsOneErrorAndPreventsFalseConvergence(t *testing.T) {
 		}
 		return second
 	})
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	events := make(chan Event, 4)
 	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
 		t.Fatalf("initial Reconcile: %v", err)
@@ -1446,6 +1545,9 @@ func TestWatcherFailureEmitsOneErrorAndPreventsFalseConvergence(t *testing.T) {
 	errorEvent := <-events
 	if errorEvent.Status == nil || errorEvent.Status.State != StateError {
 		t.Fatalf("watcher event = %+v, want one sanitized error", errorEvent)
+	}
+	if errorEvent.Status.PublicAccessStatus != PublicAccessStatusOff {
+		t.Fatalf("watcher publicAccessStatus = %q, want off", errorEvent.Status.PublicAccessStatus)
 	}
 	entries, err := runtime.Reconcile(context.Background(), []Config{config}, func(Event) {})
 	if err != nil || len(entries) != 1 || entries[0].Outcome != OutcomeConverged || created != 2 {
@@ -1471,7 +1573,7 @@ func TestWatcherFailureDuringStartupReturnsStartFailedWithoutOnline(t *testing.T
 	}
 	defer close(node.releaseStatus)
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	events := make(chan Event, 2)
 	result := make(chan []ReconcileEntry, 1)
 	go func() {
@@ -1520,7 +1622,7 @@ func TestProxyServeFailureEmitsOneErrorAndRecoversOnlyAfterConfirmedClose(t *tes
 		}
 		return second
 	})
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	events := make(chan Event, 4)
 	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
 		t.Fatalf("initial Reconcile: %v", err)
@@ -1558,7 +1660,7 @@ func TestUnexpectedProxyListenerCloseEmitsError(t *testing.T) {
 	}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
 	defer runtime.Close(context.Background())
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	events := make(chan Event, 2)
 	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
 		t.Fatalf("initial Reconcile: %v", err)
@@ -1581,7 +1683,7 @@ func TestRuntimeCloseSuppressesIntentionalProxyListenerClose(t *testing.T) {
 		status:  Status{BackendState: "Running", DNSName: "hermes.example.ts.net.", CertDomains: []string{"hermes.example.ts.net"}},
 	}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	events := make(chan Event, 2)
 	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
 		t.Fatalf("initial Reconcile: %v", err)
@@ -1618,7 +1720,7 @@ func TestProxyFailureDuringWatcherStatusEmitsOneErrorWithoutStaleOnline(t *testi
 				ignoreStatusCancellation: test.ignoreStatusCancellation,
 			}
 			runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-			config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+			config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 			events := make(chan Event, 3)
 			if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
 				t.Fatalf("initial Reconcile: %v", err)
@@ -1654,7 +1756,7 @@ func TestRuntimeCloseDoesNotEmitErrorForCanceledWatcherStatus(t *testing.T) {
 		releaseStatus:   make(chan struct{}),
 	}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	events := make(chan Event, 2)
 	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
 		t.Fatalf("initial Reconcile: %v", err)
@@ -1685,7 +1787,7 @@ func TestRuntimeCloseSuppressesQueuedAuthenticationAfterWatcherCancellation(t *t
 		releaseStatus:   make(chan struct{}),
 	}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	events := make(chan Event, 3)
 	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
 		t.Fatalf("initial Reconcile: %v", err)
@@ -1720,7 +1822,7 @@ func TestStatusReadFailurePreventsFalseConvergence(t *testing.T) {
 		}
 		return second
 	})
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	events := make(chan Event, 3)
 	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(event Event) { events <- event }); err != nil {
 		t.Fatal(err)
@@ -1748,7 +1850,7 @@ func TestStartAndCloseAreSerialized(t *testing.T) {
 	runtime := NewRuntime(t.TempDir(), factory.New)
 	startDone := make(chan error, 1)
 	go func() {
-		startDone <- reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {})
+		startDone <- reconcileOne(runtime, Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {})
 	}()
 	<-factory.node.startEntered
 	closeDone := make(chan error, 1)
@@ -1775,7 +1877,7 @@ func TestPortalWatcherUsesRuntimeCancellationContext(t *testing.T) {
 	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
 	ctx, cancel := context.WithCancel(context.Background())
-	if _, err := runtime.Reconcile(ctx, []Config{{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}}, func(Event) {}); err != nil {
+	if _, err := runtime.Reconcile(ctx, []Config{{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}}, func(Event) {}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if node.watchContext == nil {
@@ -1822,7 +1924,7 @@ func TestRuntimeCloseStartsIndependentPortalsUnderOneDeadline(t *testing.T) {
 		}
 		return second
 	})
-	configs := []Config{{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}, {ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled}}
+	configs := []Config{{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}, {PublicAccess: PublicAccessModePrivate, ID: secondPortalID, Name: "atlas", Destination: localAppDestination(8788), DesiredState: DesiredStateEnabled}}
 	if _, err := runtime.Reconcile(context.Background(), configs, func(Event) {}); err != nil {
 		t.Fatal(err)
 	}
@@ -1842,7 +1944,7 @@ func TestRuntimeCloseStartsIndependentPortalsUnderOneDeadline(t *testing.T) {
 func TestLateNodeCloseRetainsPortalOwnershipUntilItCompletes(t *testing.T) {
 	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}, closeEntered: make(chan struct{}), releaseClose: make(chan struct{})}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-	config := Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
+	config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}
 	if _, err := runtime.Reconcile(context.Background(), []Config{config}, func(Event) {}); err != nil {
 		t.Fatal(err)
 	}
@@ -1867,7 +1969,7 @@ func TestOnlineRuntimeListensTLSAndClosesListenerBeforeNode(t *testing.T) {
 		CertDomains:  []string{"hermes.example.ts.net"},
 	}
 	runtime := NewRuntime(t.TempDir(), factory.New)
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
+	if err := reconcileOne(runtime, Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if factory.node.listenNetwork != "tcp" || factory.node.listenAddress != ":443" {
@@ -1900,7 +2002,7 @@ func TestOnlineRuntimeTLSHandshakeUsesNodeCertificateCallback(t *testing.T) {
 		return &certificate, nil
 	}}
 	runtime := NewRuntime(t.TempDir(), factory.New)
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
+	if err := reconcileOne(runtime, Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	connection, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
@@ -1925,7 +2027,7 @@ func TestRuntimeCloseReturnsListenerFailure(t *testing.T) {
 		CertDomains:  []string{"hermes.example.ts.net"},
 	}
 	runtime := NewRuntime(t.TempDir(), factory.New)
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
+	if err := reconcileOne(runtime, Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(Event) {}); err != nil {
 		t.Fatal(err)
 	}
 	factory.node.listener.closeErr = errors.New("close failed")
@@ -2299,10 +2401,10 @@ func TestRemoteAppPortalsKeepTrafficAndFailuresIsolated(t *testing.T) {
 	}
 	events := make([]Event, 0, 2)
 	entries, err := runtime.Reconcile(context.Background(), []Config{
-		{
+		{PublicAccess: PublicAccessModePrivate,
 			ID: testPortalID, Name: "hermes", Destination: firstDestination, DesiredState: DesiredStateEnabled,
 		},
-		{
+		{PublicAccess: PublicAccessModePrivate,
 			ID: secondPortalID, Name: "atlas", Destination: secondDestination, DesiredState: DesiredStateEnabled,
 		},
 	}, func(event Event) {
@@ -2364,7 +2466,7 @@ func newOnlineRuntimeWithLocalAppWithProxy(
 	if proxyForDestination != nil {
 		runtime.proxyForDestination = proxyForDestination
 	}
-	if err := reconcileOne(runtime, Config{ID: testPortalID, Name: "hermes", Destination: localAppDestination(uint16(port))}, func(Event) {}); err != nil {
+	if err := reconcileOne(runtime, Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(uint16(port))}, func(Event) {}); err != nil {
 		_ = listener.Close()
 		t.Fatal(err)
 	}
@@ -2422,7 +2524,7 @@ func newOnlineRuntimeWithRemoteAppWithProxy(
 	if proxyForDestination != nil {
 		runtime.proxyForDestination = proxyForDestination
 	}
-	if err := reconcileOne(runtime, Config{
+	if err := reconcileOne(runtime, Config{PublicAccess: PublicAccessModePrivate,
 		ID:          testPortalID,
 		Name:        "hermes",
 		Destination: remoteAppDestination(t, remote),

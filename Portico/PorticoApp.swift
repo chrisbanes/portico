@@ -535,6 +535,10 @@ private struct SelectedPortalView: View {
                     .accessibilityIdentifier("selected-desired-state")
                 LabeledContent("Tailscale", value: presentation.tailscaleState)
                     .accessibilityIdentifier("selected-tailscale-state")
+                LabeledContent("Public Access", value: presentation.publicAccessState)
+                    .accessibilityIdentifier("selected-public-access-state")
+                    .accessibilityLabel("Public Access")
+                    .accessibilityValue(presentation.publicAccessState)
                 if portal.localAppPort != nil {
                     LabeledContent("Local App", value: presentation.localAppReachability)
                         .accessibilityIdentifier("selected-local-app-state")
@@ -577,7 +581,7 @@ private struct SelectedPortalView: View {
                         .disabled(destinationEdit.kind == .localApp)
                         .accessibilityIdentifier("selected-edit-destination-local")
                     Button("Remote App") { destinationEdit.kind = .remoteApp }
-                        .disabled(destinationEdit.kind == .remoteApp)
+                        .disabled(destinationEdit.kind == .remoteApp || !portalActions.selectRemoteApp)
                         .accessibilityIdentifier("selected-edit-destination-remote")
                 }
                 .buttonStyle(.bordered)
