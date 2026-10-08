@@ -1,3 +1,4 @@
+import Network
 import XCTest
 @testable import PorticoApplication
 
@@ -11,6 +12,44 @@ final class LocalAppReachabilityTests: XCTestCase {
         }
 
         XCTAssertEqual(result, false)
+    }
+
+    func testSuccessfulLoopbackProbeReleasesResources() throws {
+        let listener = try startLoopbackListener()
+        defer { cancelListener(listener) }
+        let port = try XCTUnwrap(listener.port).rawValue
+
+        assertProbeReleasesResources(port: port, timeout: 0.5, expectedReachable: true)
+    }
+
+    func testRefusedLoopbackProbeReleasesResources() throws {
+        let listener = try startLoopbackListener()
+        let port = try XCTUnwrap(listener.port).rawValue
+        cancelListener(listener)
+
+        assertProbeReleasesResources(port: port, timeout: 0.5, expectedReachable: false)
+    }
+
+    func testTimedOutLoopbackProbeReleasesResources() throws {
+        let listener = try startLoopbackListener()
+        defer { cancelListener(listener) }
+        let port = try XCTUnwrap(listener.port).rawValue
+
+        // The immediate deadline is queued before the connection starts on that queue.
+        assertProbeReleasesResources(port: port, timeout: 0, expectedReachable: false)
+    }
+
+    func testRepeatedLoopbackProbesReleaseAllResources() throws {
+        let listener = try startLoopbackListener()
+        defer { cancelListener(listener) }
+        let port = try XCTUnwrap(listener.port).rawValue
+
+        assertProbeReleasesResources(
+            port: port,
+            timeout: 0.5,
+            expectedReachable: true,
+            count: 100
+        )
     }
 
     func testUnchangedPortalTargetsDoNotScheduleAnotherBatch() {
@@ -77,6 +116,71 @@ final class LocalAppReachabilityTests: XCTestCase {
         XCTAssertTrue(monitor.states.isEmpty)
     }
 
+    private func startLoopbackListener() throws -> NWListener {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        let listener = try NWListener(using: parameters)
+        let ready = expectation(description: "loopback listener ready")
+        listener.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                ready.fulfill()
+            case .failed(let error):
+                XCTFail("Loopback listener failed: \(error)")
+                ready.fulfill()
+            default:
+                break
+            }
+        }
+        listener.newConnectionHandler = { $0.cancel() }
+        listener.start(queue: DispatchQueue(label: "portico.tests.loopback-listener"))
+        wait(for: [ready], timeout: 3)
+        return listener
+    }
+
+    private func cancelListener(_ listener: NWListener) {
+        let cancelled = expectation(description: "loopback listener cancelled")
+        listener.stateUpdateHandler = { state in
+            if case .cancelled = state { cancelled.fulfill() }
+        }
+        listener.cancel()
+        wait(for: [cancelled], timeout: 3)
+        listener.stateUpdateHandler = nil
+        listener.newConnectionHandler = nil
+    }
+
+    private func assertProbeReleasesResources(
+        port: UInt16,
+        timeout: TimeInterval,
+        expectedReachable: Bool,
+        count: Int = 1
+    ) {
+        let completed = expectation(description: "each probe completes once")
+        completed.expectedFulfillmentCount = count
+        completed.assertForOverFulfill = true
+        let released = expectation(description: "each probe releases its captured resource")
+        released.expectedFulfillmentCount = count
+        let probe = LoopbackTCPProbe()
+        var results: [Bool] = []
+
+        autoreleasepool {
+            for _ in 0..<count {
+                let resource = ProbeResource { released.fulfill() }
+                probe.probe(port: port, timeout: timeout) { [resource] reachable in
+                    withExtendedLifetime(resource) {
+                        XCTAssertTrue(Thread.isMainThread)
+                        results.append(reachable)
+                        completed.fulfill()
+                    }
+                }
+            }
+        }
+
+        // Cancelled deadline work can retain the callback until its scheduled time.
+        wait(for: [completed, released], timeout: timeout + 3)
+        XCTAssertEqual(results, Array(repeating: expectedReachable, count: count))
+    }
+
     private func portal(
         id: String,
         port: UInt16,
@@ -92,6 +196,16 @@ final class LocalAppReachabilityTests: XCTestCase {
             lifecycle: lifecycle
         )
     }
+}
+
+private final class ProbeResource {
+    private let onRelease: () -> Void
+
+    init(onRelease: @escaping () -> Void) {
+        self.onRelease = onRelease
+    }
+
+    deinit { onRelease() }
 }
 
 final class FakeLocalAppProbe: LocalAppProbing {

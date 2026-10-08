@@ -35,6 +35,8 @@ final class LoopbackTCPProbe: LocalAppProbing {
             finished = true
             lock.unlock()
             timeoutWorkItem?.cancel()
+            // The timeout block captures finish; clear its reference back to the block.
+            timeoutWorkItem = nil
             connection.cancel()
             DispatchQueue.main.async { completion(reachable) }
         }
