@@ -533,6 +533,8 @@ private struct SelectedPortalView: View {
             Section("Portal State") {
                 LabeledContent("Desired State", value: presentation.desiredState)
                     .accessibilityIdentifier("selected-desired-state")
+                    // macOS 27 keeps the identified row's stale accessibility value; a new identity refreshes it.
+                    .id(presentation.desiredState)
                 LabeledContent("Tailscale", value: presentation.tailscaleState)
                     .accessibilityIdentifier("selected-tailscale-state")
                 LabeledContent("Public Access", value: presentation.publicAccessState)
@@ -1472,6 +1474,8 @@ private struct SettingsView: View {
                     Label(helperStatus.title, systemImage: helperStatus.symbolName)
                 }
                 .accessibilityIdentifier("settings-helper-state")
+                // macOS 27 keeps the identified row's stale accessibility value; a new identity refreshes it.
+                .id(helperStatus.title)
 #if DEBUG
                 if restartGate.isHolding {
                     Button("Complete UI Test Restart") { UITestRestartGate.shared.release() }
