@@ -817,6 +817,17 @@ private struct RemovalNoticeView: View {
     }
 }
 
+private final class WindowObservingButton: NSButton {
+    var onMoveToWindow: (() -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, let onMoveToWindow else { return }
+        self.onMoveToWindow = nil
+        onMoveToWindow()
+    }
+}
+
 private struct FocusRestoringButton: NSViewRepresentable {
     let title: String
     let isEnabled: Bool
@@ -834,8 +845,8 @@ private struct FocusRestoringButton: NSViewRepresentable {
         )
     }
 
-    func makeNSView(context: Context) -> NSButton {
-        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.performAction))
+    func makeNSView(context: Context) -> WindowObservingButton {
+        let button = WindowObservingButton(title: title, target: context.coordinator, action: #selector(Coordinator.performAction))
         button.bezelStyle = .rounded
         button.controlSize = .small
         button.bezelColor = isProminent ? .controlAccentColor : nil
@@ -845,7 +856,7 @@ private struct FocusRestoringButton: NSViewRepresentable {
         return button
     }
 
-    func updateNSView(_ button: NSButton, context: Context) {
+    func updateNSView(_ button: WindowObservingButton, context: Context) {
         let titleChanged = button.title != title
         context.coordinator.action = action
         context.coordinator.onFocusRestored = onFocusRestored
@@ -859,7 +870,7 @@ private struct FocusRestoringButton: NSViewRepresentable {
         context.coordinator.restoreFocus(afterSheetDismissal: button)
     }
 
-    static func dismantleNSView(_ button: NSButton, coordinator: Coordinator) {
+    static func dismantleNSView(_ button: WindowObservingButton, coordinator: Coordinator) {
         coordinator.removeSheetObserver()
     }
 
@@ -883,10 +894,21 @@ private struct FocusRestoringButton: NSViewRepresentable {
             removeSheetObserver()
         }
 
-        func restoreFocus(afterSheetDismissal button: NSButton) {
-            let requestedFocusID = focusRequestID
+        func restoreFocus(afterSheetDismissal button: WindowObservingButton) {
+            restoreFocus(button, for: focusRequestID)
+        }
+
+        private func restoreFocus(_ button: WindowObservingButton, for requestedFocusID: UUID?) {
             DispatchQueue.main.async { [weak self, weak button] in
-                guard let self, let button, let window = button.window else { return }
+                guard let self, let button else { return }
+                // SwiftUI can insert a new button into the window after this hop; retry once it lands.
+                guard let window = button.window else {
+                    button.onMoveToWindow = { [weak self, weak button] in
+                        guard let self, let button else { return }
+                        self.restoreFocus(button, for: requestedFocusID)
+                    }
+                    return
+                }
                 self.removeSheetObserver()
                 guard window.attachedSheet != nil else {
                     self.focus(button, in: window, for: requestedFocusID)
