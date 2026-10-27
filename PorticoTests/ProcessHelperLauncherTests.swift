@@ -473,7 +473,9 @@ final class ProcessHelperLauncherTests: XCTestCase {
         let burst = (1...64).map(String.init).joined(separator: "\n") + "\n"
         let process = try ProcessHelperLauncher(backpressureTimeout: 0.05).launch(
             at: URL(fileURLWithPath: "/bin/sh"),
-            arguments: ["-c", "printf '%s' '\(burst)'; while :; do :; done"],
+            // The sh builtin printf line-buffers; /usr/bin/printf emits one atomic pipe write,
+            // so the whole burst is read in one chunk before the timeout can finish the stream.
+            arguments: ["-c", "/usr/bin/printf '%s' '\(burst)'; while :; do :; done"],
             loggingPreference: .disabled,
             onLine: { data in
                 if !delayedFirstDelivery {
