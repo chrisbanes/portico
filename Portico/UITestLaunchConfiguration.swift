@@ -206,6 +206,8 @@ struct UITestLaunchConfiguration {
         switch scenario {
         case .terminalFailure: 0.01
         case .restarting: 5
+        // The unanswered reconcile must not hit its deadline and replace the message mid-test.
+        case .configuredMessage: 100
         default: 1
         }
     }
