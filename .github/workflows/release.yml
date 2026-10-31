@@ -57,7 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           bundle exec fastlane mac test
-          (cd helper && go test ./...)
+          (cd helper && go test -race ./...)
 
       - name: Test release contract
         run: python3 Scripts/test-release.py
