@@ -124,21 +124,21 @@ For the generated-project check and local app smoke test, see the scripts in
 
 ## Releases
 
-Each release has two macOS 14+ DMGs: `Portico-<version>-arm64.dmg` for Apple
-Silicon and `Portico-<version>-x86_64.dmg` for Intel Macs. Each DMG contains an
-app and embedded helper built for that architecture, signed, notarized, and
-stapled independently. The direct download provides both DMGs, and the
-Homebrew cask selects the matching one; Portico does not check for, download,
+Each release has one macOS 14+ DMG, `Portico-<version>-arm64.dmg`, for Apple
+Silicon Macs. It contains an arm64 app and embedded helper, signed, notarized,
+and stapled. Intel Macs are not supported from 0.0.3 onward
+([ADR 0008](docs/adr/0008-ship-arm64-only-releases.md)). The Homebrew cask
+installs the DMG on Apple Silicon only; Portico does not check for, download,
 or install updates itself.
 
 The **Publish release** workflow is the only publishing path. It runs the
 Fastlane `mac release` lane and must be dispatched from `main` manually with a
 `0.x.y` version. It always releases `main`'s current commit. Before it creates a
 public GitHub Release or changes the tap, the workflow runs the Swift and Go
-suites, builds, signs, notarizes, staples, mounts, and verifies both DMGs. It
+suites, builds, signs, notarizes, staples, mounts, and verifies the DMG. It
 then verifies the uploaded draft assets and audits the generated cask before
 publishing the normal GitHub Release. It clean-installs the cask before
-committing its version, architecture-specific URLs, and SHA-256 values to
+committing its version, architecture-specific URL, and SHA-256 value to
 `chrisbanes/homebrew-tap`; a retry for the same version and `main` commit
 resumes a release whose asset or tap update did not complete.
 
@@ -165,8 +165,8 @@ bundle exec fastlane mac build version:0.1.0
 ```
 
 Keep the Developer ID certificate and App Store Connect team API key outside
-the repository. Before configuring credentials, the architecture-specific
-helper builds can be verified locally with:
+the repository. Before configuring credentials, the arm64
+helper build can be verified locally with:
 
 ```shell
 ./Scripts/verify-helper-architectures.sh

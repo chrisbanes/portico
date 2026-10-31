@@ -544,7 +544,7 @@ registers a login item, or opens an external URL.
 
 ### Packaging
 
-- arm64 and x86_64 builds each embed a helper with the matching architecture;
+- the arm64 build embeds an arm64 helper;
 - helper and app signatures verify strictly with the hardened runtime;
 - the helper is present at the expected bundle path; and
 - a packaged app starts and shuts down without leaving a helper process.
@@ -595,11 +595,11 @@ stable test identities.
 
 ## Distribution
 
-The first supported artifacts are macOS 14+ arm64 and x86_64 apps distributed
-outside the Mac App Store in separate DMGs. Build each helper for its matching
-app architecture, embed and sign the helper before signing the outer app,
-enable the hardened runtime, verify both signatures, notarize each DMG, and
-staple its ticket where supported. Issue #11 owns this signed-app work,
+The supported artifact is a macOS 14+ arm64 app distributed outside the Mac
+App Store in a DMG ([ADR 0008](adr/0008-ship-arm64-only-releases.md)). Build
+the helper for the app architecture, embed and sign the helper before signing
+the outer app, enable the hardened runtime, verify both signatures, notarize
+the DMG, and staple its ticket where supported. Issue #11 owns this signed-app work,
 including the production `SMAppService.mainApp` registration smoke check.
 
 The initial Homebrew cask will live in

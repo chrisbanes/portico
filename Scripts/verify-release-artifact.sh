@@ -24,7 +24,7 @@ if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 case "$architecture" in
-  arm64|x86_64) ;;
+  arm64) ;;
   *) echo "Unsupported architecture: $architecture" >&2; exit 1 ;;
 esac
 [[ -f "$dmg_path" ]] || { echo "DMG is missing: $dmg_path" >&2; exit 1; }

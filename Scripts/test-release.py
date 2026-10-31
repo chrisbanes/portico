@@ -39,7 +39,7 @@ for required in (
     "run_tests(",
     "set_github_release(",
     'script("verify-release-artifact.sh")',
-    'ARCHITECTURES = %w[arm64 x86_64].freeze',
+    'ARCHITECTURES = %w[arm64].freeze',
     '"Portico-#{version}-#{architecture}.dmg"',
     "architectures: missing_architectures",
 ):
@@ -56,9 +56,9 @@ positions = [FASTFILE.index(marker, FASTFILE.index('lane :release')) for marker 
 assert positions == sorted(positions)
 
 for required in (
-    'arch arm: "arm64", intel: "x86_64"',
-    "sha256 arm:",
-    "https://github.com/chrisbanes/portico/releases/download/v\\#{version}/Portico-\\#{version}-\\#{arch}.dmg",
+    'sha256 "#{arm64_checksum}"',
+    "https://github.com/chrisbanes/portico/releases/download/v\\#{version}/Portico-\\#{version}-arm64.dmg",
+    "depends_on arch: :arm64",
     '"brew", "audit", "--cask", "--strict"',
     '"operationalLogging":"disabled"',
     '"push", "origin", "HEAD:main"',
