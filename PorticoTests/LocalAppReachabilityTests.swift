@@ -104,7 +104,7 @@ final class LocalAppReachabilityTests: XCTestCase {
 
         monitor.refresh()
         var changed = enabled
-        changed.localAppPort = 3001
+        changed.destination = .localApp(port: 3001)
         monitor.update(portals: [changed, stopped])
         XCTAssertEqual(probe.requests.count, 2)
 

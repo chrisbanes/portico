@@ -118,7 +118,7 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
 
     init(
         helperURL: URL,
-        stateRootURL: URL = HelperSupervisor.defaultStateRootURL(),
+        stateRootURL: URL,
         launcher: HelperLaunching,
         requestIDProvider: @escaping () -> String = { UUID().uuidString },
         scheduler: PorticoScheduling? = nil,
@@ -800,12 +800,6 @@ final class HelperSupervisor: ObservableObject, PortalHelperClient {
         if isShuttingDown {
             finishShutdown()
         }
-    }
-
-    nonisolated private static func defaultStateRootURL() -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Portico", isDirectory: true)
-            .appendingPathComponent("tsnet", isDirectory: true)
     }
 }
 

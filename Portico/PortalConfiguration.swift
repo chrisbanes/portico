@@ -164,31 +164,6 @@ struct PortalConfiguration: Codable, Equatable {
     init(
         id: UUID,
         name: String,
-        localAppPort: UInt16,
-        createdAt: Date,
-        desiredState: PortalDesiredState = .enabled,
-        lifecycle: PortalLifecycle = .active,
-        removalAssignedName: String? = nil,
-        publicAccess: PortalPublicAccess = .private
-    ) {
-        guard let destination = PortalDestination(localAppPort: localAppPort) else {
-            preconditionFailure("Portal destinations require a port from 1 through 65535.")
-        }
-        self.init(
-            id: id,
-            name: name,
-            destination: destination,
-            createdAt: createdAt,
-            desiredState: desiredState,
-            lifecycle: lifecycle,
-            removalAssignedName: removalAssignedName,
-            publicAccess: publicAccess
-        )
-    }
-
-    init(
-        id: UUID,
-        name: String,
         destination: PortalDestination,
         createdAt: Date,
         desiredState: PortalDesiredState = .enabled,
@@ -206,15 +181,7 @@ struct PortalConfiguration: Codable, Equatable {
         self.removalAssignedName = removalAssignedName
     }
 
-    var localAppPort: UInt16? {
-        get { destination.localAppPort }
-        set {
-            guard let newValue, let destination = PortalDestination(localAppPort: newValue) else {
-                preconditionFailure("Portal destinations require a port from 1 through 65535.")
-            }
-            self.destination = destination
-        }
-    }
+    var localAppPort: UInt16? { destination.localAppPort }
 }
 
 enum PortalDesiredState: String, Codable, Equatable {
