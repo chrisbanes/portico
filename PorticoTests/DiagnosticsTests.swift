@@ -9,13 +9,13 @@ final class DiagnosticsTests: XCTestCase {
             return Date(timeIntervalSince1970: nextTimestamp)
         })
         history.record(.helper(.failed))
-        for _ in 0..<200 {
+        for index in 0..<200 {
             history.record(.portal(
                 name: "hermes",
                 desired: .enabled,
                 tailscale: .online,
                 reachability: .reachable,
-                stale: false
+                stale: index.isMultiple(of: 2)
             ))
         }
 
@@ -63,6 +63,54 @@ final class DiagnosticsTests: XCTestCase {
         ] {
             XCTAssertFalse(report.contains(excluded), excluded)
         }
+    }
+
+    func testRecordingTheSamePortalEventTwiceKeepsOneEntry() {
+        let history = DiagnosticHistory()
+
+        history.record(portalEvent("hermes"))
+        history.record(portalEvent("hermes"))
+
+        XCTAssertEqual(history.entries.count, 1)
+    }
+
+    func testInterleavedUnchangedPortalEventsKeepOneEntryPerPortalUntilOneChanges() {
+        let history = DiagnosticHistory()
+
+        for name in ["a", "b", "a", "b"] {
+            history.record(portalEvent(name))
+        }
+        XCTAssertEqual(history.entries.count, 2)
+
+        history.record(portalEvent("a", tailscale: .stopped))
+        XCTAssertEqual(history.entries.count, 3)
+        XCTAssertEqual(history.entries.last?.event, portalEvent("a", tailscale: .stopped))
+    }
+
+    func testHelperEventsStillRecordAroundUnchangedPortalEvents() {
+        let history = DiagnosticHistory()
+
+        history.record(portalEvent("hermes"))
+        history.record(.helper(.failed))
+        history.record(portalEvent("hermes"))
+        history.record(.helper(.failed))
+
+        XCTAssertEqual(history.entries.map(\.event), [
+            portalEvent("hermes"), .helper(.failed), .helper(.failed),
+        ])
+    }
+
+    private func portalEvent(
+        _ name: String,
+        tailscale: PortalTailscaleState = .online
+    ) -> DiagnosticEvent {
+        .portal(
+            name: name,
+            desired: .enabled,
+            tailscale: tailscale,
+            reachability: .reachable,
+            stale: false
+        )
     }
 
     func testUnavailableInstallationReportSuppressesHelperAndPortalFacts() {

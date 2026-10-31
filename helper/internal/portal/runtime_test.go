@@ -2998,3 +2998,12 @@ func (t *cancellationTrackingTransport) CloseIdleConnections() {
 		transport.CloseIdleConnections()
 	}
 }
+
+func (r *portalRuntime) close(ctx context.Context) error {
+	r.requestStop()
+	if err := r.acquire(ctx); err != nil {
+		return err
+	}
+	err, _ := r.closeHeld(ctx, true, nil)
+	return err
+}

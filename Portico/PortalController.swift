@@ -115,8 +115,6 @@ final class PortalController: ObservableObject {
 
     var onFreshPortalOnline: (() -> Void)?
 
-    var portal: PortalConfiguration? { portals.first }
-    var status: PortalStatusPayload? { portal.flatMap { statuses[$0.id] } }
     var canResetTailnet: Bool {
         isInstallationAvailable && portals.isEmpty && installation.tailnetBinding != nil
     }
@@ -462,11 +460,6 @@ final class PortalController: ObservableObject {
         var updated = installation
         updated.portals[index].destination = destination
         _ = savePortalOperation(updated)
-    }
-
-    func authenticate() {
-        guard let portal else { return }
-        authenticate(id: portal.id)
     }
 
     func authenticate(id: UUID) {

@@ -157,10 +157,6 @@ func (t *remoteAppTransport) CloseIdleConnections() {
 	t.upgrade.CloseIdleConnections()
 }
 
-func safeRemoteDialer(resolve func(context.Context, string, string) ([]netip.Addr, error)) func(context.Context, string, string) (net.Conn, error) {
-	return safeRemoteDialerWithDependencies(remoteTransportDependencies{resolve: resolve})
-}
-
 func safeRemoteDialerWithDependencies(dependencies remoteTransportDependencies) func(context.Context, string, string) (net.Conn, error) {
 	dependencies = normalizedRemoteTransportDependencies(dependencies)
 	return func(ctx context.Context, network, address string) (net.Conn, error) {

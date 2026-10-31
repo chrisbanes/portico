@@ -1,7 +1,6 @@
 import Foundation
 
 enum PortalStoreError: Error {
-    case alreadyExists
     case invalidHistoricalDestination
     case invalidInstallation
     case unsupportedVersion(Int)
@@ -24,10 +23,6 @@ struct PortalStore {
         self.writeData = writeData
     }
 
-    var configurationURL: URL {
-        legacyConfigurationURL
-    }
-
     var legacyConfigurationURL: URL {
         rootURL.appendingPathComponent("portal-v1.json", isDirectory: false)
     }
@@ -48,10 +43,6 @@ struct PortalStore {
         rootURL.appendingPathComponent("installation-v2.json", isDirectory: false)
     }
 
-    func load() throws -> PortalConfiguration? {
-        try loadInstallation().portals.first
-    }
-
     func prepareForStartup() throws -> PortalStoreStartupResult {
         if try loadStoredInstallation() != nil {
             return .existingInstallation
@@ -59,15 +50,6 @@ struct PortalStore {
 
         try save(InstallationRecord())
         return .freshInstallation
-    }
-
-    func save(_ portal: PortalConfiguration) throws {
-        var installation = try loadInstallation()
-        guard installation.portals.isEmpty else {
-            throw PortalStoreError.alreadyExists
-        }
-        installation.portals.append(portal)
-        try save(installation)
     }
 
     func loadInstallation() throws -> InstallationRecord {

@@ -132,8 +132,11 @@ final class LocalAppReachability: ObservableObject {
     private func complete(id: UUID, port: UInt16, cycle completedCycle: Int, reachable: Bool) {
         guard activeRemaining?.remove(id) != nil else { return }
         if completedCycle == cycle, portalPorts[id] == port {
-            states[id] = reachable ? .reachable : .unavailable
-            publish()
+            let newState: LocalAppReachabilityState = reachable ? .reachable : .unavailable
+            if states[id] != newState {
+                states[id] = newState
+                publish()
+            }
         }
         guard activeRemaining?.isEmpty == true else { return }
         activeRemaining = nil
