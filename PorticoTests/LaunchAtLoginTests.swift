@@ -137,8 +137,14 @@ final class LaunchAtLoginTests: XCTestCase {
         service.status = .notFound
         controller.refreshStatus()
         controller.retryRegistration()
+        controller.openLoginItemsSettings()
         XCTAssertEqual(controller.status, .notFound)
         XCTAssertEqual(service.registerCount, 0)
+        XCTAssertEqual(service.openSettingsCount, 2)
+
+        service.status = .notRegistered
+        controller.openLoginItemsSettings()
+        XCTAssertEqual(service.openSettingsCount, 2)
     }
 
     func testApplicationActivationRefreshPreservesRegistrationFailure() {

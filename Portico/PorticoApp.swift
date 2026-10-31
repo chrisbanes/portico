@@ -1543,7 +1543,16 @@ private struct LaunchAtLoginSettingsView: View {
             } else if launchAtLogin.status == .enabled {
                 Button("Disable Launch at Login") { launchAtLogin.setEnabled(false) }
                     .accessibilityIdentifier("disable-launch-at-login")
-            } else if launchAtLogin.status == .requiresApproval {
+            } else if launchAtLogin.status == .requiresApproval || launchAtLogin.status == .notFound {
+                if launchAtLogin.status == .notFound {
+                    // SMAppService reports notFound when it cannot resolve this copy, e.g. duplicate installs.
+                    Label(
+                        "macOS can't find this app's login item. Keep one copy of Portico in Applications, then reopen it.",
+                        systemImage: "exclamationmark.circle"
+                    )
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("launch-at-login-unavailable")
+                }
                 Button("Open Login Items Settings") { launchAtLogin.openLoginItemsSettings() }
                     .accessibilityIdentifier("open-login-items-settings")
             }

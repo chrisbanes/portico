@@ -731,7 +731,7 @@ final class PorticoUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Portico Dev Settings"].waitForExistence(timeout: 3), app.debugDescription)
         for identifier in [
             "launch-at-login-status", "enable-launch-at-login", "disable-launch-at-login",
-            "open-login-items-settings", "retry-launch-at-login", "launch-at-login-error",
+            "open-login-items-settings", "retry-launch-at-login", "launch-at-login-error", "launch-at-login-unavailable",
             "overview-launch-at-login-offer", "launch-at-login-offer",
         ] {
             XCTAssertFalse(app.descendants(matching: .any)[identifier].exists, identifier)
