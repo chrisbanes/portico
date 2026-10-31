@@ -155,12 +155,14 @@ platform :mac do
     output_directory = File.join(require_environment("RUNNER_TEMP"), "release")
     download_directory = File.join(require_environment("RUNNER_TEMP"), "release-download")
 
-    release_response = github_api(
-      path: "repos/#{REPOSITORY}/releases/tags/#{tag}",
-      api_bearer: github_token,
-      error_handlers: { 404 => proc {} }
+    # The list endpoint includes drafts; the by-tag endpoint returns only published releases.
+    releases_response = github_api(
+      path: "repos/#{REPOSITORY}/releases?per_page=100",
+      api_bearer: github_token
     )
-    release = release_response[:status] == 200 ? release_response[:json] : nil
+    matching_releases = releases_response[:json].select { |candidate| candidate["tag_name"] == tag }
+    UI.user_error!("Multiple GitHub Releases match #{tag}") if matching_releases.length > 1
+    release = matching_releases.first
     if release
       UI.user_error!("Existing GitHub Release does not target the requested source commit") unless release["target_commitish"] == source_commit
     else

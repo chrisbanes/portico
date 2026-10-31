@@ -45,6 +45,10 @@ for required in (
 ):
     assert required in FASTFILE, required
 
+assert '"repos/#{REPOSITORY}/releases?per_page=100"' in FASTFILE
+assert "tag_name" in FASTFILE
+assert "releases/tags/" not in FASTFILE
+
 ordered = (
     "build(version: version",
     "set_github_release(",
