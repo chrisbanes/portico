@@ -2005,3 +2005,7 @@ func (l *flakyCloseListener) Close() error {
 	}
 	return l.Listener.Close()
 }
+
+func safeRemoteDialer(resolve func(context.Context, string, string) ([]netip.Addr, error)) func(context.Context, string, string) (net.Conn, error) {
+	return safeRemoteDialerWithDependencies(remoteTransportDependencies{resolve: resolve})
+}

@@ -1265,3 +1265,11 @@ func TestServeExitsCleanlyOnEOF(t *testing.T) {
 		t.Fatalf("Serve() = (exit %d, output %q, diagnostics %q), want clean EOF", exitCode, output.String(), diagnostics.String())
 	}
 }
+
+func Serve(input io.Reader, output, diagnostics io.Writer) int {
+	return ServeWithRuntime(input, output, diagnostics, nil)
+}
+
+func ServeWithRuntime(input io.Reader, output, diagnostics io.Writer, runtime PortalRuntime) int {
+	return ServeWithServices(input, output, diagnostics, Services{PortalRuntime: runtime})
+}

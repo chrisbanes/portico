@@ -775,15 +775,6 @@ func (r *portalRuntime) authenticate(ctx context.Context) error {
 	return nil
 }
 
-func (r *portalRuntime) close(ctx context.Context) error {
-	r.requestStop()
-	if err := r.acquire(ctx); err != nil {
-		return err
-	}
-	err, _ := r.closeHeld(ctx, true, nil)
-	return err
-}
-
 // closeHeld closes a Portal while its operation gate is already held. Callers
 // that retain the gate for a larger operation must pass false and release it
 // only after their own durable work has completed.

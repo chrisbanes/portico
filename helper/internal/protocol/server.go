@@ -225,14 +225,6 @@ func newMessageWriter(ctx context.Context, output io.Writer, fail func()) *messa
 	return w
 }
 
-func Serve(input io.Reader, output, diagnostics io.Writer) int {
-	return ServeWithRuntime(input, output, diagnostics, nil)
-}
-
-func ServeWithRuntime(input io.Reader, output, diagnostics io.Writer, runtime PortalRuntime) int {
-	return ServeWithServices(input, output, diagnostics, Services{PortalRuntime: runtime})
-}
-
 func ServeWithServices(input io.Reader, output, diagnostics io.Writer, services Services) int {
 	runtime := services.PortalRuntime
 	var closeOnce sync.Once
