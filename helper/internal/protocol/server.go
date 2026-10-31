@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -223,14 +222,6 @@ func newMessageWriter(ctx context.Context, output io.Writer, fail func()) *messa
 		}
 	}()
 	return w
-}
-
-func Serve(input io.Reader, output, diagnostics io.Writer) int {
-	return ServeWithRuntime(input, output, diagnostics, nil)
-}
-
-func ServeWithRuntime(input io.Reader, output, diagnostics io.Writer, runtime PortalRuntime) int {
-	return ServeWithServices(input, output, diagnostics, Services{PortalRuntime: runtime})
 }
 
 func ServeWithServices(input io.Reader, output, diagnostics io.Writer, services Services) int {
@@ -460,7 +451,7 @@ func serveRequest(ctx context.Context, request request, runtime PortalRuntime, d
 		if err != nil || requestContext.Err() != nil {
 			return write(errorResponse(request.RequestID, "discoveryFailure", "local app discovery failed"))
 		}
-		result := response{Version: Version, RequestID: request.RequestID, Result: discoverLocalAppsResult{Candidates: canonicalCandidates(candidates)}}
+		result := response{Version: Version, RequestID: request.RequestID, Result: discoverLocalAppsResult{Candidates: candidates}}
 		encoded, marshalErr := json.Marshal(result)
 		if marshalErr != nil || len(encoded) > 256*1024 {
 			result = errorResponse(request.RequestID, "discoveryFailure", "local app discovery failed")
@@ -569,35 +560,6 @@ func decodeReconcilePortalsPayload(raw json.RawMessage) ([]portal.Config, error)
 		configs = append(configs, config)
 	}
 	return configs, nil
-}
-
-func canonicalCandidates(candidates []discovery.Candidate) []discovery.Candidate {
-	byPort := make(map[uint16]discovery.Candidate, len(candidates))
-	disagreed := make(map[uint16]bool)
-	for _, candidate := range candidates {
-		if candidate.LocalAppPort == 0 || candidate.ProcessLabel == "" {
-			continue
-		}
-		if previous, exists := byPort[candidate.LocalAppPort]; !exists {
-			byPort[candidate.LocalAppPort] = candidate
-		} else if previous != candidate {
-			disagreed[candidate.LocalAppPort] = true
-		}
-	}
-	ports := make([]uint16, 0, len(byPort))
-	for port := range byPort {
-		ports = append(ports, port)
-	}
-	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
-	result := make([]discovery.Candidate, 0, len(ports))
-	for _, port := range ports {
-		if disagreed[port] {
-			result = append(result, discovery.Candidate{LocalAppPort: port, ProcessLabel: fmt.Sprintf("Port %d", port)})
-		} else {
-			result = append(result, byPort[port])
-		}
-	}
-	return result
 }
 
 func (request request) isStructurallyValid() bool {

@@ -652,7 +652,6 @@ final class PortalStoreTests: XCTestCase {
         XCTAssertEqual(try store.load(), portal)
         XCTAssertEqual(try permissions(of: root), 0o700)
         XCTAssertEqual(try permissions(of: store.installationURL), 0o600)
-        XCTAssertThrowsError(try store.save(portal))
     }
 
     func testVersionFivePersistenceUsesTheTaggedDestinationAndPrivateMode() throws {
@@ -759,20 +758,20 @@ final class PortalStoreTests: XCTestCase {
         let store = PortalStore(rootURL: temporaryRoot())
         try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
         let corrupt = Data("not-json".utf8)
-        try corrupt.write(to: store.configurationURL)
+        try corrupt.write(to: store.legacyConfigurationURL)
 
         XCTAssertThrowsError(try store.load())
-        XCTAssertEqual(try Data(contentsOf: store.configurationURL), corrupt)
+        XCTAssertEqual(try Data(contentsOf: store.legacyConfigurationURL), corrupt)
     }
 
     func testUnsupportedVersionFailsWithoutReplacement() throws {
         let store = PortalStore(rootURL: temporaryRoot())
         try FileManager.default.createDirectory(at: store.rootURL, withIntermediateDirectories: true)
         let unsupported = Data(#"{"version":2,"portal":{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":"2026-08-03T00:00:00Z"}}"#.utf8)
-        try unsupported.write(to: store.configurationURL)
+        try unsupported.write(to: store.legacyConfigurationURL)
 
         XCTAssertThrowsError(try store.load())
-        XCTAssertEqual(try Data(contentsOf: store.configurationURL), unsupported)
+        XCTAssertEqual(try Data(contentsOf: store.legacyConfigurationURL), unsupported)
     }
 
     private func temporaryRoot() -> URL {

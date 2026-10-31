@@ -65,6 +65,28 @@ final class LocalAppReachabilityTests: XCTestCase {
         XCTAssertEqual(monitor.states[portal.id], .reachable)
     }
 
+    func testRepeatedProbeWithSameResultPublishesOnce() {
+        let probe = FakeLocalAppProbe()
+        let monitor = LocalAppReachability(probe: probe, scheduler: FakePorticoScheduler())
+        let portal = portal(id: "11111111-1111-1111-1111-111111111111", port: 3000)
+        var changes = 0
+        monitor.update(portals: [portal])
+        monitor.onChange = { _ in changes += 1 }
+
+        probe.complete(index: 0, reachable: true)
+        monitor.refresh()
+        probe.complete(index: 1, reachable: true)
+
+        XCTAssertEqual(changes, 1)
+        XCTAssertEqual(monitor.states[portal.id], .reachable)
+
+        monitor.refresh()
+        probe.complete(index: 2, reachable: false)
+
+        XCTAssertEqual(changes, 2)
+        XCTAssertEqual(monitor.states[portal.id], .unavailable)
+    }
+
     func testProbesAllNonCleanupPortalsAndCoalescesSupersededBatches() {
         let probe = FakeLocalAppProbe()
         let scheduler = FakePorticoScheduler()
@@ -82,7 +104,7 @@ final class LocalAppReachabilityTests: XCTestCase {
 
         monitor.refresh()
         var changed = enabled
-        changed.localAppPort = 3001
+        changed.destination = .localApp(port: 3001)
         monitor.update(portals: [changed, stopped])
         XCTAssertEqual(probe.requests.count, 2)
 
