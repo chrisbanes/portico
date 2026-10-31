@@ -110,10 +110,9 @@ func TestServeReconcilesLiteralProtocolVersionSevenSnapshot(t *testing.T) {
 
 func TestDiscoverLocalAppsReturnsOnlyStableSanitizedCandidates(t *testing.T) {
 	discoverer := fakeDiscoverer{candidates: []discovery.Candidate{
-		{LocalAppPort: 9000, ProcessLabel: "hermes", SuggestedPortalName: "hermes"},
+		{LocalAppPort: 7000, ProcessLabel: "first", SuggestedPortalName: "first"},
 		{LocalAppPort: 8000, ProcessLabel: "atlas", SuggestedPortalName: "atlas"},
 		{LocalAppPort: 9000, ProcessLabel: "hermes", SuggestedPortalName: "hermes"},
-		{LocalAppPort: 7000, ProcessLabel: "first", SuggestedPortalName: "first"},
 	}}
 	exitCode, output, diagnostics := serveOpenInput(t, `{"version":7,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithServices(input, output, diagnostics, Services{LocalAppDiscoverer: discoverer})
@@ -128,10 +127,9 @@ func TestDiscoverLocalAppsReturnsOnlyStableSanitizedCandidates(t *testing.T) {
 	}
 }
 
-func TestDiscoverLocalAppsCollapsesDisagreeingDuplicateOwners(t *testing.T) {
+func TestDiscoverLocalAppsPassesThroughCollapsedOwnerCandidate(t *testing.T) {
 	discoverer := fakeDiscoverer{candidates: []discovery.Candidate{
-		{LocalAppPort: 8787, ProcessLabel: "python3", SuggestedPortalName: "hermes"},
-		{LocalAppPort: 8787, ProcessLabel: "node", SuggestedPortalName: "atlas"},
+		{LocalAppPort: 8787, ProcessLabel: "Port 8787"},
 	}}
 	exitCode, output, _ := serveOpenInput(t, `{"version":7,"requestId":"discover-1","command":"discoverLocalApps","payload":{}}`, 1, func(input io.Reader, output, diagnostics io.Writer) int {
 		return ServeWithServices(input, output, diagnostics, Services{LocalAppDiscoverer: discoverer})
