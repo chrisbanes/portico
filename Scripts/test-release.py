@@ -24,6 +24,11 @@ assert "timeout-minutes: 180" in RELEASE
 assert "source_commit:" not in RELEASE
 assert "SOURCE_COMMIT" not in RELEASE
 assert "bundle exec fastlane mac release" in RELEASE
+VERSION_CHECK = r'[[ "$VERSION" =~ ^0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]'
+assert VERSION_CHECK in RELEASE
+assert "      - name: Validate release version\n" in RELEASE
+assert RELEASE.index("Validate release version") < RELEASE.index("actions/checkout")
+assert RELEASE.index(VERSION_CHECK) < RELEASE.index("bundle exec fastlane mac test")
 assert all(
     "HOMEBREW_TAP_TOKEN" not in workflow.read_text(encoding="utf-8")
     for workflow in WORKFLOWS.glob("*.yml")
