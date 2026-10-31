@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Verifies the helper binaries shipped in the two architecture-specific releases.
+# Verifies the helper binaries shipped in the release.
 
 set -euo pipefail
 
@@ -14,7 +14,7 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$repo_root"
-for architecture in arm64 x86_64; do
+for architecture in arm64; do
   helper_path="$temporary_directory/portico-helper-$architecture"
   PORTICO_GO_BUILD_CACHE="$repo_root/.build/verify-go-build-cache/macos-14" \
     ARCHS="$architecture" \
