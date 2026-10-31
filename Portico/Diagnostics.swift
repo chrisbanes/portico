@@ -22,12 +22,17 @@ final class DiagnosticHistory {
     var onChange: (([DiagnosticEntry]) -> Void)?
 
     private let dateProvider: () -> Date
+    private var lastPortalEvents: [String: DiagnosticEvent] = [:]
 
     init(dateProvider: @escaping () -> Date = Date.init) {
         self.dateProvider = dateProvider
     }
 
     func record(_ event: DiagnosticEvent) {
+        if case let .portal(name, _, _, _, _) = event {
+            guard lastPortalEvents[name] != event else { return }
+            lastPortalEvents[name] = event
+        }
         entries.append(DiagnosticEntry(timestamp: dateProvider(), event: event))
         if entries.count > 200 {
             entries.removeFirst(entries.count - 200)
