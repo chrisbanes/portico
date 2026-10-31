@@ -261,10 +261,10 @@ def validate_pages_workflow(workflow: str) -> None:
     )
     triggers = yaml_block(lines, "on:")
     require(
-        not any(line.strip() in {"pull_request_target:", "workflow_run:"} for line in triggers),
+        not any(re.match(r"\s*(pull_request_target|workflow_run)\s*:", line) for line in triggers),
         "Pages workflow must not use pull_request_target or workflow_run triggers",
     )
-    sensitive = lambda block: sum("actions/deploy-pages@" in line or "pages: write" in line for line in block)
+    sensitive = lambda block: sum(bool(re.search(r"actions/deploy-pages@|pages:\s*write|write-all", line)) for line in block)
     require(sensitive(lines) == sensitive(deploy), "Pages write access and deployment must stay in the deploy job")
 
 
@@ -312,6 +312,14 @@ def pages() -> None:
     )
     require_rejected_pages_workflow(
         workflow + "  other:\n    runs-on: ubuntu-latest\n    permissions:\n      pages: write\n    steps:\n      - run: true\n",
+        "Pages write access and deployment must stay in the deploy job",
+    )
+    require_rejected_pages_workflow(
+        workflow.replace("  workflow_dispatch:\n", "  workflow_dispatch:\n  pull_request_target: {}\n", 1),
+        "Pages workflow must not use pull_request_target or workflow_run triggers",
+    )
+    require_rejected_pages_workflow(
+        workflow + "  other:\n    runs-on: ubuntu-latest\n    permissions: write-all\n    steps:\n      - run: true\n",
         "Pages write access and deployment must stay in the deploy job",
     )
 
