@@ -144,7 +144,7 @@ final class LaunchAtLoginController: ObservableObject {
 
     func openLoginItemsSettings() {
         refreshStatus()
-        guard status == .requiresApproval else { return }
+        guard status == .requiresApproval || status == .notFound else { return }
         service.openSystemSettingsLoginItems()
     }
 
