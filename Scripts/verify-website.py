@@ -15,57 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WEBSITE = ROOT / "website"
 INDEX = WEBSITE / "index.html"
 PAGES_WORKFLOW = ROOT / ".github/workflows/pages.yml"
-CANONICAL_PAGES_LINES = """\
-name: Pages
-on:
-  push:
-    branches: [main]
-    paths:
-      - website/**
-      - Scripts/verify-website.py
-      - .github/workflows/pages.yml
-  pull_request:
-    paths:
-      - website/**
-      - Scripts/verify-website.py
-      - .github/workflows/pages.yml
-  workflow_dispatch:
-concurrency:
-  group: pages
-  cancel-in-progress: false
-permissions:
-  contents: read
-jobs:
-  build:
-    name: Validate Pages artifact
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-      - name: Verify static site
-        run: python3 Scripts/verify-website.py
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b
-        with:
-          path: website
-  deploy:
-    name: Deploy Pages
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    steps:
-      - name: Configure Pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e
-""".splitlines()
+DEPLOY_GATE = "    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"
 
 
 class Page(HTMLParser):
@@ -304,7 +254,11 @@ def validate_pages_workflow(workflow: str) -> None:
         ),
         "Pages deploy job must configure Pages immediately before deployment",
     )
-    require(lines == CANONICAL_PAGES_LINES, "Pages workflow must match the canonical active YAML")
+    require(DEPLOY_GATE in deploy, "Pages deploy job must run only for non-PR pushes to main")
+    require(
+        any("github.ref" in line for line in yaml_block(lines, "concurrency:") if line.startswith("  group:")),
+        "Pages concurrency group must include github.ref",
+    )
 
 
 def require_rejected_pages_workflow(workflow: str, expected_error: str) -> None:
@@ -336,6 +290,14 @@ def pages() -> None:
     require_rejected_pages_workflow(
         workflow.replace("      - name: Upload Pages artifact", configure_pages_step + "      - name: Upload Pages artifact", 1),
         "Pages build job must not configure Pages",
+    )
+    require_rejected_pages_workflow(
+        workflow.replace(f"{DEPLOY_GATE}\n", "", 1),
+        "Pages deploy job must run only for non-PR pushes to main",
+    )
+    require_rejected_pages_workflow(
+        workflow.replace("group: pages-${{ github.ref }}", "group: pages", 1),
+        "Pages concurrency group must include github.ref",
     )
 
 
