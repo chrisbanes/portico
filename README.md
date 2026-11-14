@@ -180,3 +180,11 @@ helper build can be verified locally with:
 - [Preliminary naming check](docs/naming.md)
 - [Roadmap](docs/roadmap.md)
 - [Marketing site](website/)
+
+## Local service design
+
+The approved Go service architecture is specified in the
+[management contract](docs/local-service-contract.md),
+[native UI coverage migration](docs/ui-coverage-migration.md), and
+[architecture decision](docs/adr/0009-local-go-management-service.md).
+These describe the planned migration; the current app still owns Portal management.
