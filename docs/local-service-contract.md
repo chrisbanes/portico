@@ -109,6 +109,7 @@ An example mutation is:
 | `createPortal` | Name, destination, `publicAccess`; receipt including allocated UUID | Logging choice made; valid input; public mode only with supported Local App constraints |
 | `setDesiredState` | Portal UUID, `enabled`/`stopped`; receipt | Active record only; idempotent desired intent |
 | `setDestination` | Portal UUID, tagged destination; receipt | Immutable UUID/name; reject Remote App when stored mode is public |
+| `setLaunchAtLoginOffer` | `state`: `presented`/`accepted`/`declined`; receipt | Service-owned durable offer history, macOS production service capability only; native UI registration remains client-owned |
 | `setOperationalLogging` | `enabled`/`disabled`; receipt | Commit preference before safely reconfiguring runtime |
 | `removePortal` | Portal UUID, `confirmed:true`; receipt | Active record; durable Removing Portal before any deletion |
 | `retryRemoval` | Portal UUID; receipt | Pending removal with retry available; never re-enable |
@@ -122,6 +123,21 @@ resumeEnrolment. A new accepted runtime action has a durable action marker;
 a restart exposes `interrupted` for transient enrolment actions and requires an
 explicit new resume, never an automatic auth URL. A retried receipt starts no
 second action. Set-to-current-value operations return a recorded no-op receipt.
+`launchAtLoginOffer` is included in snapshots as `notOffered`, `presented`,
+`accepted` or `declined`. Only the macOS production service exposes this preference;
+Linux/Dev services return `capabilityUnavailable` for its mutation. The service accepts
+`notOffered` → `presented`/`accepted`, `presented` → `accepted`/`declined`, and
+`declined` → `accepted` (explicit enable in Settings); same-state is a recorded
+no-op. Other transitions are `notAvailable`; turning native UI login off does
+not clear its historical offer. Clients request `presented` after a fresh Online
+fact or restore an already presented offer, and await durable acceptance before
+showing/changing the offer. Accept commits `accepted` before native registration;
+failed/uncertain save prevents registration until same-ID recovery proves the
+commit. A registration error leaves `accepted` durable and offers native retry,
+not another persistence owner. Native SMAppService status, register/unregister,
+settings routing and approval wording stay client-owned. This preference never
+controls service login startup.
+
 Unsupported Funnel activation is `capabilityUnavailable`; this contract preserves
 stored Public Access mode/status and current private-only listener behaviour,
 not new public listeners. A future Funnel command/version must cover its safety
@@ -208,7 +224,7 @@ until proven closed. Keep existing bounded cancellation and redacted diagnostics
 
 Snapshots contain protocol version, epoch (new UUID per service process), sequence
 (monotonic within epoch), durable revision, service state/capabilities, logging
-choice, tailnet binding, sanitised alerts and Portal records. Each Portal includes
+choice, launchAtLoginOffer, tailnet binding, sanitised alerts and Portal records. Each Portal includes
 UUID, immutable Portal Name, destination, stored Public Access, desired/lifecycle
 state, structured live connection/listener/public-access/reachability state,
 Assigned Name, Portal URL/addresses when known, freshness `current`/`lastKnown`,
@@ -293,11 +309,19 @@ allowed. Startup/approval failure is visible and never starts a local UI owner.
    lock. A new lock alone proves nothing about them. Upgrade orchestration must
    disable old automatic UI starts, ask the known old UI to stop reconciliation
    and quit, await its exact helper termination, and verify the previously
-   installed app cannot restart as a writer during transfer. No name-based kill
-   or snapshot PID check counts as this guarantee. Ship a compatibility bridge
-   release with shared ownership admission if existing installation/upgrade
-   mechanisms cannot exclude legacy relaunch. Do not auto-start the new writer
-   until #104/#105 demonstrate this gate with an old-version relaunch race.
+   installed app cannot restart as a writer during transfer **and for the entire period of service ownership**, including
+   after commit, service downtime and restart. Preserved originals/identity copies
+   must never become a second legacy runtime source. No name-based kill
+   or snapshot PID check counts as this guarantee. Require a persistent admission mechanism: a compatibility bridge release
+   with shared ownership admission, or a verified legacy fail-closed guard for
+   every supported historical reader. A guard must preserve original bytes in
+   the checkpoint and restore them on failed transfer before any new node starts;
+   guard installation/recovery is part of the exclusive migration transaction.
+   A PID check, new lock or instruction to quit the old app is not a persistent
+   mechanism. If existing upgrade mechanisms cannot establish it, introduce the
+   bridge as a prerequisite rather than starting the service. Do not auto-start the new writer
+   until #104/#105 demonstrate this gate with old-version relaunch attempts during transfer,
+   after commit and while the service is stopped/restarting.
    If it cannot be established automatically, preserve originals and surface an
    actionable migration failure; the automatic-migration acceptance stays blocked.
 3. After exclusive ownership, read original files without mutation: current
@@ -331,7 +355,7 @@ allowed. Startup/approval failure is visible and never starts a local UI owner.
 **MIG-1 is an implementation proof gate, not completed evidence.** Neither the
 baseline nor this design delivers legacy quiescence. #103 can develop import and
 single-writer service tests with isolated roots; #104/#105 must settle and prove
-legacy exclusion before production cutover. If a bridge release is required,
+persistent legacy exclusion before production cutover, including a legacy launch after successful migration. If a bridge release is required,
 record its dependency and replan those deliveries instead of pretending a lock
 retroactively protects older versions.
 
@@ -387,10 +411,10 @@ continue through the host OS network, preserving proxy/header/TLS rules of ADR
 
 | Layer / owner | Required evidence before dependent acceptance |
 | --- | --- |
-| Go behaviour, #103 | Fake runtime/store/clock: full command validation, logging gate, ordered edits, atomic commit and failure injection, historical v1–v5 fixtures, duplicate payload/conflict/expiry/capacity, lost Create ack across restart, cross-tailnet rejection, pending cleanup, safe diagnostics; no actual tailnet claim |
+| Go behaviour, #103 | Fake runtime/store/clock: full command validation, logging gate and durable UI login-offer transitions, ordered edits, atomic commit and failure injection, historical v1–v5 fixtures, duplicate payload/conflict/expiry/capacity, lost Create ack across restart, cross-tailnet rejection, pending cleanup, safe diagnostics; no actual tailnet claim |
 | Real IPC, #104 | macOS and Linux OS credential tests (same UID success, other UID/root rejection), mode/symlink/stale socket checks, framing/bounds/version failures, concurrent clients, slow subscriber, disconnect before/after commit, restart recovery with same receipt/UUID; mock credentials alone insufficient |
 | Platform lifecycle, #104/#105 | Isolated installed service: UI exit, service crash/restart, Stopped case, pending cleanup, denied approval, relaunch races, historical upgrade failure at every migration phase; assert original metadata/identity byte preservation before commit and fail-closed authoritative-state corruption |
-| Client, #105 | Fake service: correct UUID/action, revision conflict, pending/lost ack persistence and same-ID retry, expiry uncertainty, stale/disconnected hints, local effects once, new explicit enrolment after reconnect; retained UI scenarios via VM only |
+| Client, #105 | Fake service: correct UUID/action, revision conflict, pending/lost ack persistence and same-ID retry, expiry uncertainty, stale/disconnected hints, local effects once, login-offer commit-before-native-registration and failed-save behaviour, new explicit enrolment after reconnect; retained UI scenarios via VM only |
 | Coverage reconciliation, #106 | Every baseline assertion mapped, replacement evidence before deletion, comparable VM counts/timings, prospective Funnel safety below UI |
 | Distribution, #85 | macOS arm64 signing/notarisation/agent embedding and approval; Linux service binary/unit/paths/permissions/install/uninstall preserving state; CLI packaging separately; explicit platform/architecture artifact matrix before claiming support |
 
