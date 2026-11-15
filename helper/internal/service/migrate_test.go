@@ -446,6 +446,19 @@ func TestCorruptStateFailsClosed(t *testing.T) {
 		{"manifest naming a missing generation", func(t *testing.T, dir string, m manifest) {
 			write(t, filepath.Join(dir, manifestFile), []byte(`{"schema":1,"generation":"00000000000000000000000000000000","phase":"committed","sources":{}}`), 0o600)
 		}},
+		{"group-writable committed identity file", func(t *testing.T, dir string, m manifest) {
+			write(t, filepath.Join(dir, generationsDir, m.Generation, "tsnet", hermesID, "tailscaled.state"), []byte("node-key"), 0o666)
+		}},
+		{"symlinked committed identity directory", func(t *testing.T, dir string, m manifest) {
+			elsewhere := t.TempDir()
+			write(t, filepath.Join(elsewhere, "tailscaled.state"), []byte("node-key"), 0o600)
+			if err := os.Symlink(elsewhere, filepath.Join(dir, generationsDir, m.Generation, "tsnet", hermesID)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"missing committed identity directory", func(t *testing.T, dir string, m manifest) {
+			os.RemoveAll(filepath.Join(dir, generationsDir, m.Generation, "tsnet"))
+		}},
 		{"generation without a manifest", func(t *testing.T, dir string, m manifest) {
 			os.Remove(filepath.Join(dir, manifestFile))
 		}},

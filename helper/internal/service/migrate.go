@@ -315,6 +315,11 @@ func (s *Store) load() error {
 	if info, err := s.root.Lstat(s.generation); err != nil || !info.IsDir() || checkOwned(info) != nil {
 		return unsafeErr(s.generation)
 	}
+	// The runtime will use this tree, so apply the import's safety rules to it
+	// again. Contents are not compared: running nodes legitimately change them.
+	if err := walkSafe(s.root, path.Join(s.generation, identitiesDir), func(string, fs.FileInfo) error { return nil }); err != nil {
+		return err
+	}
 	data, err = readRegular(s.root, path.Join(s.generation, stateFileName))
 	if err != nil {
 		return err
@@ -418,7 +423,9 @@ func copyTree(root *os.Root, dir string, destinations []string) error {
 // files and anything not safely owned.
 func walkSafe(root *os.Root, dir string, visit func(rel string, info fs.FileInfo) error) error {
 	// WalkDir stats its start with symlinks followed, so check it first.
-	if info, err := root.Lstat(dir); err != nil {
+	if info, err := root.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+		return unsupportedErr(err)
+	} else if err != nil {
 		return persistenceErr(err)
 	} else if !info.IsDir() || checkOwned(info) != nil {
 		return unsafeErr(dir)
