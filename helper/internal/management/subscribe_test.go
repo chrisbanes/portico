@@ -35,10 +35,19 @@ func collect(c *Client) (snapshots func() []service.Snapshot) {
 func subscribe(t *testing.T, c *Client) func() []service.Snapshot {
 	t.Helper()
 	got := collect(c)
-	if err := c.Call(ctx(t), "subscribe", nil, nil, nil); err != nil {
-		t.Fatal(err)
+	for {
+		// Concurrent mutations may hold every global call slot for a moment.
+		err := c.Call(ctx(t), "subscribe", nil, nil, nil)
+		var e *Error
+		if errors.As(err, &e) && e.Code == "capacityExceeded" {
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
 	}
-	return got
 }
 
 func wantContiguous(t *testing.T, name string, snapshots []service.Snapshot, revision uint64) {
@@ -125,6 +134,16 @@ func TestSlowConsumerIsDisconnectedWithoutStallingTheEngine(t *testing.T) {
 	blocked := h.raw(t)
 	rawHello(t, blocked)
 	writeJSON(t, blocked, rawCall("subscribe", map[string]any{}))
+	// Flood only once the subscription is registered.
+	for {
+		f, err := readRaw(t, blocked)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f["type"] == "snapshot" {
+			break
+		}
+	}
 
 	rt := h.factory.runtime()
 	flooded := make(chan time.Duration)
@@ -271,6 +290,8 @@ func TestPagedSetsAreContiguous(t *testing.T) {
 	h := newHarness(t, func(h *harness) {
 		h.seed = seedPortals(12)
 		h.limits.MaxFrame = 4 << 10
+		// Contiguity, not backpressure: the reader may lag on one CPU.
+		h.limits.OutputQueue = 4096
 	})
 	c := h.dial()
 	id := snapshot(t, c).Portals[0].ID
