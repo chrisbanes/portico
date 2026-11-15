@@ -329,9 +329,7 @@ func (e *Engine) emitter(gen uint64) func(portal.Event) {
 		id := strings.ToLower(event.PortalID)
 		state := e.store.state
 		i := portalIndex(&state, id)
-		// A Stopped Portal's facts belong to markStoppedLocked; a late event
-		// from its closing node must not make them current again.
-		if i < 0 || state.Installation.Portals[i].Lifecycle != installation.LifecycleActive || state.Installation.Portals[i].DesiredState != portal.DesiredStateEnabled {
+		if i < 0 || state.Installation.Portals[i].Lifecycle != installation.LifecycleActive {
 			return
 		}
 		connection := sanitizeStatus(*event.Status)
@@ -384,9 +382,8 @@ func (e *Engine) observeTailnet(id string, c Connection, tailnetName string) {
 // address and URL facts it keeps are last-known.
 func (e *Engine) markStoppedLocked(id string) {
 	if c, ok := e.live[id]; ok {
-		c.State = portal.StateStopped
+		c.State, c.Freshness = portal.StateStopped, freshnessLastKnown
 		e.live[id] = c
-		e.ageFactsLocked(id)
 	}
 }
 

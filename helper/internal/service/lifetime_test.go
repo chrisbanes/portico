@@ -137,7 +137,7 @@ func TestRealRuntimeStopLeavesNoCurrentOnlineFacts(t *testing.T) {
 	}
 }
 
-// failingCloseNode is Online but cannot close until allowClose.
+// failingCloseNode is Online but cannot close until closable is set.
 type failingCloseNode struct {
 	onlineNode
 	closable atomic.Bool
@@ -160,6 +160,8 @@ func TestRealRuntimeFailedCloseLeavesNoCurrentOnlineFacts(t *testing.T) {
 			return portal.NewRuntime(stateRoot, func(string, string) portal.Node { return node }), nil
 		}
 	})
+	// Runs before the harness's Close, so shutdown can succeed.
+	t.Cleanup(func() { node.closable.Store(true) })
 	h.chooseLogging(installation.LoggingEnabled)
 	id := h.create("hermes", localApp(8787))
 	if p := h.portal(id); !p.Availability[OpOpenPortalURL].Available {
@@ -173,5 +175,31 @@ func TestRealRuntimeFailedCloseLeavesNoCurrentOnlineFacts(t *testing.T) {
 	if p.Problem != ProblemCloseFailed || p.Connection == nil || p.Connection.Freshness != freshnessLastKnown || p.Availability[OpOpenPortalURL].Available {
 		t.Fatalf("Portal after a failed close = problem %q, connection %+v, open %+v", p.Problem, p.Connection, p.Availability[OpOpenPortalURL])
 	}
-	node.closable.Store(true)
+}
+
+func TestStartFailureAgesFacts(t *testing.T) {
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	id := h.create("hermes", localApp(1))
+	h.factory.runtime().emitStatus(id, online("hermes", "one.ts.net", "tailnet-a"))
+	h.factory.set(func(f *fakeFactory) { f.outcomes[id] = portal.OutcomeStartFailed })
+	if _, err := h.session.SetDestination(h.req(), SetDestinationParams{PortalID: id, Destination: localApp(2)}); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	if p := h.portal(id); p.Problem != ProblemStartFailed || p.Availability[OpOpenPortalURL].Available {
+		t.Fatalf("after a start failure: problem %q, open %+v", p.Problem, p.Availability[OpOpenPortalURL])
+	}
+}
+
+func TestFailedReplacementAgesFacts(t *testing.T) {
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	id := h.create("hermes", localApp(1))
+	h.factory.runtime().emitStatus(id, online("hermes", "one.ts.net", "tailnet-a"))
+	h.factory.set(func(f *fakeFactory) { f.closeErr = errors.New("still running") })
+	h.chooseLogging(installation.LoggingDisabled)
+	if p := h.portal(id); p.Connection == nil || p.Connection.Freshness != freshnessLastKnown || p.Availability[OpOpenPortalURL].Available {
+		t.Fatalf("after a failed replacement: %+v", p.Connection)
+	}
 }
