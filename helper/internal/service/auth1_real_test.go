@@ -2,10 +2,13 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -92,17 +95,22 @@ func TestRealRuntimeAuth1ResumeAcrossDisconnectAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := receipt.PortalID
-	identity := filepath.Join(store.IdentityRoot(), id)
+	identityRoot := store.IdentityRoot()
+	identity := filepath.Join(identityRoot, id)
 	authenticating(setup, id)
+	before := identityFiles(t, identity)
+	beforeKeys := nodeKeys(t, identity)
 
-	// Client A resumes and disconnects; it must receive nothing.
+	// Client A resumes, its login starts, then it disconnects.
 	a := engine.Connect()
-	aEvents := &eventLog{}
-	a.ReceiveEnrolmentEvents(aEvents.sink)
 	if _, err := a.ResumeEnrolment(request(a), ResumeEnrolmentParams{PortalID: id}); err != nil {
 		t.Fatal(err)
 	}
+	time.Sleep(2 * time.Second)
 	a.Close()
+	// Any URL A's attempt produces arrives now, with no lease, and is
+	// dropped; B's URL below can then only come from B's own resume.
+	time.Sleep(5 * time.Second)
 
 	// Client B resumes and is the only one to receive the URL.
 	observerEvents := &eventLog{}
@@ -117,11 +125,10 @@ func TestRealRuntimeAuth1ResumeAcrossDisconnectAndRestart(t *testing.T) {
 	}
 	awaitURL(bEvents, bReq.ID)
 	checkURL(urls[0])
-	t.Logf("outcome: client A received %d events after disconnecting; observer received %d", len(aEvents.of(EnrolmentAuthenticationURL)), len(observerEvents.all()))
-	if len(aEvents.of(EnrolmentAuthenticationURL)) != 0 || len(observerEvents.all()) != 0 {
+	t.Logf("outcome: observer session received %d enrolment events", len(observerEvents.all()))
+	if len(observerEvents.all()) != 0 {
 		t.Fatal("a session other than the requester received the URL")
 	}
-	before := identityFiles(t, identity)
 	exposed := []any{setup.GetSnapshot()}
 	closeEngine(store, engine)
 
@@ -144,18 +151,22 @@ func TestRealRuntimeAuth1ResumeAcrossDisconnectAndRestart(t *testing.T) {
 	t.Logf("outcome: URL after restart equals the earlier one: %v (either is allowed)", urls[0] == urls[1])
 
 	after := identityFiles(t, identity)
-	kept := true
+	kept := store.IdentityRoot() == identityRoot
 	for name := range before {
 		if !after[name] {
 			kept = false
 		}
 	}
-	t.Logf("outcome: same Portal UUID and identity directory, %d entries before restart, all still present: %v", len(before), kept)
-	if !kept || findPortal(b2.GetSnapshot(), id) == nil {
+	sameKeys := nodeKeys(t, identity) == beforeKeys
+	t.Logf("outcome: same Portal UUID and identity directory with all %d entries: %v; same machine key and login profiles (compared in memory): %v", len(before), kept, sameKeys)
+	if !kept || !sameKeys || findPortal(b2.GetSnapshot(), id) == nil {
 		t.Fatal("the Portal's identity state changed")
 	}
 
-	report, _ := b2.GetDiagnostics("")
+	report, err := b2.GetDiagnostics("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	disk, err := os.ReadFile(filepath.Join(dir, store.generation, stateFileName))
 	if err != nil {
 		t.Fatal(err)
@@ -192,6 +203,32 @@ func identityFiles(t *testing.T, dir string) map[string]bool {
 		t.Fatalf("identity directory: %v", err)
 	}
 	return names
+}
+
+// nodeKeys fingerprints the node's machine key and login profile keys in
+// tailscaled.state, so a logout or reset is detectable without logging them.
+func nodeKeys(t *testing.T, dir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
+	if err != nil {
+		t.Fatalf("identity state: %v", err)
+	}
+	var state map[string]json.RawMessage
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal("identity state is not a JSON state store")
+	}
+	if len(state["_machinekey"]) == 0 {
+		t.Fatal("identity state has no machine key")
+	}
+	var profiles []string
+	for key := range state {
+		if strings.HasPrefix(key, "profile-") {
+			profiles = append(profiles, key)
+		}
+	}
+	slices.Sort(profiles)
+	sum := sha256.Sum256(append(append([]byte{}, state["_machinekey"]...), strings.Join(profiles, ",")...))
+	return hex.EncodeToString(sum[:])
 }
 
 func findPortal(s Snapshot, id string) *PortalSnapshot {

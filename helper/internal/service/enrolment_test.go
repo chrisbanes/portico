@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,7 +115,7 @@ func TestEnrolmentResumeAcrossDisconnectAndRestart(t *testing.T) {
 	// 2. The record and Enabled intent survive; the URL for A is dropped.
 	h.factory.runtime().emitURL(id, enrolmentURL)
 	p := h.portal(id)
-	if p == nil || p.DesiredState != portal.DesiredStateEnabled || p.Enrolment.Status != enrolmentInterrupted {
+	if p == nil || p.DesiredState != portal.DesiredStateEnabled || p.Enrolment == nil || p.Enrolment.Status != enrolmentInterrupted {
 		t.Fatalf("Portal after A disconnected = %+v", p)
 	}
 	if len(aEvents.all()) != 0 {
@@ -153,9 +154,10 @@ func TestEnrolmentResumeAcrossDisconnectAndRestart(t *testing.T) {
 	}
 	waitFor(t, "Authenticate for C", func() bool { return len(h.factory.callsNamed("auth:"+id)) == 3 })
 
-	// 5. Restart: the action is interrupted, a retry recovers the receipt with
-	// no URL and no new Authenticate, and the old runtime's late URL is dropped.
-	oldRuntime := h.factory.runtime()
+	// 5. Restart: the action is interrupted, and a retry recovers the receipt
+	// with no URL and no new Authenticate. (A late URL from the old runtime
+	// cannot reach the new engine at all; the replaced-runtime fence within one
+	// engine is TestEnrolmentRejectsCallbacksFromAReplacedRuntime.)
 	record(h.session.GetSnapshot())
 	h.restart()
 	h.authenticating(id)
@@ -172,7 +174,6 @@ func TestEnrolmentResumeAcrossDisconnectAndRestart(t *testing.T) {
 		t.Fatalf("GetRequestResult = %+v, %v", result, err)
 	}
 	record(result)
-	oldRuntime.emitURL(id, enrolmentURL)
 	time.Sleep(20 * time.Millisecond)
 	if len(h.factory.callsNamed("auth:"+id)) != 3 || len(b2Events.all()) != 0 {
 		t.Fatalf("recovery started an attempt or replayed a URL: auth calls %d, events %+v", len(h.factory.callsNamed("auth:"+id)), b2Events.all())
@@ -199,16 +200,19 @@ func TestEnrolmentResumeAcrossDisconnectAndRestart(t *testing.T) {
 	}
 	exposed = append(exposed, string(disk))
 	record(h.session.GetSnapshot())
-	report, _ := h.session.GetDiagnostics("")
+	report, err := h.session.GetDiagnostics("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	exposed = append(exposed, report)
 	for _, snapshots := range []*[]Snapshot{aSnapshots, observerSnapshots} {
 		record(*snapshots)
 	}
 	_, err = b2.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: newUUID()})
 	exposed = append(exposed, err.Error())
-	for _, text := range exposed {
+	for i, text := range exposed {
 		if strings.Contains(text, enrolmentURL) || strings.Contains(text, "login.tailscale.com") {
-			t.Fatalf("the auth URL leaked: %s", text)
+			t.Fatalf("the auth URL leaked into exposed item %d", i)
 		}
 	}
 }
@@ -295,6 +299,12 @@ func TestEnrolmentLeaseEndsOnStopRemovalAndRebuild(t *testing.T) {
 			}
 		}},
 		{"runtime rebuild", func(h *harness, id string) { h.chooseLogging(installation.LoggingDisabled) }},
+		{"tailnet rejection", func(h *harness, id string) {
+			keep := h.create("keep", localApp(2))
+			rt := h.factory.runtime()
+			rt.emitStatus(keep, online("keep", "one.ts.net", "tailnet-a"))
+			rt.emitStatus(id, online("hermes", "two.ts.net", "tailnet-b"))
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
@@ -316,6 +326,14 @@ func TestEnrolmentLeaseEndsOnStopRemovalAndRebuild(t *testing.T) {
 			}
 			if len(events.of(EnrolmentAuthenticationURL)) != 0 {
 				t.Fatal("an ended attempt delivered a URL")
+			}
+			if tc.name == "removal" || tc.name == "tailnet rejection" {
+				h.settle()
+				for _, action := range h.disk().Actions {
+					if action.PortalID == id {
+						t.Fatal("the Portal's enrolment marker outlived it")
+					}
+				}
 			}
 		})
 	}
@@ -365,5 +383,63 @@ func TestEnrolmentRejectsCallbacksFromAReplacedRuntime(t *testing.T) {
 	current.emitURL(id, enrolmentURL)
 	if len(events.of(EnrolmentAuthenticationURL)) != 1 {
 		t.Fatal("the current runtime's URL was not delivered")
+	}
+}
+
+func TestEnrolmentMarkerFollowsItsPortal(t *testing.T) {
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	a := h.create("a", localApp(1))
+	b := h.create("b", localApp(2))
+	h.authenticating(a)
+	h.authenticating(b)
+	s, _, _ := h.connect()
+	for _, id := range []string{a, b} {
+		if _, err := s.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(h.disk().Actions); n != 2 {
+		t.Fatalf("markers = %d, want one per Portal", n)
+	}
+	// A Portal past authentication no longer reports an enrolment.
+	h.factory.runtime().emitStatus(a, portal.StatusEvent{State: portal.StateOnline})
+	if p := h.portal(a); p.Enrolment != nil {
+		t.Fatalf("an Online Portal still reports enrolment %+v", p.Enrolment)
+	}
+	if p := h.portal(b); p.Enrolment == nil || p.Enrolment.Status != enrolmentActive {
+		t.Fatalf("the other Portal's enrolment = %+v", p.Enrolment)
+	}
+	if _, err := h.session.RemovePortal(h.req(), RemovePortalParams{PortalID: b, Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	for _, action := range h.disk().Actions {
+		if action.PortalID == b {
+			t.Fatal("a removed Portal kept its enrolment marker")
+		}
+	}
+}
+
+func TestEnrolmentRefusedOnAClosedSession(t *testing.T) {
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	id := h.create("hermes", localApp(1))
+	h.authenticating(id)
+	s, _, _ := h.connect()
+	s.Close()
+	_, err := s.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: id})
+	wantCode(t, err, CodeNotAvailable)
+	if h.portal(id).Enrolment != nil {
+		t.Fatal("a closed session started an attempt")
+	}
+}
+
+func TestEnrolmentEventFormattingRedactsTheURL(t *testing.T) {
+	e := EnrolmentEvent{Kind: EnrolmentAuthenticationURL, RequestID: "r", PortalID: "p", Nonce: "n", URL: enrolmentURL}
+	for _, text := range []string{fmt.Sprintf("%v", e), fmt.Sprintf("%+v", e), fmt.Sprintf("%#v", e), fmt.Sprint([]EnrolmentEvent{e})} {
+		if strings.Contains(text, "login.tailscale.com") {
+			t.Fatalf("formatting exposes the URL: %s", text)
+		}
 	}
 }

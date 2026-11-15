@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"time"
 
@@ -31,6 +32,20 @@ type EnrolmentEvent struct {
 	Nonce     string
 	// URL is set only for EnrolmentAuthenticationURL.
 	URL string
+}
+
+// String and GoString keep the URL out of any %v or %+v formatting.
+func (e EnrolmentEvent) String() string {
+	return fmt.Sprintf("{Kind:%s RequestID:%s PortalID:%s Nonce:%s URL:%s}", e.Kind, e.RequestID, e.PortalID, e.Nonce, redacted(e.URL))
+}
+
+func (e EnrolmentEvent) GoString() string { return e.String() }
+
+func redacted(s string) string {
+	if s == "" {
+		return ""
+	}
+	return "<redacted>"
 }
 
 // Enrolment is a Portal's latest resumeEnrolment action as snapshots show it.
@@ -88,13 +103,11 @@ func (s *Session) ResumeEnrolment(req Request, p ResumeEnrolmentParams) (Receipt
 		if avail := e.enrolmentAvailability(*st, st.Installation.Portals[i]); !avail.Available {
 			return change{}, &Error{Code: avail.Reason, PortalID: p.PortalID}
 		}
-		actions := st.Actions[:0]
-		for _, a := range st.Actions {
-			if a.PortalID != p.PortalID {
-				actions = append(actions, a)
-			}
+		if _, open := e.sessions[s]; !open {
+			return change{}, &Error{Code: CodeNotAvailable, PortalID: p.PortalID}
 		}
-		st.Actions = append(actions, Action{RequestID: req.ID, Operation: OpResumeEnrolment, PortalID: p.PortalID, AcceptedAt: now})
+		dropActions(st, p.PortalID)
+		st.Actions = append(st.Actions, Action{RequestID: req.ID, Operation: OpResumeEnrolment, PortalID: p.PortalID, AcceptedAt: now})
 		c := accepted(p.PortalID)
 		c.after = func() { e.startLeaseLocked(s, req.ID, p.PortalID) }
 		return c, nil
@@ -122,6 +135,13 @@ func (e *Engine) startLeaseLocked(s *Session, requestID, portalID string) {
 	e.leases[portalID] = l
 	rt := e.runtime
 	go func() {
+		e.mu.Lock()
+		current := e.leases[portalID] == l
+		e.mu.Unlock()
+		if !current {
+			// Superseded or disconnected before the login started.
+			return
+		}
 		err := callRuntime(func(ctx context.Context) error { return rt.Authenticate(ctx, portalID) })
 		if err == nil {
 			return
@@ -173,9 +193,14 @@ func (e *Engine) deliverURLLocked(gen uint64, portalID, rawURL string) {
 	l.send(EnrolmentAuthenticationURL, rawURL)
 }
 
-// portalEnrolment projects the durable action marker for snapshots.
+// portalEnrolment projects the durable action marker for snapshots while the
+// Portal still needs authentication (or no runtime facts exist yet, as just
+// after a restart); once it is past that, the marker is history.
 func (e *Engine) portalEnrolment(state State, p installation.Portal) *Enrolment {
 	if p.Lifecycle != installation.LifecycleActive {
+		return nil
+	}
+	if c, ok := e.live[p.ID]; ok && c.State != portal.StateAuthenticating {
 		return nil
 	}
 	for _, a := range state.Actions {

@@ -90,6 +90,10 @@ func (e *Engine) converge() {
 	}
 	rt, gen := e.runtime, e.runtimeGen
 	replace := rt != nil && (e.closePending || e.runtimeLogging != logging)
+	if replace {
+		// The runtime is going away, so every attempt on it ends now.
+		e.dropAllLeasesLocked()
+	}
 	// Every change that needs runtime work commits a new revision, so an
 	// unchanged revision on the same runtime has nothing to converge.
 	if !replace && rt != nil && e.converged == (convergedAt{state.Revision, gen}) {

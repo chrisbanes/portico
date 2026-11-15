@@ -136,8 +136,10 @@ func (e *Engine) Close(ctx context.Context) error {
 		e.closing = true
 		rt := e.runtime
 		for s := range e.sessions {
-			s.subscribers = nil
+			s.subscribers, s.enrolmentSink = nil, nil
 		}
+		// Shutdown ends every attempt silently, like a restart.
+		clear(e.leases)
 		close(e.stop)
 		go func() {
 			var err error
@@ -199,12 +201,16 @@ func (s *Session) Close() {
 	defer e.mu.Unlock()
 	delete(e.sessions, s)
 	s.subscribers, s.enrolmentSink = nil, nil
+	removed := false
 	for id, l := range e.leases {
 		if l.session == s {
 			delete(e.leases, id)
+			removed = true
 		}
 	}
-	e.publishLocked()
+	if removed {
+		e.publishLocked()
+	}
 }
 
 // Subscribe delivers the current snapshot, then every replacement in
