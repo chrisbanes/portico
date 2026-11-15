@@ -120,7 +120,14 @@ func (s *Store) Commit(mutate func(*State) error) error {
 		s.failed = true
 		return err
 	}
-	s.state = next
+	// Retain a decoded copy of the committed bytes, not next itself: mutate
+	// may have stored pointers or slices its caller still holds.
+	committed, err := decodeState(data)
+	if err != nil {
+		s.failed = true
+		return err
+	}
+	s.state = committed
 	return nil
 }
 

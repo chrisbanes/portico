@@ -134,3 +134,20 @@ func TestInvalidCommitRejectedBeforeWriting(t *testing.T) {
 		t.Fatal("an invalid commit changed state")
 	}
 }
+
+func TestCommitDoesNotRetainCallerReferences(t *testing.T) {
+	dir := t.TempDir()
+	s := mustOpen(t, dir)
+	defer s.Close()
+	binding := &installation.TailnetBinding{Name: "opaque-tailnet-id", MagicDNSSuffix: "one.ts.net"}
+	if err := s.Commit(func(st *State) error {
+		st.Installation.Binding = binding
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	binding.Name = ""
+	if got := s.State().Installation.Binding; got == nil || got.Name != "opaque-tailnet-id" {
+		t.Fatalf("State() follows a caller-held pointer: %+v", got)
+	}
+}
