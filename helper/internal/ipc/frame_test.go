@@ -23,8 +23,9 @@ func TestReadFrameRejectsLengthsBeforeAllocating(t *testing.T) {
 		if !errors.Is(err, ErrInvalidFrame) {
 			t.Fatalf("length %d: ReadFrame = %v", n, err)
 		}
-		// Only the four-byte header may be allocated.
-		if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 64 {
+		// Only the four-byte header may be allocated; 1 KiB allows for
+		// unrelated background allocation.
+		if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 1<<10 {
 			t.Errorf("length %d: %d bytes allocated before rejecting", n, allocated)
 		}
 	}

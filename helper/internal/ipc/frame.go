@@ -3,6 +3,7 @@ package ipc
 import (
 	"encoding/binary"
 	"io"
+	"net"
 )
 
 // MaxFrame is the largest frame payload in bytes.
@@ -35,9 +36,7 @@ func WriteFrame(w io.Writer, payload []byte) error {
 	if len(payload) == 0 || len(payload) > MaxFrame {
 		return ErrInvalidFrame
 	}
-	frame := make([]byte, 4+len(payload))
-	binary.BigEndian.PutUint32(frame, uint32(len(payload)))
-	copy(frame[4:], payload)
-	_, err := w.Write(frame)
+	header := binary.BigEndian.AppendUint32(nil, uint32(len(payload)))
+	_, err := (&net.Buffers{header, payload}).WriteTo(w)
 	return err
 }

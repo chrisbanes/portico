@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"os"
@@ -31,8 +32,30 @@ func TestUserEndpointUsesThePlatformLookup(t *testing.T) {
 	if _, err := UserEndpoint(Variant("../portico")); !errors.Is(err, ErrUnsafeEndpoint) {
 		t.Errorf("unknown variant = %v", err)
 	}
-	if _, err := userRuntimeDir(); err != nil && !errors.Is(err, ErrUnsafeEndpoint) {
-		t.Fatalf("userRuntimeDir = %v", err)
+	testUserRuntimeDir(t)
+}
+
+func TestEndpointNeverPrintsItsPaths(t *testing.T) {
+	endpoint := testEndpoint(t)
+	nested := struct{ endpoint Endpoint }{endpoint}
+	for _, format := range []string{"%v", "%+v", "%#v", "%s"} {
+		if got := fmt.Sprintf(format, endpoint); strings.Contains(got, endpoint.dir) {
+			t.Errorf("%s printed %q", format, got)
+		}
+	}
+	// Nested, fmt cannot call its methods, but the pointer hides the paths
+	// from the verbs a struct is printed with (a bad verb such as %s still
+	// shows them).
+	for _, format := range []string{"%v", "%+v", "%#v"} {
+		if got := fmt.Sprintf(format, nested); strings.Contains(got, endpoint.dir) {
+			t.Errorf("nested %s printed %q", format, got)
+		}
+	}
+}
+
+func TestDialBeforeAnyServiceRanIsNotRunning(t *testing.T) {
+	if _, err := Dial(t.Context(), testEndpoint(t)); !errors.Is(err, ErrNotRunning) {
+		t.Errorf("Dial = %v, want not running", err)
 	}
 }
 

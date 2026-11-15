@@ -21,13 +21,19 @@ type Limits struct {
 	Calls        int           // in-flight calls across connections
 	OutputQueue  int           // frames queued for one client
 	FrameTimeout time.Duration // first frame, and the rest of any started frame
-	MaxFrame     int           // payload bytes
+	MaxFrame     int           // payload bytes, at most the package MaxFrame
 }
 
 // DefaultLimits are the management v1 limits.
 var DefaultLimits = Limits{Clients: 16, CallsPerConn: 8, Calls: 64, OutputQueue: 128, FrameTimeout: 5 * time.Second, MaxFrame: MaxFrame}
 
 var errAccept = errors.New("ipc: accept failed")
+
+// Seams for tests: a failing accept, and a writer that stalls.
+var (
+	acceptUnix = (*net.UnixListener).AcceptUnix
+	writeFrame = WriteFrame
+)
 
 // slowConsumerGrace is how long a slow client's last frame may take before
 // the slowConsumer error is abandoned and the connection just closes.
@@ -45,14 +51,20 @@ type Listener struct {
 	wg     sync.WaitGroup
 }
 
-// Listen binds the endpoint. lock is the service's lifetime lock file; Listen
-// re-takes its exclusive flock without blocking, so it fails with
-// ownershipBusy unless this process holds that lock. Only then may it remove a
-// stale socket, and never a live one or anything that is not this user's
-// socket.
+// Listen binds the endpoint. lock is the service's lifetime lock file: Listen
+// takes its exclusive flock without blocking, which succeeds only if this
+// process already holds it or nobody does, and fails with ownershipBusy
+// otherwise. Only while holding it may Listen remove a stale socket, and never
+// a live one or anything that is not this user's socket.
 func Listen(endpoint Endpoint, lock *os.File, limits Limits) (*Listener, error) {
 	if os.Geteuid() == 0 {
 		return nil, ErrRoot
+	}
+	if endpoint.endpointPaths == nil {
+		return nil, ErrUnsafeEndpoint
+	}
+	if limits.MaxFrame < 1 || limits.MaxFrame > MaxFrame {
+		return nil, ErrInvalidFrame
 	}
 	if lock == nil {
 		return nil, &Error{Code: CodeOwnershipBusy}
@@ -99,20 +111,29 @@ func Listen(endpoint Endpoint, lock *os.File, limits Limits) (*Listener, error) 
 }
 
 // Serve accepts connections until Close, running handle for each verified
-// peer on its own goroutine. It returns nil after Close.
+// peer on its own goroutine. It returns nil after Close. A handler must not
+// call Close, which waits for every handler to return.
 func (l *Listener) Serve(handle func(*Conn)) error {
 	if !l.track() {
 		return nil
 	}
 	defer l.wg.Done()
+	backoff := 5 * time.Millisecond
 	for {
-		c, err := l.ln.AcceptUnix()
+		c, err := acceptUnix(l.ln)
 		if err != nil {
 			if l.isClosed() {
 				return nil
 			}
+			// Running out of descriptors passes; keep serving, as net/http does.
+			if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
+				time.Sleep(backoff)
+				backoff = min(2*backoff, time.Second)
+				continue
+			}
 			return errAccept
 		}
+		backoff = 5 * time.Millisecond
 		if !l.track() {
 			c.Close()
 			return nil
@@ -146,7 +167,12 @@ func (l *Listener) serveConn(c *net.UnixConn, handle func(*Conn)) {
 		return
 	}
 	l.mu.Lock()
-	if l.closed || len(l.conns) >= l.limits.Clients {
+	if l.closed {
+		l.mu.Unlock()
+		c.Close()
+		return
+	}
+	if len(l.conns) >= l.limits.Clients {
 		l.mu.Unlock()
 		_ = c.SetWriteDeadline(time.Now().Add(l.limits.FrameTimeout))
 		_ = writeError(c, CodeCapacityExceeded)
@@ -255,6 +281,11 @@ func (c *Conn) Send(payload []byte) error {
 		return ErrInvalidFrame
 	}
 	select {
+	case <-c.overflow:
+		return &Error{Code: CodeSlowConsumer, Retryable: true}
+	default:
+	}
+	select {
 	case <-c.done:
 		return net.ErrClosed
 	default:
@@ -289,7 +320,7 @@ func (c *Conn) write() {
 				return
 			default:
 			}
-			if WriteFrame(c.c, payload) != nil {
+			if writeFrame(c.c, payload) != nil {
 				c.Close()
 				return
 			}
@@ -341,6 +372,9 @@ func Dial(ctx context.Context, endpoint Endpoint) (*net.UnixConn, error) {
 	if os.Geteuid() == 0 {
 		return nil, ErrRoot
 	}
+	if endpoint.endpointPaths == nil {
+		return nil, ErrUnsafeEndpoint
+	}
 	if err := endpoint.checkDir(); err != nil {
 		return nil, err
 	}
@@ -364,7 +398,7 @@ func Dial(ctx context.Context, endpoint Endpoint) (*net.UnixConn, error) {
 	return conn, nil
 }
 
-// peerUID is replaced in tests to simulate a failed credential lookup.
+// peerUID is a test seam too: tests fail or stall the credential lookup.
 var peerUID = func(c *net.UnixConn) (int, error) {
 	raw, err := c.SyscallConn()
 	if err != nil {

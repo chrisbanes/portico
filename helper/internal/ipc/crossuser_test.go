@@ -31,6 +31,9 @@ func TestCrossUserPeersAreRejected(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", probe, "./internal/peerprobe").CombinedOutput(); err != nil {
 		t.Fatalf("build probe: %v\n%s", err, out)
 	}
+	if err := os.Chmod(probe, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	others := map[string][]string{"other user": {"sudo", "-n", "-u", "nobody"}, "root": {"sudo", "-n"}}
 
 	t.Run("server rejects", func(t *testing.T) {
@@ -50,7 +53,9 @@ func TestCrossUserPeersAreRejected(t *testing.T) {
 			t.Fatal(err)
 		}
 		for name, prefix := range others {
-			out, err := exec.Command(prefix[0], append(prefix[1:], probe, "client", endpoint.socket)...).CombinedOutput()
+			cmd := exec.Command(prefix[0], append(prefix[1:], probe, "client", endpoint.socket)...)
+			cmd.Stderr = os.Stderr
+			out, err := cmd.Output()
 			if err != nil || strings.TrimSpace(string(out)) != "bytes=0 closed=true" {
 				t.Errorf("%s client: %v, %q; want closed with no bytes", name, err, out)
 			}
@@ -68,6 +73,7 @@ func TestCrossUserPeersAreRejected(t *testing.T) {
 			}
 			socket := filepath.Join(dir, "management.sock")
 			cmd := exec.Command(prefix[0], append(prefix[1:], probe, "server", socket)...)
+			cmd.Stderr = os.Stderr
 			stdout, err := cmd.StdoutPipe()
 			if err != nil {
 				t.Fatal(err)
@@ -75,6 +81,14 @@ func TestCrossUserPeersAreRejected(t *testing.T) {
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
+			// A probe left waiting in Accept would outlive a failed test; a
+			// root probe is reached through its sudo parent.
+			t.Cleanup(func() {
+				if c, err := net.Dial("unix", socket); err == nil {
+					c.Close()
+				}
+				_ = cmd.Wait()
+			})
 			lines := bufio.NewScanner(stdout)
 			if !lines.Scan() || lines.Text() != "ready" {
 				t.Fatalf("%s server did not start: %q", name, lines.Text())
@@ -84,7 +98,7 @@ func TestCrossUserPeersAreRejected(t *testing.T) {
 			if err := os.Chmod(dir, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			endpoint := Endpoint{dir: dir, socket: socket}
+			endpoint := Endpoint{&endpointPaths{dir: dir, socket: socket}}
 			if _, err := Dial(t.Context(), endpoint); !errors.Is(err, ErrUnsafeEndpoint) {
 				t.Errorf("%s: Dial = %v, want unsafe", name, err)
 			}
@@ -99,9 +113,6 @@ func TestCrossUserPeersAreRejected(t *testing.T) {
 			c.Close()
 			if !lines.Scan() || lines.Text() != "bytes=0 closed=true" {
 				t.Errorf("%s server saw %q, want no bytes", name, lines.Text())
-			}
-			if err := cmd.Wait(); err != nil {
-				t.Errorf("%s server: %v", name, err)
 			}
 		}
 	})

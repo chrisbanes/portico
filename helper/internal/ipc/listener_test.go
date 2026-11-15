@@ -3,10 +3,13 @@ package ipc
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -177,6 +180,10 @@ func TestSlowConsumerIsDisconnectedWithoutBlockingTheProducer(t *testing.T) {
 	frame := bytes.Repeat([]byte("x"), 256<<10)
 	result := make(chan int, 1)
 	s := serve(t, limits, func(c *Conn) {
+		// A small buffer keeps the writer stalled on its first frame.
+		if err := c.c.SetWriteBuffer(16 << 10); err != nil {
+			t.Error(err)
+		}
 		for i := 1; ; i++ {
 			started := time.Now()
 			err := c.Send(frame)
@@ -186,6 +193,10 @@ func TestSlowConsumerIsDisconnectedWithoutBlockingTheProducer(t *testing.T) {
 			if err != nil {
 				if !isCode(err, CodeSlowConsumer) {
 					t.Errorf("Send %d = %v", i, err)
+				}
+				// The queue may have room again, but the client is gone.
+				if err := c.Send(frame); !isCode(err, CodeSlowConsumer) {
+					t.Errorf("Send after the overflow = %v, want slowConsumer", err)
 				}
 				result <- i
 				<-c.Done()
@@ -216,26 +227,32 @@ func TestSlowConsumerIsDisconnectedWithoutBlockingTheProducer(t *testing.T) {
 }
 
 func TestCloseWaitsForEveryConnection(t *testing.T) {
-	handled := make(chan chan struct{}, 3)
+	type handled struct {
+		conn *Conn
+		done chan struct{}
+	}
+	started := make(chan handled, 3)
 	s := serve(t, testLimits(), func(c *Conn) {
 		done := make(chan struct{})
-		handled <- done
+		started <- handled{c, done}
 		defer close(done)
 		_, _ = c.Read()
 	})
-	var dones []chan struct{}
+	var all []handled
 	for range 3 {
 		s.dial(t)
-		dones = append(dones, <-handled)
+		all = append(all, <-started)
 	}
 	if err := s.listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	for i, done := range dones {
-		select {
-		case <-done:
-		default:
-			t.Errorf("connection %d's handler outlived Close", i)
+	for i, h := range all {
+		for what, done := range map[string]chan struct{}{"handler": h.done, "writer": h.conn.written} {
+			select {
+			case <-done:
+			default:
+				t.Errorf("connection %d's %s outlived Close", i, what)
+			}
 		}
 	}
 	select {
@@ -256,5 +273,122 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("timed out")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestCloseJoinsAStalledWriter(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	write := writeFrame
+	t.Cleanup(func() { writeFrame = write })
+	writeFrame = func(w io.Writer, payload []byte) error {
+		close(entered)
+		<-release
+		return net.ErrClosed
+	}
+	s := serve(t, testLimits(), func(c *Conn) {
+		if err := c.Send([]byte("{}")); err != nil {
+			t.Error(err)
+		}
+		<-c.Done()
+	})
+	s.dial(t)
+	waitClosed(t, entered, "the writer")
+	closed := make(chan struct{})
+	go func() {
+		s.listener.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while the writer was still writing")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	waitClosed(t, closed, "Close")
+}
+
+func TestServeSurvivesDescriptorExhaustion(t *testing.T) {
+	accept := acceptUnix
+	t.Cleanup(func() { acceptUnix = accept })
+	var failed atomic.Bool
+	acceptUnix = func(ln *net.UnixListener) (*net.UnixConn, error) {
+		if failed.CompareAndSwap(false, true) {
+			return nil, &net.OpError{Op: "accept", Err: os.NewSyscallError("accept", syscall.EMFILE)}
+		}
+		return accept(ln)
+	}
+	handled := make(chan struct{}, 1)
+	s := serve(t, testLimits(), func(c *Conn) {
+		handled <- struct{}{}
+		<-c.Done()
+	})
+	s.dial(t)
+	waitClosed(t, handled, "a connection after EMFILE")
+	select {
+	case <-s.served:
+		t.Fatal("Serve stopped after EMFILE")
+	default:
+	}
+}
+
+func TestShutdownClosesNewConnectionsWithoutDetail(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	lookup := peerUID
+	t.Cleanup(func() { peerUID = lookup })
+	peerUID = func(c *net.UnixConn) (int, error) {
+		close(entered)
+		<-release
+		return lookup(c)
+	}
+	s := serve(t, testLimits(), func(*Conn) { t.Error("handled during shutdown") })
+	raw, err := net.Dial("unix", s.endpoint.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	waitClosed(t, entered, "the peer check")
+	closed := make(chan struct{})
+	go func() {
+		s.listener.Close()
+		close(closed)
+	}()
+	waitFor(t, s.listener.isClosed)
+	close(release)
+	if got := readClosed(t, raw); len(got) != 0 {
+		t.Fatalf("a connection during shutdown got %q, want nothing", got)
+	}
+	waitClosed(t, closed, "Close")
+}
+
+func TestListenRejectsInvalidLimitsAndEndpoints(t *testing.T) {
+	for _, max := range []int{0, MaxFrame + 1} {
+		limits := testLimits()
+		limits.MaxFrame = max
+		if _, err := Listen(testEndpoint(t), lockFile(t), limits); !errors.Is(err, ErrInvalidFrame) {
+			t.Errorf("MaxFrame %d: Listen = %v", max, err)
+		}
+	}
+	if _, err := Listen(Endpoint{}, lockFile(t), testLimits()); !errors.Is(err, ErrUnsafeEndpoint) {
+		t.Errorf("zero Endpoint: Listen = %v", err)
+	}
+	if _, err := Dial(t.Context(), Endpoint{}); !errors.Is(err, ErrUnsafeEndpoint) {
+		t.Errorf("zero Endpoint: Dial = %v", err)
+	}
+}
+
+// TestSendAfterOverflowFails: once a client has overflowed, Send keeps
+// reporting slowConsumer, even after the queue has room and the connection
+// has closed.
+func TestSendAfterOverflowFails(t *testing.T) {
+	c := &Conn{l: &Listener{limits: testLimits()}, out: make(chan []byte, 1), overflow: make(chan struct{}), done: make(chan struct{})}
+	close(c.overflow)
+	if err := c.Send([]byte("{}")); !isCode(err, CodeSlowConsumer) {
+		t.Fatalf("Send after an overflow = %v, want slowConsumer", err)
+	}
+	close(c.done)
+	for i := range 64 {
+		if err := c.Send([]byte("{}")); !isCode(err, CodeSlowConsumer) {
+			t.Fatalf("Send %d after the overflow and close = %v, want slowConsumer", i, err)
+		}
 	}
 }

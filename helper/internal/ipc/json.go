@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/go-json-experiment/json"
 	"github.com/go-json-experiment/json/jsontext"
@@ -66,7 +67,7 @@ func exactNumber(raw string) bool {
 	if err != nil || math.IsInf(value, 0) || math.IsNaN(value) {
 		return false
 	}
-	if bytes.ContainsAny([]byte(raw), ".eE") {
+	if strings.ContainsAny(raw, ".eE") {
 		return true
 	}
 	n, err := strconv.ParseInt(raw, 10, 64)

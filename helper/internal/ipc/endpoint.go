@@ -17,11 +17,20 @@ const (
 )
 
 // Endpoint is a validated management socket location. Its paths are never
-// exposed, so they cannot leak into frames or diagnostics.
+// exposed, so they cannot leak into frames or diagnostics; behind a pointer,
+// fmt prints only an address even when an Endpoint is a nested field printed
+// with %v.
 type Endpoint struct {
+	*endpointPaths
+}
+
+type endpointPaths struct {
 	dir    string
 	socket string
 }
+
+func (Endpoint) String() string   { return "management endpoint" }
+func (Endpoint) GoString() string { return "ipc.Endpoint{}" }
 
 // UserEndpoint locates the variant's endpoint in this user's OS runtime
 // directory; it never trusts a path from a client or the environment beyond
@@ -57,7 +66,7 @@ func EndpointIn(base string, variant Variant) (Endpoint, error) {
 	if len(socket) >= sunPathMax {
 		return Endpoint{}, ErrUnsafeEndpoint
 	}
-	return Endpoint{dir: dir, socket: socket}, nil
+	return Endpoint{&endpointPaths{dir: dir, socket: socket}}, nil
 }
 
 // checkBase requires a base this user owns that nobody else can write, under
@@ -81,9 +90,13 @@ func checkBase(base string) error {
 }
 
 // checkDir verifies the opened endpoint directory, not just its path: a
-// directory this user owns, mode 0700, and not a symlink.
+// directory this user owns, mode 0700, and not a symlink. A missing one means
+// no service has run.
 func (e Endpoint) checkDir() error {
 	file, err := os.OpenFile(e.dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if os.IsNotExist(err) {
+		return ErrNotRunning
+	}
 	if err != nil {
 		return ErrUnsafeEndpoint
 	}
