@@ -174,17 +174,30 @@ func recall(state State, now time.Time, req Request, hash string) (*Receipt, err
 	if !requestIDPattern.MatchString(req.ID) || req.IssuedAt.IsZero() {
 		return nil, &Error{Code: CodeInvalidRequest, Field: "requestID"}
 	}
-	if r := findReceipt(state, req.ID); r != nil && now.Before(r.RetainUntil) {
+	if r := retained(state, now, req.ID); r != nil {
 		if r.Hash != hash {
 			return nil, codeErr(CodeRequestConflict)
 		}
-		if now.After(r.RecoverUntil) {
-			return nil, codeErr(CodeResultExpired)
-		}
-		receipt := *r
-		return &receipt, nil
+		return recoverable(now, r)
 	}
 	return nil, admissible(now, req.IssuedAt)
+}
+
+// retained finds a receipt that is still within its retention period.
+func retained(state State, now time.Time, id string) *Receipt {
+	if r := findReceipt(state, id); r != nil && now.Before(r.RetainUntil) {
+		return r
+	}
+	return nil
+}
+
+// recoverable returns a copy of r while it is inside its recovery window.
+func recoverable(now time.Time, r *Receipt) (*Receipt, error) {
+	if now.After(r.RecoverUntil) {
+		return nil, codeErr(CodeResultExpired)
+	}
+	receipt := *r
+	return &receipt, nil
 }
 
 func admissible(now, issuedAt time.Time) error {

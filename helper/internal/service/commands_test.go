@@ -148,6 +148,32 @@ func TestAuthoritativeOperationMatrix(t *testing.T) {
 	wantCode(t, err, CodeNotAvailable)
 	_, err = h.session.ResetTailnet(h.req(), ResetTailnetParams{Confirmed: true})
 	wantCode(t, err, CodeNotAvailable)
+
+	// A Portal awaiting rejection cleanup offers nothing.
+	rt := h.factory.runtime()
+	rt.emitStatus(enabled, online("enabled", "one.ts.net", "tailnet-a"))
+	h.factory.set(func(f *fakeFactory) { f.cleanupErr = errors.New("cleanup failed") })
+	rt.emitStatus(stopped, online("stopped", "two.ts.net", "tailnet-b"))
+	h.settle()
+	rejected := h.portal(stopped)
+	if rejected.Lifecycle != installation.LifecyclePendingTailnetRejection {
+		t.Fatalf("Portal = %+v, want pending rejection", rejected)
+	}
+	for op, a := range rejected.Availability {
+		if a.Available {
+			t.Errorf("pending-rejection Portal offers %s", op)
+		}
+	}
+
+	// With no runtime, a failed removal reports why it cannot be retried.
+	h.factory.set(func(f *fakeFactory) { f.buildErr = errors.New("no runtime") })
+	h.chooseLogging(installation.LoggingDisabled)
+	if got := h.portal(removing).Availability[OpRetryRemoval]; got.Reason != CodeRuntimeUnavailable {
+		t.Fatalf("retryRemoval without a runtime = %+v", got)
+	}
+	if got := h.session.GetSnapshot().Availability[OpRetryRuntime]; !got.Available {
+		t.Fatalf("retryRuntime = %+v, want available", got)
+	}
 }
 
 func TestDurableRemovalAndRetry(t *testing.T) {

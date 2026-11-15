@@ -571,6 +571,9 @@ func TestDurableAcceptanceBeforeRuntimeAndFailedCommit(t *testing.T) {
 	mu.Unlock()
 	_, err = h.session.SetDesiredState(h.req(), SetDesiredStateParams{PortalID: receipt.PortalID, State: portal.DesiredStateStopped})
 	wantCode(t, err, CodePersistenceUnavailable)
+	if p := h.portal(receipt.PortalID); p.Availability[OpStop].Reason != CodePersistenceUnavailable || p.Availability[OpRemovePortal].Reason != CodePersistenceUnavailable {
+		t.Fatalf("Portal availability after a failed commit = %+v", p.Availability)
+	}
 
 	h.restart()
 	if _, err := h.session.SetDesiredState(h.req(), SetDesiredStateParams{PortalID: receipt.PortalID, State: portal.DesiredStateStopped}); err != nil {
@@ -617,11 +620,16 @@ func TestEngineCloseHonoursDeadline(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 2*time.Second {
 		t.Fatalf("Close() = %v after %v, want the deadline", err, time.Since(started))
 	}
-	// Ownership is retained: a second service cannot take the root.
-	if _, err := Open(h.dir, Options{}); !errors.Is(err, ErrOwnershipBusy) {
-		t.Fatalf("Open() during a failed close = %v, want ownershipBusy", err)
+	// A retried Close must not report success while the runtime still runs.
+	retry, cancelRetry := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelRetry()
+	if err := h.engine.Close(retry); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second Close() = %v while the runtime is still closing", err)
 	}
 	h.factory.set(func(f *fakeFactory) { close(f.closeBlock); f.closeBlock = nil })
+	if err := h.engine.Close(context.Background()); err != nil {
+		t.Fatalf("Close() once the runtime closed = %v", err)
+	}
 	h.store.Close()
 	h.engine = nil
 }
@@ -677,7 +685,7 @@ func TestHostileStatusFactsAreSanitized(t *testing.T) {
 		StableNodeID:   "nSecret",
 		AssignedName:   "Evil Name",
 		PortalURL:      "https://user:pass@evil.example/?token=1",
-		Addresses:      []string{"100.64.0.1", "not-an-ip", "1.2.3.4; rm -rf"},
+		Addresses:      []string{"100.64.0.1", "not-an-ip", "1.2.3.4; rm -rf", "fe80::1%https://login.example/secret"},
 		MagicDNSSuffix: "evil.example",
 	})
 	c := h.portal(id).Connection
@@ -688,7 +696,7 @@ func TestHostileStatusFactsAreSanitized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{"Evil", "evil.example", "user:pass", "token", "nSecret", "rm -rf", h.dir} {
+	for _, bad := range []string{"Evil", "evil.example", "user:pass", "token", "nSecret", "rm -rf", "secret", h.dir} {
 		if strings.Contains(report, bad) {
 			t.Fatalf("diagnostics contain %q:\n%s", bad, report)
 		}
@@ -772,5 +780,68 @@ func TestSubscribeDeliversInitialSnapshotThenReplacements(t *testing.T) {
 	mu.Lock()
 	if len(got) != n {
 		t.Fatal("a closed session still received snapshots")
+	}
+}
+
+func TestUncertainCommitIsNeverReportedNotAccepted(t *testing.T) {
+	var fail bool
+	h := newHarness(t, func(h *harness) {
+		h.storeOpt = Options{Hook: func(p Phase) error {
+			if fail && p == PhaseCommitFsync {
+				return errors.New("injected")
+			}
+			return nil
+		}}
+	})
+	h.chooseLogging(installation.LoggingEnabled)
+	fail = true
+	req := h.req()
+	_, err := h.session.CreatePortal(req, hermesParams)
+	wantCode(t, err, CodePersistenceUnavailable)
+	// The renamed document may hold the receipt; only a reload can tell.
+	_, err = h.session.GetRequestResult(req.ID, req.IssuedAt)
+	wantCode(t, err, CodePersistenceUnavailable)
+	fail = false
+	h.restart()
+	result, err := h.session.GetRequestResult(req.ID, req.IssuedAt)
+	if err != nil || result.Receipt == nil {
+		t.Fatalf("after reload = %+v, %v; want the durable receipt", result, err)
+	}
+}
+
+func TestReconcileFailureFailsPendingRemoval(t *testing.T) {
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	id := h.create("hermes", localApp(1))
+	h.factory.set(func(f *fakeFactory) { f.reconcileErr = errors.New("runtime closing") })
+	if _, err := h.session.RemovePortal(h.req(), RemovePortalParams{PortalID: id, Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	if len(h.factory.callsNamed("remove:"+id)) != 0 {
+		t.Fatal("identity deleted although the reconcile that closes the node failed")
+	}
+	p := h.portal(id)
+	if p.Problem != ProblemRemovalFailed || !p.Availability[OpRetryRemoval].Available {
+		t.Fatalf("removing Portal after a failed reconcile = %+v", p)
+	}
+	h.factory.set(func(f *fakeFactory) { f.reconcileErr = nil })
+	if _, err := h.session.RetryRemoval(h.req(), RetryRemovalParams{PortalID: id}); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	if h.portal(id) != nil {
+		t.Fatal("retryRemoval did not finish the removal")
+	}
+}
+
+func TestSubscribeAfterCloseIsIgnored(t *testing.T) {
+	h := newHarness(t)
+	session := h.session
+	h.stop()
+	called := false
+	session.Subscribe(func(Snapshot) { called = true })
+	if called {
+		t.Fatal("Subscribe delivered after Engine.Close")
 	}
 }

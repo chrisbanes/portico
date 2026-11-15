@@ -141,8 +141,8 @@ func (e *Engine) converge() {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), runtimeCallTimeout)
-	defer cancel()
 	entries, err := rt.Reconcile(ctx, activeConfigs(state), e.emitter(gen))
+	cancel()
 	outcomes := map[string]portal.ReconcileOutcome{}
 	for _, entry := range entries {
 		outcomes[strings.ToLower(entry.PortalID)] = entry.Outcome
@@ -152,6 +152,10 @@ func (e *Engine) converge() {
 		switch {
 		case err != nil && p.Lifecycle == installation.LifecycleActive:
 			e.problems[p.ID] = ProblemStartFailed
+		case err != nil && p.Lifecycle == installation.LifecyclePendingRemoval:
+			// The node may not be closed, so this removal attempt has failed;
+			// retryRemoval runs it again.
+			e.removalFailed[p.ID] = true
 		case outcomes[p.ID] == portal.OutcomeStartFailed:
 			e.problems[p.ID] = ProblemStartFailed
 		case outcomes[p.ID] == portal.OutcomeCloseFailed:
@@ -184,7 +188,7 @@ func (e *Engine) converge() {
 				e.failRemoval(p.ID)
 				continue
 			}
-			if err := rt.RemovePortal(ctx, p.ID); err != nil {
+			if err := callRuntime(func(ctx context.Context) error { return rt.RemovePortal(ctx, p.ID) }); err != nil {
 				e.failRemoval(p.ID)
 				continue
 			}
@@ -196,7 +200,7 @@ func (e *Engine) converge() {
 			if skip {
 				continue
 			}
-			if err := rt.CleanupRejectedPortal(ctx, p.ID); err != nil {
+			if err := callRuntime(func(ctx context.Context) error { return rt.CleanupRejectedPortal(ctx, p.ID) }); err != nil {
 				e.mu.Lock()
 				e.cleanupFailed[p.ID] = true
 				e.publishLocked()
@@ -206,6 +210,13 @@ func (e *Engine) converge() {
 			e.finishRejection(p.ID)
 		}
 	}
+}
+
+// callRuntime gives each runtime call its own deadline.
+func callRuntime(call func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), runtimeCallTimeout)
+	defer cancel()
+	return call(ctx)
 }
 
 // activeConfigs is the desired runtime set: active records only, enabled or

@@ -37,8 +37,11 @@ type Engine struct {
 	opts  EngineOptions
 	epoch string
 
-	mu       sync.Mutex
-	closing  bool
+	mu      sync.Mutex
+	closing bool
+	// closed is closed once the first Close finishes; closeErr is its result.
+	closed   chan struct{}
+	closeErr error
 	sequence uint64
 	current  Snapshot
 	sessions map[*Session]struct{}
@@ -84,6 +87,7 @@ func New(store *Store, opts EngineOptions) (*Engine, error) {
 		syncReq:       make(chan chan struct{}),
 		stop:          make(chan struct{}),
 		stopped:       make(chan struct{}),
+		closed:        make(chan struct{}),
 	}
 	e.mu.Lock()
 	e.publishLocked()
@@ -97,39 +101,35 @@ func New(store *Store, opts EngineOptions) (*Engine, error) {
 // runtime does not close in time the error is returned; the caller must then
 // keep the store (and its ownership lock) open, since replacement is unsafe
 // until the old nodes are proven closed.
+//
+// Every call reports the same shutdown: a later call waits for the first one
+// to finish rather than reporting success while nodes may still run.
 func (e *Engine) Close(ctx context.Context) error {
 	e.mu.Lock()
-	if e.closing {
-		e.mu.Unlock()
-		return nil
-	}
-	e.closing = true
-	rt := e.runtime
-	for s := range e.sessions {
-		s.subscribers = nil
+	if !e.closing {
+		e.closing = true
+		rt := e.runtime
+		for s := range e.sessions {
+			s.subscribers = nil
+		}
+		close(e.stop)
+		go func() {
+			var err error
+			if rt != nil {
+				// The first caller's deadline bounds the runtime's own close.
+				if err = rt.Close(ctx); err != nil {
+					err = &Error{Code: CodeRuntimeUnavailable}
+				}
+			}
+			<-e.stopped
+			e.closeErr = err
+			close(e.closed)
+		}()
 	}
 	e.mu.Unlock()
-	close(e.stop)
-
-	done := make(chan error, 1)
-	go func() {
-		var err error
-		if rt != nil {
-			err = rt.Close(ctx)
-		}
-		done <- err
-	}()
 	select {
-	case err := <-done:
-		if err != nil {
-			return &Error{Code: CodeRuntimeUnavailable}
-		}
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	select {
-	case <-e.stopped:
-		return nil
+	case <-e.closed:
+		return e.closeErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -174,7 +174,7 @@ func (s *Session) Close() {
 func (s *Session) Subscribe(fn func(Snapshot)) {
 	s.engine.mu.Lock()
 	defer s.engine.mu.Unlock()
-	if _, open := s.engine.sessions[s]; !open {
+	if _, open := s.engine.sessions[s]; !open || s.engine.closing {
 		return
 	}
 	s.subscribers = append(s.subscribers, fn)
@@ -195,15 +195,17 @@ func (s *Session) GetRequestResult(id string, issuedAt time.Time) (RequestResult
 	defer e.mu.Unlock()
 	state := e.store.state
 	now := effectiveNow(e.opts.Clock(), state)
-	if r := findReceipt(state, id); r != nil && now.Before(r.RetainUntil) {
-		if now.After(r.RecoverUntil) {
-			return RequestResult{}, codeErr(CodeResultExpired)
-		}
-		receipt := *r
-		return RequestResult{Receipt: &receipt}, nil
+	if r := retained(state, now, id); r != nil {
+		receipt, err := recoverable(now, r)
+		return RequestResult{Receipt: receipt}, err
 	}
 	if err := admissible(now, issuedAt); err != nil {
 		return RequestResult{}, err
+	}
+	// After an uncertain commit the receipt may be durable but not in
+	// memory, so "not accepted" would be a guess.
+	if e.store.failed {
+		return RequestResult{}, codeErr(CodePersistenceUnavailable)
 	}
 	return RequestResult{NotAccepted: true}, nil
 }

@@ -64,7 +64,8 @@ func sanitizeStatus(status portal.StatusEvent) Connection {
 		c.PortalURL = status.PortalURL
 	}
 	for _, address := range status.Addresses {
-		if parsed, err := netip.ParseAddr(address); err == nil && parsed.String() == address {
+		// Zones are free text, so a zoned address is not a safe fact.
+		if parsed, err := netip.ParseAddr(address); err == nil && parsed.Zone() == "" && parsed.String() == address {
 			c.Addresses = append(c.Addresses, address)
 		}
 	}

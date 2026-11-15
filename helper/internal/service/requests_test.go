@@ -199,12 +199,28 @@ func TestReceiptConflictExpiryAndCapacity(t *testing.T) {
 		defer func(limit int) { maxStateSize = limit }(maxStateSize)
 		h := newHarness(t)
 		h.chooseLogging(installation.LoggingEnabled)
-		data, _ := json.Marshal(h.session.GetSnapshot())
-		maxStateSize = len(data) + 64
-		_, err := h.session.CreatePortal(h.req(), hermesParams)
+		var id string
+		for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
+			id = h.create(name, localApp(1))
+		}
+		// Once old receipts are compacted the document is far smaller than the
+		// snapshot, so a limit just under the snapshot isolates its check.
+		h.clock.set(h.clock.Now().Add(2 * recoveryWindow))
+		snapshot, _ := json.Marshal(h.session.GetSnapshot())
+		var oneReceipt State
+		oneReceipt = h.disk()
+		oneReceipt.Requests = oneReceipt.Requests[:1]
+		document, _ := json.Marshal(oneReceipt)
+		if len(document)+256 >= len(snapshot) {
+			t.Fatalf("fixture: document %d is not well below snapshot %d", len(document), len(snapshot))
+		}
+		// The candidate snapshot carries no sequence yet, so allow for its digits.
+		maxStateSize = len(snapshot) - 16
+		before := len(h.disk().Requests)
+		_, err := h.session.SetDesiredState(h.req(), SetDesiredStateParams{PortalID: id, State: portal.DesiredStateEnabled})
 		wantCode(t, err, CodeCapacityExceeded)
-		if len(h.disk().Installation.Portals) != 0 {
-			t.Fatal("an oversized install was accepted")
+		if len(h.disk().Requests) != before {
+			t.Fatal("a mutation whose snapshot is oversized was recorded")
 		}
 	})
 }
