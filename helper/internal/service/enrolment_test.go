@@ -443,3 +443,24 @@ func TestEnrolmentEventFormattingRedactsTheURL(t *testing.T) {
 		}
 	}
 }
+
+func TestEnrolmentRefusedWhileTheRuntimeIsReplaced(t *testing.T) {
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	id := h.create("hermes", localApp(1))
+	h.authenticating(id)
+	release := make(chan struct{})
+	h.factory.set(func(f *fakeFactory) { f.closeBlock = release })
+	if _, err := h.session.SetOperationalLogging(h.req(), SetOperationalLoggingParams{Logging: installation.LoggingDisabled}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the old runtime's close to start", func() bool { return len(h.factory.callsNamed("close")) == 1 })
+	s, events, _ := h.connect()
+	_, err := s.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: id})
+	wantCode(t, err, CodeRuntimeUnavailable)
+	h.factory.set(func(f *fakeFactory) { close(release); f.closeBlock = nil })
+	h.settle()
+	if n := len(h.factory.callsNamed("auth:" + id)); n != 0 || len(events.all()) != 0 {
+		t.Fatalf("an attempt started on a closing runtime: %d Authenticate calls, events %v", n, events.all())
+	}
+}

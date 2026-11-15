@@ -120,7 +120,9 @@ func (e *Engine) enrolmentAvailability(state State, p installation.Portal) Avail
 	switch {
 	case p.Lifecycle != installation.LifecycleActive || p.DesiredState != portal.DesiredStateEnabled:
 		return Availability{Reason: CodeNotAvailable}
-	case e.runtimeStatus(state) != runtimeRunning:
+	// A runtime being replaced or awaiting a retried close still looks
+	// running, but no new attempt may start on it.
+	case e.runtimeStatus(state) != runtimeRunning, e.closePending, e.runtimeLogging != state.Installation.Logging:
 		return Availability{Reason: CodeRuntimeUnavailable}
 	}
 	c, ok := e.live[p.ID]
@@ -194,8 +196,9 @@ func (e *Engine) deliverURLLocked(gen uint64, portalID, rawURL string) {
 }
 
 // portalEnrolment projects the durable action marker for snapshots while the
-// Portal still needs authentication (or no runtime facts exist yet, as just
-// after a restart); once it is past that, the marker is history.
+// Portal needs authentication, or before any runtime facts exist (as just
+// after a restart). The marker stays durable, so it shows again if the
+// Portal returns to authenticating.
 func (e *Engine) portalEnrolment(state State, p installation.Portal) *Enrolment {
 	if p.Lifecycle != installation.LifecycleActive {
 		return nil

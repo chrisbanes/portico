@@ -2,13 +2,10 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -99,22 +96,24 @@ func TestRealRuntimeAuth1ResumeAcrossDisconnectAndRestart(t *testing.T) {
 	identity := filepath.Join(identityRoot, id)
 	authenticating(setup, id)
 	before := identityFiles(t, identity)
-	beforeKeys := nodeKeys(t, identity)
-
-	// Client A resumes, its login starts, then it disconnects.
-	a := engine.Connect()
-	if _, err := a.ResumeEnrolment(request(a), ResumeEnrolmentParams{PortalID: id}); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(2 * time.Second)
-	a.Close()
-	// Any URL A's attempt produces arrives now, with no lease, and is
-	// dropped; B's URL below can then only come from B's own resume.
-	time.Sleep(5 * time.Second)
-
-	// Client B resumes and is the only one to receive the URL.
+	beforeKey := machineKey(t, identity)
 	observerEvents := &eventLog{}
 	setup.ReceiveEnrolmentEvents(observerEvents.sink)
+
+	// Client A resumes and receives its URL, then disconnects. Waiting for A's
+	// URL means B's URL below must be a second emission, from B's resume.
+	a := engine.Connect()
+	aEvents := &eventLog{}
+	a.ReceiveEnrolmentEvents(aEvents.sink)
+	aReq := request(a)
+	if _, err := a.ResumeEnrolment(aReq, ResumeEnrolmentParams{PortalID: id}); err != nil {
+		t.Fatal(err)
+	}
+	awaitURL(aEvents, aReq.ID)
+	t.Logf("outcome: client A received its URL before disconnecting: true")
+	a.Close()
+
+	// Client B resumes and is the only one to receive the URL.
 	b := engine.Connect()
 	bEvents := &eventLog{}
 	b.ReceiveEnrolmentEvents(bEvents.sink)
@@ -125,9 +124,11 @@ func TestRealRuntimeAuth1ResumeAcrossDisconnectAndRestart(t *testing.T) {
 	}
 	awaitURL(bEvents, bReq.ID)
 	checkURL(urls[0])
-	t.Logf("outcome: observer session received %d enrolment events", len(observerEvents.all()))
-	if len(observerEvents.all()) != 0 {
-		t.Fatal("a session other than the requester received the URL")
+	checkURL(urls[1])
+	t.Logf("outcome: B's URL equals A's: %v (either is allowed); A received %d URL events in total; observer received %d events",
+		urls[0] == urls[1], len(aEvents.of(EnrolmentAuthenticationURL)), len(observerEvents.all()))
+	if len(aEvents.of(EnrolmentAuthenticationURL)) != 1 || len(observerEvents.all()) != 0 {
+		t.Fatal("a session other than the current requester received a URL")
 	}
 	exposed := []any{setup.GetSnapshot()}
 	closeEngine(store, engine)
@@ -147,8 +148,8 @@ func TestRealRuntimeAuth1ResumeAcrossDisconnectAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitURL(b2Events, b2Req.ID)
-	checkURL(urls[1])
-	t.Logf("outcome: URL after restart equals the earlier one: %v (either is allowed)", urls[0] == urls[1])
+	checkURL(urls[2])
+	t.Logf("outcome: URL after restart equals the earlier one: %v (either is allowed)", urls[1] == urls[2])
 
 	after := identityFiles(t, identity)
 	kept := store.IdentityRoot() == identityRoot
@@ -157,9 +158,9 @@ func TestRealRuntimeAuth1ResumeAcrossDisconnectAndRestart(t *testing.T) {
 			kept = false
 		}
 	}
-	sameKeys := nodeKeys(t, identity) == beforeKeys
-	t.Logf("outcome: same Portal UUID and identity directory with all %d entries: %v; same machine key and login profiles (compared in memory): %v", len(before), kept, sameKeys)
-	if !kept || !sameKeys || findPortal(b2.GetSnapshot(), id) == nil {
+	sameKey := machineKey(t, identity) == beforeKey
+	t.Logf("outcome: same Portal UUID and identity directory with all %d entries: %v; same machine key, so no state reset (compared in memory): %v", len(before), kept, sameKey)
+	if !kept || !sameKey || findPortal(b2.GetSnapshot(), id) == nil {
 		t.Fatal("the Portal's identity state changed")
 	}
 
@@ -205,9 +206,10 @@ func identityFiles(t *testing.T, dir string) map[string]bool {
 	return names
 }
 
-// nodeKeys fingerprints the node's machine key and login profile keys in
-// tailscaled.state, so a logout or reset is detectable without logging them.
-func nodeKeys(t *testing.T, dir string) string {
+// machineKey reads the node's machine key from tailscaled.state for an
+// in-memory comparison; a state deletion or reset replaces it. (An unenrolled
+// node has no login profiles yet, so there is nothing else to compare.)
+func machineKey(t *testing.T, dir string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(dir, "tailscaled.state"))
 	if err != nil {
@@ -220,15 +222,7 @@ func nodeKeys(t *testing.T, dir string) string {
 	if len(state["_machinekey"]) == 0 {
 		t.Fatal("identity state has no machine key")
 	}
-	var profiles []string
-	for key := range state {
-		if strings.HasPrefix(key, "profile-") {
-			profiles = append(profiles, key)
-		}
-	}
-	slices.Sort(profiles)
-	sum := sha256.Sum256(append(append([]byte{}, state["_machinekey"]...), strings.Join(profiles, ",")...))
-	return hex.EncodeToString(sum[:])
+	return string(state["_machinekey"])
 }
 
 func findPortal(s Snapshot, id string) *PortalSnapshot {
