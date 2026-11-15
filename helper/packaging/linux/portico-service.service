@@ -1,0 +1,23 @@
+# This user's Portico service, as a systemd --user unit. See
+# docs/service-lifecycle.md; installation of the unit and executable
+# belongs to #85. Without lingering it runs only while the user has a session.
+[Unit]
+Description=Portico Portal service
+Documentation=https://github.com/chrisbanes/portico/blob/main/docs/service-lifecycle.md
+# At most 5 starts in 5 minutes; then the unit stays failed until a manual
+# start or reset-failed.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/portico-service --variant production
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+# Above the service's own 10 s close deadline.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

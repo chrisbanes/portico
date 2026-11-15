@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The test LaunchAgent: a porticofake build with isolated roots.
+     Scripts/test-service-lifecycle.sh fills in the @...@ paths and loads it
+     with launchctl bootstrap; it is never registered with SMAppService. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.chrisbanes.Portico.ServiceTest</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@PROGRAM@</string>
+		<string>--variant</string>
+		<string>test</string>
+		<string>--state-root</string>
+		<string>@STATE_ROOT@</string>
+		<string>--runtime-dir</string>
+		<string>@RUNTIME_DIR@</string>
+		<string>--fake-runtime</string>
+		<string>@FAKE_RUNTIME@</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>@STDERR@</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>Umask</key>
+	<integer>63</integer>
+</dict>
+</plist>
