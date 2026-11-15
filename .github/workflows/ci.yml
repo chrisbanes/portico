@@ -58,7 +58,7 @@ jobs:
             packages: ./...
           # cmd/portico-helper is darwin-only.
           - os: ubuntu-24.04
-            packages: ./internal/...
+            packages: ./internal/... ./cmd/portico-service
     runs-on: ${{ matrix.os }}
     env:
       CGO_ENABLED: '1'
@@ -77,6 +77,11 @@ jobs:
         if: runner.os == 'macOS'
         run: go build ./cmd/portico-helper
 
+      - name: Build Go service
+        run: |
+          go build -o "$RUNNER_TEMP/portico-service" ./cmd/portico-service
+          go build -tags porticofake -o "$RUNNER_TEMP/portico-service-fake" ./cmd/portico-service
+
       - name: Test Go helper
         run: go test -race ${{ matrix.packages }}
 
@@ -89,6 +94,37 @@ jobs:
           go test -race -count=1 -v -run '^TestCrossUser' ./internal/ipc/ | tee "$RUNNER_TEMP/cross-user.log"
           grep -q -- '--- PASS: TestCrossUserPeersAreRejected' "$RUNNER_TEMP/cross-user.log"
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/cross-user.log"; then exit 1; fi
+
+  # Runs the porticofake service under launchd and systemd --user. A separate
+  # bounded proof of hosted-runner service managers, so not part of "Go".
+  service-lifecycle:
+    name: Service lifecycle ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: helper/go.sum
+
+      # CI only: lingering gives the headless runner a user manager. The
+      # service itself never enables lingering.
+      - name: Start a systemd user manager
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          runtime_dir="/run/user/$(id -u)"
+          echo "XDG_RUNTIME_DIR=$runtime_dir" >> "$GITHUB_ENV"
+          timeout 60 bash -c "until [ -S '$runtime_dir/bus' ]; do sleep 1; done"
+          XDG_RUNTIME_DIR="$runtime_dir" systemctl --user is-system-running --wait || true
+
+      - name: Run the service lifecycle check
+        run: Scripts/test-service-lifecycle.sh
 
   # The required "Go" check: passes only when every matrix leg passes.
   go:
