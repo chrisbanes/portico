@@ -340,3 +340,30 @@ func TestEnrolmentStartFailureIsReportedToTheRequester(t *testing.T) {
 		t.Fatalf("enrolment after a failed start = %+v", p.Enrolment)
 	}
 }
+
+// A URL from a runtime that was replaced is an obsolete callback, even when
+// a new attempt for the same Portal is live on the new runtime.
+func TestEnrolmentRejectsCallbacksFromAReplacedRuntime(t *testing.T) {
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	id := h.create("hermes", localApp(1))
+	old := h.factory.runtime()
+	h.chooseLogging(installation.LoggingDisabled)
+	current := h.factory.runtime()
+	if current == old {
+		t.Fatal("the runtime was not replaced")
+	}
+	h.authenticating(id)
+	s, events, _ := h.connect()
+	if _, err := s.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: id}); err != nil {
+		t.Fatal(err)
+	}
+	old.emitURL(id, enrolmentURL)
+	if len(events.of(EnrolmentAuthenticationURL)) != 0 {
+		t.Fatal("a replaced runtime's URL was delivered")
+	}
+	current.emitURL(id, enrolmentURL)
+	if len(events.of(EnrolmentAuthenticationURL)) != 1 {
+		t.Fatal("the current runtime's URL was not delivered")
+	}
+}
