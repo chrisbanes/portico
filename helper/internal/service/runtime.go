@@ -166,6 +166,9 @@ func (e *Engine) converge() {
 			e.problems[p.ID] = ProblemCloseFailed
 		default:
 			delete(e.problems, p.ID)
+			if p.Lifecycle == installation.LifecycleActive && p.DesiredState == portal.DesiredStateStopped {
+				e.markStoppedLocked(p.ID)
+			}
 		}
 	}
 	if err == nil {
@@ -367,6 +370,17 @@ func (e *Engine) observeTailnet(id string, c Connection, tailnetName string) {
 			st.Installation.Binding = &installation.TailnetBinding{Name: binding.Name, MagicDNSSuffix: c.MagicDNSSuffix}
 			return nil
 		})
+	}
+}
+
+// markStoppedLocked records a converged stop. portal.Runtime closes the node
+// without a final status event, so the engine updates the facts itself; the
+// address and URL facts it keeps are last-known.
+func (e *Engine) markStoppedLocked(id string) {
+	if c, ok := e.live[id]; ok {
+		c.State = portal.StateStopped
+		c.Freshness = freshnessLastKnown
+		e.live[id] = c
 	}
 }
 

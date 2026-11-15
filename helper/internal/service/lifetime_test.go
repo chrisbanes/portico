@@ -5,8 +5,10 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/chrisbanes/portico/helper/internal/installation"
 	"github.com/chrisbanes/portico/helper/internal/portal"
@@ -75,5 +77,73 @@ func TestRealRuntimePortalsOutliveTheReconcileThatStartedThem(t *testing.T) {
 	h.stop()
 	if ctx.Err() == nil {
 		t.Fatal("the Portal's context outlived the engine")
+	}
+}
+
+// onlineNode is a portal.Node that reports itself Online with a Portal URL,
+// serving the Portal's HTTPS proxy on a loopback listener.
+type onlineNode struct{ lifetimeNode }
+
+func (*onlineNode) status() portal.Status {
+	return portal.Status{
+		BackendState:   "Running",
+		DNSName:        "hermes.one.ts.net.",
+		CertDomains:    []string{"hermes.one.ts.net"},
+		Addresses:      []string{"100.64.0.1"},
+		TailnetName:    "tailnet-a",
+		MagicDNSSuffix: "one.ts.net",
+	}
+}
+
+func (n *onlineNode) Up(context.Context) (portal.Status, error)     { return n.status(), nil }
+func (n *onlineNode) Status(context.Context) (portal.Status, error) { return n.status(), nil }
+func (n *onlineNode) Listen(string, string) (net.Listener, error) {
+	return net.Listen("tcp", "127.0.0.1:0")
+}
+
+// TestRealRuntimeStopLeavesNoCurrentOnlineFacts stops an Online Portal through
+// the real portal.Runtime, which closes the node without a final status: the
+// snapshot must not keep claiming a current Online connection.
+func TestRealRuntimeStopLeavesNoCurrentOnlineFacts(t *testing.T) {
+	node := &onlineNode{}
+	h := newHarness(t, func(h *harness) {
+		h.opts.RuntimeFactory = func(stateRoot string, _ installation.Logging) (Runtime, error) {
+			return portal.NewRuntime(stateRoot, func(string, string) portal.Node { return node }), nil
+		}
+	})
+	h.chooseLogging(installation.LoggingEnabled)
+	id := h.create("hermes", localApp(8787))
+	waitUntil(t, "the Portal to report Online", func() bool {
+		p := h.portal(id)
+		return p.Connection != nil && p.Connection.State == portal.StateOnline && p.Availability[OpOpenPortalURL].Available
+	})
+	if _, err := h.session.SetDesiredState(h.req(), SetDesiredStateParams{PortalID: id, State: portal.DesiredStateStopped}); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	p := h.portal(id)
+	if c := p.Connection; c == nil || c.State != portal.StateStopped || c.Freshness != freshnessLastKnown || c.PortalURL == "" {
+		t.Fatalf("connection after a stop = %+v, want last-known facts in state stopped", c)
+	}
+	if p.Availability[OpOpenPortalURL].Available || !p.Availability[OpCopyPortalURL].Available {
+		t.Fatalf("URL actions after a stop = %+v", p.Availability)
+	}
+	report, err := h.session.GetDiagnostics(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(report, "Tailscale: stopped") || !strings.Contains(report, "Facts: lastKnown") {
+		t.Fatalf("diagnostics after a stop:\n%s", report)
+	}
+}
+
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
