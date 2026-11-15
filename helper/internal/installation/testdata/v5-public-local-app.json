@@ -1,0 +1,1 @@
+{"version":5,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","destination":{"kind":"localApp","port":8787},"publicAccess":"public","createdAt":807692800,"desiredState":"enabled","lifecycle":"active"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}
