@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"sync/atomic"
 	"testing"
 
 	"github.com/chrisbanes/portico/helper/internal/installation"
@@ -546,5 +547,82 @@ func TestRealRuntimeFactorySetsLoggingKnobBeforeNewRuntime(t *testing.T) {
 	}
 	if _, err := RealRuntimeFactory(t.TempDir(), installation.LoggingUndecided); err == nil {
 		t.Fatal("the real factory started a runtime without a logging choice")
+	}
+}
+
+// rejectAfterBinding binds the installation to tailnet-a through keep, then
+// reports rejected online in tailnet-b under a collision-resolved name.
+func rejectAfterBinding(h *harness, keep, rejected string) {
+	rt := h.factory.runtime()
+	rt.emitStatus(keep, online("keep", "one.ts.net", "tailnet-a"))
+	rt.emitStatus(rejected, online("rejected-1", "two.ts.net", "tailnet-b"))
+	h.settle()
+}
+
+func assertRejectionAlert(t *testing.T, h *harness) {
+	t.Helper()
+	alerts := h.disk().Installation.Alerts
+	if len(alerts) != 1 || alerts[0].AssignedName == nil || *alerts[0].AssignedName != "rejected-1" ||
+		alerts[0].RejectedMagicDNSSuffix == nil || *alerts[0].RejectedMagicDNSSuffix != "two.ts.net" {
+		t.Fatalf("alert after recovery = %+v, want the rejected node's name and tailnet", alerts)
+	}
+	if len(h.disk().Rejections) != 0 {
+		t.Fatal("rejection evidence outlived its cleanup")
+	}
+}
+
+func TestRejectionEvidenceSurvivesRestartAfterCleanupFailure(t *testing.T) {
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	keep := h.create("keep", localApp(1))
+	rejected := h.create("rejected", localApp(2))
+	h.factory.set(func(f *fakeFactory) { f.cleanupErr = errors.New("cleanup failed") })
+	rejectAfterBinding(h, keep, rejected)
+	if r := h.disk().Rejections; len(r) != 1 || r[0].PortalID != rejected || r[0].AssignedName != "rejected-1" {
+		t.Fatalf("persisted evidence = %+v", r)
+	}
+	h.factory.set(func(f *fakeFactory) { f.cleanupErr = nil })
+	h.restart()
+	assertRejectionAlert(t, h)
+}
+
+func TestRejectionEvidenceSurvivesRestartBeforeCleanupFinishes(t *testing.T) {
+	var failFinish atomic.Bool
+	h := newHarness(t, func(h *harness) {
+		h.storeOpt = Options{Hook: func(p Phase) error {
+			if failFinish.Load() && p == PhaseCommitRename {
+				return errors.New("crash before the cleanup's final save")
+			}
+			return nil
+		}}
+	})
+	h.chooseLogging(installation.LoggingEnabled)
+	keep := h.create("keep", localApp(1))
+	rejected := h.create("rejected", localApp(2))
+	// The identity cleanup succeeds, but the commit that finishes it does not.
+	h.factory.set(func(f *fakeFactory) { f.onCleanup = func() { failFinish.Store(true) } })
+	rejectAfterBinding(h, keep, rejected)
+	if p := h.portal(rejected); p == nil || p.Lifecycle != installation.LifecyclePendingTailnetRejection {
+		t.Fatalf("rejected Portal before restart = %+v", p)
+	}
+	failFinish.Store(false)
+	h.factory.set(func(f *fakeFactory) { f.onCleanup = nil })
+	h.restart()
+	assertRejectionAlert(t, h)
+}
+
+func TestInvalidRejectionEvidenceFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    Rejection
+	}{
+		{"unknown Portal", Rejection{PortalID: "9f55ca93-d7b3-4eab-a871-310ea576005a"}},
+		{"unsafe name", Rejection{PortalID: "", AssignedName: "Not A Label"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := encodeState(State{Schema: stateSchema, Installation: installation.New(), Rejections: []Rejection{tc.r}}); err == nil {
+				t.Fatal("invalid rejection evidence was accepted")
+			}
+		})
 	}
 }

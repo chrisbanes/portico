@@ -48,7 +48,18 @@ type State struct {
 	// ClockHighWater is the latest clock reading any commit used, so a
 	// clock rollback cannot reopen an expired admission window.
 	ClockHighWater time.Time `json:"clockHighWater"`
-	Migration      Migration `json:"migration"`
+	// Rejections keeps the sanitized evidence of each pending tailnet
+	// rejection, committed with the rejection, so the alert that replaces the
+	// Portal still names the rejected node after a restart.
+	Rejections []Rejection `json:"rejections"`
+	Migration  Migration   `json:"migration"`
+}
+
+// Rejection is the evidence for a Portal pending tailnet rejection.
+type Rejection struct {
+	PortalID               string `json:"portalID"`
+	AssignedName           string `json:"assignedName,omitempty"`
+	RejectedMagicDNSSuffix string `json:"rejectedMagicDNSSuffix,omitempty"`
 }
 
 // Migration records where the generation came from.
@@ -76,6 +87,7 @@ func (s State) clone() State {
 	s.Installation.Alerts = slices.Clone(s.Installation.Alerts)
 	s.Requests = slices.Clone(s.Requests)
 	s.Actions = slices.Clone(s.Actions)
+	s.Rejections = slices.Clone(s.Rejections)
 	return s
 }
 
@@ -172,6 +184,9 @@ func encodeState(state State) ([]byte, error) {
 	if err := installation.Validate(state.Installation); err != nil {
 		return nil, fmt.Errorf("invalid installation: %w", err)
 	}
+	if err := validateRejections(state); err != nil {
+		return nil, err
+	}
 	data, err := json.Marshal(state)
 	if err != nil {
 		return nil, persistenceErr(err)
@@ -195,5 +210,24 @@ func decodeState(data []byte) (State, error) {
 	if err := installation.Validate(state.Installation); err != nil {
 		return State{}, unsupportedErr(err)
 	}
+	if err := validateRejections(state); err != nil {
+		return State{}, unsupportedErr(err)
+	}
 	return state, nil
+}
+
+// validateRejections allows at most one entry per Portal, only for a Portal
+// pending rejection, holding only sanitized facts.
+func validateRejections(state State) error {
+	seen := map[string]bool{}
+	for _, r := range state.Rejections {
+		i := portalIndex(&state, r.PortalID)
+		if seen[r.PortalID] || i < 0 || state.Installation.Portals[i].Lifecycle != installation.LifecyclePendingTailnetRejection ||
+			(r.AssignedName != "" && !dnsLabelPattern.MatchString(r.AssignedName)) ||
+			(r.RejectedMagicDNSSuffix != "" && !isMagicDNSSuffix(r.RejectedMagicDNSSuffix)) {
+			return errors.New("invalid rejection evidence")
+		}
+		seen[r.PortalID] = true
+	}
+	return nil
 }

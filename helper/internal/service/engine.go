@@ -61,7 +61,6 @@ type Engine struct {
 	problems      map[string]Problem
 	removalFailed map[string]bool
 	cleanupFailed map[string]bool
-	evidence      map[string]rejectionEvidence
 	reach         map[string]reachEntry
 
 	kick    chan struct{}
@@ -101,7 +100,6 @@ func New(store *Store, opts EngineOptions) (*Engine, error) {
 		problems:      map[string]Problem{},
 		removalFailed: map[string]bool{},
 		cleanupFailed: map[string]bool{},
-		evidence:      map[string]rejectionEvidence{},
 		reach:         map[string]reachEntry{},
 		reachKick:     make(chan struct{}, 1),
 		reachSync:     make(chan chan struct{}),

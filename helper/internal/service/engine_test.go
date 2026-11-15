@@ -98,6 +98,9 @@ func (r *fakeRuntime) CleanupRejectedPortal(ctx context.Context, id string) erro
 	r.f.noteCtx(ctx)
 	r.f.mu.Lock()
 	defer r.f.mu.Unlock()
+	if r.f.onCleanup != nil {
+		r.f.onCleanup()
+	}
 	return r.f.cleanupErr
 }
 
@@ -185,6 +188,7 @@ type fakeFactory struct {
 	closeBlock   chan struct{}
 	outcomes     map[string]portal.ReconcileOutcome
 	onRemove     func()
+	onCleanup    func()
 	// reconcileDelay slows Reconcile; expiredCalls counts runtime calls that
 	// arrived with their deadline already passed.
 	reconcileDelay time.Duration

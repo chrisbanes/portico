@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -52,10 +53,6 @@ const (
 // convergedAt records the revision and runtime generation last reconciled.
 type convergedAt struct {
 	revision, runtimeGen uint64
-}
-
-type rejectionEvidence struct {
-	assignedName, magicDNSSuffix string
 }
 
 // run is the single runtime worker: it converges the runtime on the latest
@@ -284,18 +281,22 @@ func (e *Engine) finishRemoval(id string) {
 func (e *Engine) finishRejection(id string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	evidence := e.evidence[id]
 	err := e.commitInternal(func(st *State, now time.Time) error {
 		i := portalIndex(st, id)
 		if i < 0 || st.Installation.Portals[i].Lifecycle != installation.LifecyclePendingTailnetRejection {
 			return errUnchanged
 		}
+		var evidence Rejection
+		if j := slices.IndexFunc(st.Rejections, func(r Rejection) bool { return r.PortalID == id }); j >= 0 {
+			evidence = st.Rejections[j]
+			st.Rejections = slices.Delete(st.Rejections, j, j+1)
+		}
 		alert := installation.Alert{
 			ID:                     newUUID(),
 			Kind:                   installation.AlertCrossTailnetRejection,
 			PortalName:             st.Installation.Portals[i].Name,
-			AssignedName:           optional(evidence.assignedName),
-			RejectedMagicDNSSuffix: optional(evidence.magicDNSSuffix),
+			AssignedName:           optional(evidence.AssignedName),
+			RejectedMagicDNSSuffix: optional(evidence.RejectedMagicDNSSuffix),
 			CreatedAt:              now,
 		}
 		if b := st.Installation.Binding; b != nil {
@@ -309,7 +310,6 @@ func (e *Engine) finishRejection(id string) {
 		e.cleanupFailed[id] = true
 	} else {
 		delete(e.cleanupFailed, id)
-		delete(e.evidence, id)
 		delete(e.live, id)
 		delete(e.problems, id)
 	}
@@ -362,10 +362,12 @@ func (e *Engine) observeTailnet(id string, c Connection, tailnetName string) {
 				return errUnchanged
 			}
 			st.Installation.Portals[i].Lifecycle = installation.LifecyclePendingTailnetRejection
+			// The evidence commits with the rejection so cleanup can name the
+			// rejected node even after a restart.
+			st.Rejections = append(st.Rejections, Rejection{PortalID: id, AssignedName: c.AssignedName, RejectedMagicDNSSuffix: c.MagicDNSSuffix})
 			return nil
 		})
 		if err == nil {
-			e.evidence[id] = rejectionEvidence{assignedName: c.AssignedName, magicDNSSuffix: c.MagicDNSSuffix}
 			delete(e.live, id)
 			e.wake()
 		}
