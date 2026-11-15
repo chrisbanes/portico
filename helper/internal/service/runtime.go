@@ -146,8 +146,8 @@ func (e *Engine) converge() {
 		e.mu.Unlock()
 	}
 
-	// The deadline bounds only this pass, shared out between its Portals;
-	// Portals run until the runtime closes.
+	// The deadline bounds only this pass; each Portal converges concurrently
+	// within it, and Portals run until the runtime closes.
 	var entries []portal.ReconcileEntry
 	err := callRuntime(func(ctx context.Context) (err error) {
 		entries, err = rt.Reconcile(ctx, activeConfigs(state), e.emitter(gen))

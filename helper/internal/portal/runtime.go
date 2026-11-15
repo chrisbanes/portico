@@ -357,7 +357,9 @@ func (r *Runtime) Reconcile(ctx context.Context, configs []Config, emit func(Eve
 	sort.Strings(portalIDs)
 
 	// Each Portal converges on its own goroutine within ctx, so a hung Portal
-	// cannot use up the time of the others. Their events stay serialised.
+	// cannot use up the time of the others. emit is called by one Portal at a
+	// time within this pass; Portals started by other passes may call it
+	// concurrently, as watchers always could.
 	var emitMu sync.Mutex
 	serialEmit := func(event Event) {
 		emitMu.Lock()
@@ -451,8 +453,8 @@ func (r *Runtime) reconcilePortal(
 	}
 }
 
-// newNode calls the factory one Portal at a time, as before Portals
-// reconciled concurrently.
+// newNode calls the factory one Portal at a time: a NodeFactory need not be
+// safe for concurrent use.
 func (r *Runtime) newNode(config Config) Node {
 	r.factoryMu.Lock()
 	defer r.factoryMu.Unlock()
