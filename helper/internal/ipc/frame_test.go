@@ -59,6 +59,7 @@ func TestDecodeIsStrict(t *testing.T) {
 		`{"type":"call","params":{"port":9007199254740991,"name":"a"}}`,
 		`{"type":"x","params":{"port":-9007199254740991,"name":"` + strings.Repeat("a", 4096) + `"}}`,
 		nest(16),
+		`{"type":"x","nested":[1.5,-9.007199254740991e15,1e2]}`,
 	}
 	for _, input := range accepted {
 		var m message
@@ -73,6 +74,9 @@ func TestDecodeIsStrict(t *testing.T) {
 		"unknown field":     `{"type":"call","extra":1}`,
 		"invalid UTF-8":     "{\"type\":\"\xff\"}",
 		"2^53+1":            `{"type":"x","params":{"port":9007199254740993}}`,
+		"2^53+1 as decimal": `{"type":"x","nested":9007199254740993.0}`,
+		"2^53+1 exponent":   `{"type":"x","nested":9.007199254740993e15}`,
+		"2^53+1 e0":         `{"type":"x","nested":9007199254740993e0}`,
 		"long string":       `{"type":"` + strings.Repeat("a", 4097) + `"}`,
 		"long member name":  `{"` + strings.Repeat("a", 4097) + `":1}`,
 		"non-finite":        `{"type":"x","nested":1e400}`,

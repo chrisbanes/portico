@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"math"
 	"strconv"
-	"strings"
 
 	"github.com/go-json-experiment/json"
 	"github.com/go-json-experiment/json/jsontext"
@@ -19,7 +18,7 @@ const (
 
 // Decode strictly decodes one JSON object frame into v. It refuses nesting
 // deeper than 16, duplicate or wrong-case or unknown members, invalid UTF-8,
-// strings over 4 KiB, non-finite numbers and integers outside 53 bits.
+// strings over 4 KiB, and numbers that are non-finite or beyond ±(2^53−1).
 func Decode(data []byte, v any) error {
 	if err := checkLimits(data); err != nil {
 		return err
@@ -62,14 +61,10 @@ func checkLimits(data []byte) error {
 	}
 }
 
+// exactNumber bounds every number, however it is spelled: 9007199254740993,
+// 9007199254740993.0 and 9.007199254740993e15 all round past the exact range,
+// so none can silently become a different integer. Overflow is an error.
 func exactNumber(raw string) bool {
 	value, err := strconv.ParseFloat(raw, 64)
-	if err != nil || math.IsInf(value, 0) || math.IsNaN(value) {
-		return false
-	}
-	if strings.ContainsAny(raw, ".eE") {
-		return true
-	}
-	n, err := strconv.ParseInt(raw, 10, 64)
-	return err == nil && n >= -maxExactInteger && n <= maxExactInteger
+	return err == nil && math.Abs(value) <= maxExactInteger
 }
