@@ -4,6 +4,13 @@ Design inventory for [#102](https://github.com/chrisbanes/portico/issues/102),
 against `6266f94579664ec860151bafc33f9985ca5352e9`.
 [Service contract](local-service-contract.md) · [Architecture decision](adr/0009-local-go-management-service.md).
 
+Revisions: on 15 November 2026 [#103's approved decision revision](https://github.com/chrisbanes/portico/issues/103#approved-decision-revision--15-november-2026)
+replaced the Enrolment row's fresh-URL requirement with the revised AUTH-1 in the
+[service contract](local-service-contract.md#interrupted-enrolment-and-transient-authentication).
+The map #102 approved at
+[`2509e2e`](https://github.com/chrisbanes/portico/blob/2509e2eca9d27c2513b35c8c55d1bb43227bebbf/docs/ui-coverage-migration.md)
+stays as history; every other row is unchanged.
+
 Baseline: **22 XCTest methods** in `PorticoUITests/PorticoUITests.swift`.
 Several methods launch multiple scenario variants; 22 is not a count of all
 states/assertions, and no execution-time measurement was taken here.
@@ -104,9 +111,10 @@ These are source references, not claims of replacement completion:
   `LaunchAtLoginTests`, `SmokeLaunchConfigurationTests`: redaction, probes, variant
   isolation, UI startup and isolated root admission.
 - `helper/internal/portal/*_test.go`: proxy/header/TLS contracts, reconciliation,
-  listener/shutdown ownership, fresh **notification** delivery and cancellation.
+  listener/shutdown ownership, auth URL **notification** delivery and cancellation.
   `helper/internal/discovery/*_test.go`: privacy/deduplication/probing/bounds.
-  These remain valuable runtime tests; none proves a fresh Tailscale auth URL.
+  These remain valuable runtime tests; none proves what Tailscale returns on an
+  explicit resume, which needs the real-runtime AUTH-1 run.
 
 ## Additional service-migration acceptance
 
@@ -121,7 +129,7 @@ These cases are new acceptance, not secretly covered by the original 22:
 | Downgrade (#104/#105/#85) | I plus manual recovery walkthrough: stop/unregister verified, preserve generation, never start old writer against stale metadata/identities; document no reverse migration after new changes |
 | Lost acknowledgement (#103/#104/#105) | S/I `CreateAckLostAcrossRestart`: accepted Create with dropped reply, restart, same-ID/payload retry yields original UUID and exactly one record/node; C retains same request identity across UI restart |
 | Recovery limits (#103/#105) | S `ReceiptConflictExpiryAndCapacity`: same ID/different payload, concurrent retry, no-op, clock rollback, capacity, interrupted commit, window expiry; C shows unknown expired result with no automatic new Create |
-| Enrolment (#103/#104/#105) | S/C/I plus separate real-runtime AUTH-1: A disconnects, B explicitly resumes; record survives, fresh attempt URL only to B, no history/retry/snapshot/log replay, superseded callbacks ignored; runtime freshness still blocked |
+| Enrolment (#103/#104/#105) | S/C/I with a fake runtime plus separate opt-in real-runtime AUTH-1: A disconnects, B explicitly resumes, service restarts; record and identity survive, Tailscale's current valid URL (equal URLs allowed) only to B, no history/retry/snapshot/log replay, no automatic browser opening, superseded callbacks ignored |
 | Platform capability (#103/#104) | S/I macOS automatic discovery retained; Linux explicitly unavailable with explicit-port creation/reachability working; unavailable parity is not a Linux release failure |
 | Lifecycle (#104) | I with installed isolated roots: UI exits without stopping nodes; service restart restores enabled intent/pending cleanup; stopped records do not start; failed approval/start is visible and no fallback writer exists |
 | First milestone (#104/#105) | I fake runtime proves bytes/identity and IPC lifecycle; M separately records actual original Tailscale stable node ID and private HTTPS continuity before/after UI exit and service restart |
@@ -134,7 +142,7 @@ These cases are new acceptance, not secretly covered by the original 22:
 fake-client presentation/dispatch checks and the five retained VM scenarios.
 #106 reconciles every assertion row to committed tests/results before removing
 redundant native cases; preserve original coverage until replacement passes.
-AUTH-1 and MIG-1 remain explicit blockers for affected acceptance. Preserve native
+AUTH-1 (revised) and MIG-1 remain explicit blockers for affected acceptance. Preserve native
 issue dependencies #102 → #103 → #104 → #105 → #106 (additional earlier blockers
 remain recorded); completing this inventory does not mark them ready-for-agent.
 
