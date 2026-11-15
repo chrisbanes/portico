@@ -9,6 +9,16 @@ a completed migration, or actual tailnet qualification. Baseline inspected:
 Tailscale v1.102.0). See the [coverage map](ui-coverage-migration.md) and
 [superseding ADR](adr/0009-local-go-management-service.md).
 
+## Revisions
+
+- **15 November 2026:** [#103's approved decision revision](https://github.com/chrisbanes/portico/issues/103#approved-decision-revision--15-november-2026)
+  replaces the AUTH-1 requirement for a newly issued URL. An explicit resume may
+  now receive Tailscale's current valid URL, and the freshness-only error
+  `authenticationFreshnessUnavailable` is removed from management v1. Every other
+  rule, including MIG-1, is unchanged. The text #102 approved at
+  [`2509e2e`](https://github.com/chrisbanes/portico/blob/2509e2eca9d27c2513b35c8c55d1bb43227bebbf/docs/local-service-contract.md)
+  stays as history.
+
 ## Authority and scope
 
 One unprivileged per-user Go process owns configuration, validation, durable
@@ -148,9 +158,9 @@ clients provide localised wording. Codes are `invalidRequest`, `notFound`,
 `notAvailable`, `revisionConflict`, `loggingChoiceRequired`, `confirmationRequired`,
 `capabilityUnavailable`, `requestConflict`, `requestNotYetValid`, `resultExpired`,
 `capacityExceeded`, `persistenceUnavailable`, `unsupportedState`, `ownershipBusy`,
-`runtimeUnavailable`, `authenticationFreshnessUnavailable`, `incompatibleVersion`,
-`slowConsumer`. Transport failure is not proof of rejection. `retryable` never
-instructs a client to allocate a new request ID for an uncertain mutation.
+`runtimeUnavailable`, `incompatibleVersion`, `slowConsumer`. Transport failure is
+not proof of rejection. `retryable` never instructs a client to allocate a new
+request ID for an uncertain mutation.
 Unauthenticated peers are closed without state/error detail.
 
 ## Durable acceptance, retry and observation
@@ -265,27 +275,39 @@ Validate HTTPS and fence callbacks after supersession/removal/restart. A lost UR
 requires an explicit new resume request, not replay of its durable receipt. No
 client should automatically open URLs on reconnection or another client's action.
 
-**Feasibility blocker AUTH-1:** current `portalRuntime.authenticate` invokes
-`StartLoginInteractive`; its watcher emits the next BrowseToURL while pending.
-Existing `TestAuthenticateEmitsTransientURLFromFreshNotification` proves fake
-notification delivery, not that Tailscale generated a new URL. Pinned
-[Tailscale v1.102.0 StartLoginInteractiveAs](https://github.com/tailscale/tailscale/blob/v1.102.0/ipn/ipnlocal/local.go#L4314-L4356)
-can reuse its cached valid auth URL for an already-running login. Therefore the
-current adapter does **not** establish the approved fresh-URL contract. A fresh
-notification alone must not be advertised as fresh credentials.
+**AUTH-1 (revised 15 November 2026):** an explicit resume may deliver the
+current valid URL that Tailscale returns, even when it equals an earlier
+attempt's URL. URL equality alone is not an authentication failure. Portico never
+caches or replays a URL itself: each delivery comes from the runtime for the
+current attempt. Delivery goes only to the explicit requester, never through
+persistence, receipts, snapshots or reconnect history, and no client opens a
+browser automatically on reconnection. Resume preserves the Portal's UUID and
+opaque identity; never use logout, delete state or create a replacement node.
+Callbacks from a superseded lease, removed Portal, rebuilt runtime or earlier
+service run are rejected.
 
-Before shipping enrolment in #103/#104/#105, prove a supported runtime mechanism
-can start a new attempt with a fresh URL while preserving the Portal's opaque
-identity. Do not use logout, delete state or create a replacement node to force
-freshness. Bounded qualification: isolated unenrolled fixture, client A starts
-and disconnects, client B resumes; capture attempt-correlated URLs only in memory,
-assert a newly issued URL, same UUID/state identity, only B receives it, and no
-old callback/snapshot/retry exposes A's URL. Also test service restart between A
-and B. Keep actual credentials out of artifacts; report only redacted outcomes.
-If unsupported, report `authenticationFreshnessUnavailable` and obtain an upstream
-runtime resolution; keep the requirement and blocker, not a silent relaxation.
-The rest of the service can be built independently; enrolment acceptance cannot
-be declared complete until AUTH-1 passes.
+Pinned [Tailscale v1.102.0 StartLoginInteractiveAs](https://github.com/tailscale/tailscale/blob/v1.102.0/ipn/ipnlocal/local.go#L4635-L4666)
+re-sends its cached `authURL` through `popBrowserAuthNowLocked` while that URL is
+less than 6 days 23 hours old, and otherwise starts `cc.Login`. Neither path logs
+out or creates a node, so the existing `portalRuntime.authenticate` and watcher
+are expected to deliver Tailscale's current valid URL; the real-runtime run below
+confirms it. The service adds the fencing above.
+
+Evidence comes in two separate categories:
+
+- **Fake runtime (#103):** service tests drive resume, disconnect, supersession,
+  restart and redaction with a fake runtime that emits a URL, including an equal
+  one. They prove routing, fencing and that nothing stores the URL, not
+  Tailscale's behaviour.
+- **Real runtime (#103, opt-in):** use an isolated unenrolled tsnet node. Client
+  A resumes and disconnects, client B resumes, the service restarts, and B
+  resumes again. Assert that only B receives an HTTPS `*.tailscale.com` URL,
+  nothing else exposes it, the UUID and identity directory are unchanged, and no
+  logout or state deletion happens. Keep
+  credentials out of artifacts and report only redacted outcomes.
+
+Enrolment acceptance cannot be declared complete until both categories pass.
+Actual enrolled-tailnet continuity stays with the first milestone below.
 
 ## Ownership migration and recovery
 
@@ -411,7 +433,7 @@ continue through the host OS network, preserving proxy/header/TLS rules of ADR
 
 | Layer / owner | Required evidence before dependent acceptance |
 | --- | --- |
-| Go behaviour, #103 | Fake runtime/store/clock: full command validation, logging gate and durable UI login-offer transitions, ordered edits, atomic commit and failure injection, historical v1–v5 fixtures, duplicate payload/conflict/expiry/capacity, lost Create ack across restart, cross-tailnet rejection, pending cleanup, safe diagnostics; no actual tailnet claim |
+| Go behaviour, #103 | Fake runtime/store/clock: full command validation, logging gate and durable UI login-offer transitions, ordered edits, atomic commit and failure injection, historical v1–v5 fixtures, duplicate payload/conflict/expiry/capacity, lost Create ack across restart, cross-tailnet rejection, pending cleanup, safe diagnostics, fake-runtime enrolment routing/redaction; opt-in real-runtime AUTH-1 run with redacted outcome; no actual tailnet claim |
 | Real IPC, #104 | macOS and Linux OS credential tests (same UID success, other UID/root rejection), mode/symlink/stale socket checks, framing/bounds/version failures, concurrent clients, slow subscriber, disconnect before/after commit, restart recovery with same receipt/UUID; mock credentials alone insufficient |
 | Platform lifecycle, #104/#105 | Isolated installed service: UI exit, service crash/restart, Stopped case, pending cleanup, denied approval, relaunch races, historical upgrade failure at every migration phase; assert original metadata/identity byte preservation before commit and fail-closed authoritative-state corruption |
 | Client, #105 | Fake service: correct UUID/action, revision conflict, pending/lost ack persistence and same-ID retry, expiry uncertainty, stale/disconnected hints, local effects once, login-offer commit-before-native-registration and failed-save behaviour, new explicit enrolment after reconnect; retained UI scenarios via VM only |
@@ -427,7 +449,7 @@ manual real-tailnet run record original stable Tailscale node ID, Assigned Name,
 private HTTPS response and destination reachability, then verify the same node
 and HTTPS after UI exit/service restart. Report conditions and redacted results,
 not credentials or opaque state contents. No timing or real-node continuity is
-claimed by #102. Fresh enrolment has the separate AUTH-1 gate.
+claimed by #102. Enrolment resumption has the separate AUTH-1 gate.
 
 | Current location | Later migration responsibility |
 | --- | --- |
@@ -444,6 +466,6 @@ claimed by #102. Fresh enrolment has the separate AUTH-1 gate.
 
 Resolved here: command/observation/retry semantics, platform privilege boundary,
 coverage allocation, migration phases and downgrade limits. Still unproved:
-AUTH-1 fresh enrolment, MIG-1 legacy exclusion, actual installed platform lifecycle,
+AUTH-1 enrolment resumption, MIG-1 legacy exclusion, actual installed platform lifecycle,
 packaged artifacts and real-tailnet continuity. They are downstream acceptance
 gates, not grounds to relabel implementation ready merely because docs merge.
