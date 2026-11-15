@@ -7,9 +7,10 @@ against `6266f94579664ec860151bafc33f9985ca5352e9`.
 Revisions: on 15 November 2026 [#103's approved decision revision](https://github.com/chrisbanes/portico/issues/103#approved-decision-revision--15-november-2026)
 replaced the Enrolment row's fresh-URL requirement with the revised AUTH-1 in the
 [service contract](local-service-contract.md#interrupted-enrolment-and-transient-authentication).
-The map #102 approved at
+The runtime-test note and the blocker line are reworded to match; every other row
+and rule is unchanged. The map #102 approved at
 [`2509e2e`](https://github.com/chrisbanes/portico/blob/2509e2eca9d27c2513b35c8c55d1bb43227bebbf/docs/ui-coverage-migration.md)
-stays as history; every other row is unchanged.
+stays as history.
 
 Baseline: **22 XCTest methods** in `PorticoUITests/PorticoUITests.swift`.
 Several methods launch multiple scenario variants; 22 is not a count of all
@@ -111,7 +112,7 @@ These are source references, not claims of replacement completion:
   `LaunchAtLoginTests`, `SmokeLaunchConfigurationTests`: redaction, probes, variant
   isolation, UI startup and isolated root admission.
 - `helper/internal/portal/*_test.go`: proxy/header/TLS contracts, reconciliation,
-  listener/shutdown ownership, auth URL **notification** delivery and cancellation.
+  listener/shutdown ownership, auth URL notification delivery and cancellation.
   `helper/internal/discovery/*_test.go`: privacy/deduplication/probing/bounds.
   These remain valuable runtime tests; none proves what Tailscale returns on an
   explicit resume, which needs the real-runtime AUTH-1 run.

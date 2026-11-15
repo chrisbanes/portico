@@ -49,4 +49,6 @@ waive either gate or claim they are already solved.
 - **15 November 2026:** [#103's approved decision revision](https://github.com/chrisbanes/portico/issues/103#approved-decision-revision--15-november-2026)
   revised AUTH-1. An explicit resume may receive Tailscale's current valid URL;
   a newly issued URL is no longer required. This ADR originally named the gate
-  "fresh enrolment URL generation"; the decision is otherwise unchanged.
+  "fresh enrolment URL generation"; the decision is otherwise unchanged. The
+  [original text](https://github.com/chrisbanes/portico/blob/2509e2eca9d27c2513b35c8c55d1bb43227bebbf/docs/adr/0009-local-go-management-service.md)
+  stays as history.

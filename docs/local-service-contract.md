@@ -290,7 +290,8 @@ Pinned [Tailscale v1.102.0 StartLoginInteractiveAs](https://github.com/tailscale
 re-sends its cached `authURL` through `popBrowserAuthNowLocked` while that URL is
 less than 6 days 23 hours old, and otherwise starts `cc.Login`. Neither path logs
 out or creates a node, so the existing `portalRuntime.authenticate` and watcher
-deliver Tailscale's current valid URL. The service adds the fencing above.
+are expected to deliver Tailscale's current valid URL; the real-runtime run below
+confirms it. The service adds the fencing above.
 
 Evidence comes in two separate categories:
 
@@ -298,10 +299,11 @@ Evidence comes in two separate categories:
   restart and redaction with a fake runtime that emits a URL, including an equal
   one. They prove routing, fencing and that nothing stores the URL, not
   Tailscale's behaviour.
-- **Real runtime (#103, opt-in):** an isolated unenrolled tsnet node; client A
-  resumes and disconnects, client B resumes, the service restarts, and B resumes
-  again. Assert that only B receives an HTTPS URL, the UUID and identity
-  directory are unchanged, and no logout or state deletion happens. Keep
+- **Real runtime (#103, opt-in):** use an isolated unenrolled tsnet node. Client
+  A resumes and disconnects, client B resumes, the service restarts, and B
+  resumes again. Assert that only B receives an HTTPS `*.tailscale.com` URL,
+  nothing else exposes it, the UUID and identity directory are unchanged, and no
+  logout or state deletion happens. Keep
   credentials out of artifacts and report only redacted outcomes.
 
 Enrolment acceptance cannot be declared complete until both categories pass.
