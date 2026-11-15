@@ -118,6 +118,9 @@ func renderDiagnostics(snapshot Snapshot) string {
 		fmt.Fprintf(&b, "  Tailscale: %s\n  Facts: %s\n", state, freshness)
 		line(&b, "  Reachability", string(p.Reachability))
 		line(&b, "  Problem", string(p.Problem))
+		if p.RemovalAssignedName != nil {
+			line(&b, "  Removing Tailscale device", *p.RemovalAssignedName)
+		}
 	}
 	report := b.String()
 	if len(report) > maxDiagnosticsSize {

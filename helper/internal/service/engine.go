@@ -420,8 +420,11 @@ type PortalSnapshot struct {
 	Connection   *Connection             `json:"connection,omitempty"`
 	Problem      Problem                 `json:"problem,omitempty"`
 	// Reachability is set for active Local App Portals only.
-	Reachability Reachability               `json:"reachability,omitempty"`
-	Availability map[Operation]Availability `json:"availability"`
+	Reachability Reachability `json:"reachability,omitempty"`
+	// RemovalAssignedName is the node name recorded when removal started,
+	// which may need removing from the tailnet by hand.
+	RemovalAssignedName *string                    `json:"removalAssignedName,omitempty"`
+	Availability        map[Operation]Availability `json:"availability"`
 }
 
 const (
@@ -475,6 +478,9 @@ func (e *Engine) buildSnapshot(state State) Snapshot {
 			DesiredState: p.DesiredState,
 			Lifecycle:    p.Lifecycle,
 			Problem:      e.portalProblem(p),
+		}
+		if p.Lifecycle == installation.LifecyclePendingRemoval {
+			ps.RemovalAssignedName = p.RemovalAssignedName
 		}
 		if entry, ok := e.reach[p.ID]; ok && p.Lifecycle == installation.LifecycleActive {
 			ps.Reachability = entry.state

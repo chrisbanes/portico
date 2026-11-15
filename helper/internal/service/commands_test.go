@@ -1,9 +1,12 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -207,9 +210,20 @@ func TestDurableRemovalAndRetry(t *testing.T) {
 	if p := h.portal(id); p == nil || p.Problem != ProblemRemovalFailed || !p.Availability[OpRetryRemoval].Available {
 		t.Fatalf("failed removal = %+v", p)
 	}
+	assertRemovalName := func() {
+		t.Helper()
+		if p := h.portal(id); p.RemovalAssignedName == nil || *p.RemovalAssignedName != "hermes" {
+			t.Fatalf("removing Portal's recorded device name = %v", p.RemovalAssignedName)
+		}
+		if report, _ := h.session.GetDiagnostics(id); !strings.Contains(report, "Removing Tailscale device: hermes") {
+			t.Fatalf("diagnostics lack the removing device name:\n%s", report)
+		}
+	}
+	assertRemovalName()
 
 	// A restart gives one automatic attempt; the record survives its failure.
 	h.restart()
+	assertRemovalName()
 	if n := len(h.factory.callsNamed("remove:" + id)); n != 2 {
 		t.Fatalf("RemovePortal calls after restart = %d, want 2", n)
 	}
@@ -612,17 +626,64 @@ func TestRejectionEvidenceSurvivesRestartBeforeCleanupFinishes(t *testing.T) {
 }
 
 func TestInvalidRejectionEvidenceFailsClosed(t *testing.T) {
+	const pendingID, activeID = "9f55ca93-d7b3-4eab-a871-310ea576005a", "5ea74329-3144-4ba2-925f-138d14d61fcc"
+	base := func() State {
+		in := installation.New()
+		in.Logging = installation.LoggingEnabled
+		in.Binding = &installation.TailnetBinding{Name: "tailnet-a", MagicDNSSuffix: "one.ts.net"}
+		for _, p := range []struct {
+			id        string
+			lifecycle installation.Lifecycle
+		}{{pendingID, installation.LifecyclePendingTailnetRejection}, {activeID, installation.LifecycleActive}} {
+			in.Portals = append(in.Portals, installation.Portal{ID: p.id, Name: "hermes", Destination: localApp(1), PublicAccess: portal.PublicAccessModePrivate, CreatedAt: testStart, DesiredState: portal.DesiredStateEnabled, Lifecycle: p.lifecycle})
+		}
+		return State{Schema: stateSchema, Installation: in}
+	}
+	valid := base()
+	valid.Rejections = []Rejection{{PortalID: pendingID, AssignedName: "hermes-1", RejectedMagicDNSSuffix: "two.ts.net"}}
+	if _, err := encodeState(valid); err != nil {
+		t.Fatalf("valid evidence refused: %v", err)
+	}
 	for _, tc := range []struct {
 		name string
-		r    Rejection
+		r    []Rejection
 	}{
-		{"unknown Portal", Rejection{PortalID: "9f55ca93-d7b3-4eab-a871-310ea576005a"}},
-		{"unsafe name", Rejection{PortalID: "", AssignedName: "Not A Label"}},
+		{"unknown Portal", []Rejection{{PortalID: "0f55ca93-d7b3-4eab-a871-310ea576005a"}}},
+		{"active Portal", []Rejection{{PortalID: activeID}}},
+		{"unsafe name", []Rejection{{PortalID: pendingID, AssignedName: "Not A Label"}}},
+		{"unsafe suffix", []Rejection{{PortalID: pendingID, RejectedMagicDNSSuffix: "evil.example"}}},
+		{"duplicate", []Rejection{{PortalID: pendingID}, {PortalID: pendingID}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := encodeState(State{Schema: stateSchema, Installation: installation.New(), Rejections: []Rejection{tc.r}}); err == nil {
-				t.Fatal("invalid rejection evidence was accepted")
+			st := base()
+			st.Rejections = tc.r
+			if _, err := encodeState(st); err == nil {
+				t.Fatal("invalid rejection evidence was written")
+			}
+			data, err := json.Marshal(st)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := decodeState(data); !errors.Is(err, ErrUnsupportedState) {
+				t.Fatalf("decodeState() = %v, want unsupportedState", err)
 			}
 		})
+	}
+}
+
+func TestImportedPendingRejectionIsCleanedUpWithoutEvidence(t *testing.T) {
+	h := newHarness(t, func(h *harness) {
+		write(t, filepath.Join(h.dir, "installation-v3.json"), fixture(t, "v3.json"), 0o600)
+	})
+	h.settle()
+	if n := len(h.factory.callsNamed("cleanup:" + hermesID)); n != 1 {
+		t.Fatalf("cleanup calls for the imported rejection = %d", n)
+	}
+	disk := h.disk()
+	if len(disk.Installation.Portals) != 0 || len(disk.Installation.Alerts) != 2 {
+		t.Fatalf("after cleanup: portals %+v, alerts %+v", disk.Installation.Portals, disk.Installation.Alerts)
+	}
+	if a := disk.Installation.Alerts[1]; a.AssignedName != nil || a.RejectedMagicDNSSuffix != nil || a.ExpectedMagicDNSSuffix == nil {
+		t.Fatalf("alert from evidence-less historical rejection = %+v", a)
 	}
 }
