@@ -39,40 +39,43 @@ const (
 
 const AlertCrossTailnetRejection = "crossTailnetRejection"
 
+// The json tags define how the service-state document persists these types.
+// Import never decodes into them: it reads the Swift historical formats field
+// by field.
 type Installation struct {
-	Binding            *TailnetBinding
-	Portals            []Portal
-	Alerts             []Alert
-	Logging            Logging
-	LaunchAtLoginOffer LaunchAtLoginOffer
+	Binding            *TailnetBinding    `json:"tailnetBinding,omitempty"`
+	Portals            []Portal           `json:"portals"`
+	Alerts             []Alert            `json:"alerts"`
+	Logging            Logging            `json:"operationalLogging"`
+	LaunchAtLoginOffer LaunchAtLoginOffer `json:"launchAtLoginOffer"`
 }
 
 type TailnetBinding struct {
-	Name           string
-	MagicDNSSuffix string
+	Name           string `json:"name"`
+	MagicDNSSuffix string `json:"magicDNSSuffix"`
 }
 
 type Portal struct {
 	// ID is a lowercase UUID, matching the runtime's identity directory names.
-	ID           string
-	Name         string
-	Destination  portal.Destination
-	PublicAccess portal.PublicAccessMode
-	CreatedAt    time.Time
-	DesiredState portal.DesiredState
-	Lifecycle    Lifecycle
+	ID           string                  `json:"id"`
+	Name         string                  `json:"name"`
+	Destination  portal.Destination      `json:"destination"`
+	PublicAccess portal.PublicAccessMode `json:"publicAccess"`
+	CreatedAt    time.Time               `json:"createdAt"`
+	DesiredState portal.DesiredState     `json:"desiredState"`
+	Lifecycle    Lifecycle               `json:"lifecycle"`
 	// RemovalAssignedName is only set on a pendingRemoval Portal.
-	RemovalAssignedName *string
+	RemovalAssignedName *string `json:"removalAssignedName,omitempty"`
 }
 
 type Alert struct {
-	ID                     string
-	Kind                   string
-	PortalName             string
-	AssignedName           *string
-	ExpectedMagicDNSSuffix *string
-	RejectedMagicDNSSuffix *string
-	CreatedAt              time.Time
+	ID                     string    `json:"id"`
+	Kind                   string    `json:"kind"`
+	PortalName             string    `json:"portalName"`
+	AssignedName           *string   `json:"assignedName,omitempty"`
+	ExpectedMagicDNSSuffix *string   `json:"expectedMagicDNSSuffix,omitempty"`
+	RejectedMagicDNSSuffix *string   `json:"rejectedMagicDNSSuffix,omitempty"`
+	CreatedAt              time.Time `json:"createdAt"`
 }
 
 // New returns the record of a fresh installation.

@@ -519,7 +519,7 @@ func TestStateDocumentFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = `{"schema":1,"revision":0,"installation":{"Binding":{"Name":"opaque-tailnet-id","MagicDNSSuffix":"one.ts.net"},"Portals":[{"ID":"9f55ca93-d7b3-4eab-a871-310ea576005a","Name":"hermes","Destination":{"kind":"remoteApp","scheme":"https","host":"app.example.com","port":8443},"PublicAccess":"private","CreatedAt":"2026-08-06T07:06:40Z","DesiredState":"stopped","Lifecycle":"pendingRemoval","RemovalAssignedName":"hermes-1"}],"Alerts":[{"ID":"1f93e456-69ec-445a-8374-d7fc5558d0c7","Kind":"crossTailnetRejection","PortalName":"hermes","AssignedName":"hermes-1","ExpectedMagicDNSSuffix":"one.ts.net","RejectedMagicDNSSuffix":"two.ts.net","CreatedAt":"2026-08-06T07:08:20Z"}],"Logging":"disabled","LaunchAtLoginOffer":"accepted"},"migration":{"source":"installation-v4.json","sourceVersion":4}}`
+	const want = `{"schema":1,"revision":0,"installation":{"tailnetBinding":{"name":"opaque-tailnet-id","magicDNSSuffix":"one.ts.net"},"portals":[{"id":"9f55ca93-d7b3-4eab-a871-310ea576005a","name":"hermes","destination":{"kind":"remoteApp","scheme":"https","host":"app.example.com","port":8443},"publicAccess":"private","createdAt":"2026-08-06T07:06:40Z","desiredState":"stopped","lifecycle":"pendingRemoval","removalAssignedName":"hermes-1"}],"alerts":[{"id":"1f93e456-69ec-445a-8374-d7fc5558d0c7","kind":"crossTailnetRejection","portalName":"hermes","assignedName":"hermes-1","expectedMagicDNSSuffix":"one.ts.net","rejectedMagicDNSSuffix":"two.ts.net","createdAt":"2026-08-06T07:08:20Z"}],"operationalLogging":"disabled","launchAtLoginOffer":"accepted"},"migration":{"source":"installation-v4.json","sourceVersion":4}}`
 	if string(data) != want {
 		t.Fatalf("state document = %s", data)
 	}
