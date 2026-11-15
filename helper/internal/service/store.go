@@ -1,6 +1,7 @@
 // Package service is the Portal-management authority: it owns an isolated
 // state root, imports the historical installation into a service generation
 // and commits durable intent through one transactional state document.
+// It builds on unix only (flock and file ownership), the macOS and Linux targets.
 package service
 
 import (
@@ -52,6 +53,7 @@ type Migration struct {
 // use; the engine serializes access.
 type Store struct {
 	root       *os.Root
+	rootPath   string
 	lock       *os.File
 	opts       Options
 	generation string
@@ -63,7 +65,11 @@ type Store struct {
 
 // State returns a copy of the committed document.
 func (s *Store) State() State {
-	state, _ := cloneState(s.state)
+	state, err := cloneState(s.state)
+	if err != nil {
+		// The committed state was validated when stored, so this is a bug.
+		panic(err)
+	}
 	return state
 }
 

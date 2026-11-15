@@ -4,6 +4,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"syscall"
@@ -35,6 +36,19 @@ func lockOwner(root *os.Root) (*os.File, error) {
 		return nil, persistenceErr(err)
 	}
 	return file, nil
+}
+
+// checkFreeSpace fails before staging when the filesystem holding root
+// cannot fit need bytes.
+func checkFreeSpace(root string, need int64) error {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(root, &st); err != nil {
+		return persistenceErr(err)
+	}
+	if available := uint64(st.Bavail) * uint64(st.Bsize); available < uint64(need) {
+		return persistenceErr(fmt.Errorf("%d bytes free, %d needed", available, need))
+	}
+	return nil
 }
 
 // checkOwned rejects an entry owned by another user or writable by group or

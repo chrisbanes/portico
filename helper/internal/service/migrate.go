@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
-	"reflect"
 	"regexp"
 	"strings"
 
@@ -29,16 +29,16 @@ const (
 	stagingDir     = "service/staging"
 	identitiesDir  = "tsnet"
 
-	manifestSchema  = 1
-	phaseCommitted  = "committed"
-	stateFileName   = "state.json"
-	identityPattern = `^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`
+	manifestSchema = 1
+	phaseCommitted = "committed"
+	stateFileName  = "state.json"
+
+	// freeSpaceMargin is headroom beyond the copies for the state document
+	// and manifest.
+	freeSpaceMargin = 1 << 20
 )
 
-var (
-	generationIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
-	identityIDPattern   = regexp.MustCompile(identityPattern)
-)
+var generationIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // Phase names a migration boundary passed to Options.Hook.
 type Phase string
@@ -97,7 +97,7 @@ func Open(rootPath string, opts Options) (*Store, error) {
 		root.Close()
 		return nil, err
 	}
-	s := &Store{root: root, lock: lock, opts: opts}
+	s := &Store{root: root, rootPath: rootPath, lock: lock, opts: opts}
 	if err := s.open(); err != nil {
 		s.Close()
 		return nil, err
@@ -106,6 +106,15 @@ func Open(rootPath string, opts Options) (*Store, error) {
 }
 
 func (s *Store) open() error {
+	// os.Root follows symlinks that stay inside the root, so a service
+	// directory linked into the originals would redirect every write there.
+	for _, dir := range []string{serviceDir, generationsDir, checkpointsDir, stagingDir} {
+		if info, err := s.root.Lstat(dir); err == nil && (!info.IsDir() || checkOwned(info) != nil) {
+			return unsafeErr(dir)
+		} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return persistenceErr(err)
+		}
+	}
 	if _, err := s.root.Lstat(manifestFile); err == nil {
 		return s.load()
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -114,7 +123,11 @@ func (s *Store) open() error {
 	// The manifest is the commit point, and generations appear only after it,
 	// so committed data without a manifest is damage, not an interrupted import.
 	for _, dir := range []string{generationsDir, checkpointsDir} {
-		if entries, err := readDir(s.root, dir); err != nil || len(entries) > 0 {
+		entries, err := readDir(s.root, dir)
+		if err != nil {
+			return persistenceErr(err)
+		}
+		if len(entries) > 0 {
 			return unsupportedErr(fmt.Errorf("%s without a manifest", dir))
 		}
 	}
@@ -124,7 +137,7 @@ func (s *Store) open() error {
 	return s.migrate()
 }
 
-func (s *Store) migrate() error {
+func (s *Store) migrate() (err error) {
 	imported, source, err := installation.Import(s.root)
 	if err != nil {
 		var importErr *installation.Error
@@ -142,48 +155,71 @@ func (s *Store) migrate() error {
 	if err != nil {
 		return err
 	}
+	// Hash every original first: this also rejects unsafe entries before
+	// anything is written, and sizes the free-space check.
+	sources := map[string]string{}
+	originals := map[string]map[string]string{}
+	need := int64(len(source.Data)) + freeSpaceMargin
+	if source.File != "" {
+		sources[source.File] = hash(source.Data)
+	}
+	for original, portalID := range identities {
+		sums, size, err := hashTree(s.root, path.Join(identitiesDir, original))
+		if err != nil {
+			return err
+		}
+		originals[original] = sums
+		need += 2 * size // checkpoint and working copy
+		for rel, sum := range sums {
+			sources[path.Join(identitiesDir, portalID, rel)] = sum
+		}
+	}
+	if err := checkFreeSpace(s.rootPath, need); err != nil {
+		return err
+	}
 
 	id, err := newGenerationID()
 	if err != nil {
 		return persistenceErr(err)
 	}
 	staged := path.Join(stagingDir, id)
+	defer func() {
+		// Free the space now, unless the manifest committed this generation
+		// (it is then rolled forward on the next Open). Best effort: the
+		// next Open discards uncommitted staging anyway.
+		if _, statErr := s.root.Lstat(manifestFile); err != nil && errors.Is(statErr, fs.ErrNotExist) {
+			_ = s.root.RemoveAll(staged)
+		}
+	}()
 	generation, checkpoint := path.Join(staged, "generation"), path.Join(staged, "checkpoint")
 	for _, dir := range []string{serviceDir, stagingDir, staged, generation, checkpoint, path.Join(generation, identitiesDir), path.Join(checkpoint, identitiesDir)} {
 		if err := mkdir(s.root, dir); err != nil {
 			return err
 		}
 	}
+	if err := syncDir(s.root, "."); err != nil {
+		return err
+	}
 
 	if err := s.opts.hook(PhaseCopy); err != nil {
 		return err
 	}
-	sources := map[string]string{}
 	if source.File != "" {
-		sources[source.File] = hash(source.Data)
 		if err := writeFileSync(s.root, path.Join(checkpoint, source.File), source.Data); err != nil {
 			return err
 		}
 	}
 	for original, portalID := range identities {
-		from := path.Join(identitiesDir, original)
-		want, err := hashTree(s.root, from)
-		if err != nil {
-			return err
-		}
-		for rel, sum := range want {
-			sources[path.Join(identitiesDir, portalID, rel)] = sum
-		}
 		copies := []string{path.Join(checkpoint, identitiesDir, portalID), path.Join(generation, identitiesDir, portalID)}
-		if err := copyTree(s.root, from, copies); err != nil {
+		if err := copyTree(s.root, path.Join(identitiesDir, original), copies); err != nil {
 			return err
 		}
 		for _, dir := range copies {
-			got, err := hashTree(s.root, dir)
+			got, _, err := hashTree(s.root, dir)
 			if err != nil {
 				return err
 			}
-			if !reflect.DeepEqual(got, want) {
+			if !maps.Equal(got, originals[original]) {
 				return persistenceErr(fmt.Errorf("identity %s changed while copying", portalID))
 			}
 		}
@@ -252,13 +288,18 @@ func (s *Store) load() error {
 		if err := mkdir(s.root, path.Dir(move[1])); err != nil {
 			return err
 		}
-		if err := s.root.Rename(move[0], move[1]); err != nil {
+		if err := s.root.Rename(move[0], move[1]); errors.Is(err, fs.ErrNotExist) {
 			// The manifest names a generation that exists nowhere.
 			return unsupportedErr(err)
+		} else if err != nil {
+			return persistenceErr(err)
 		}
 		if err := syncDir(s.root, path.Dir(move[1])); err != nil {
 			return err
 		}
+	}
+	if err := syncDir(s.root, serviceDir); err != nil {
+		return err
 	}
 	if err := s.root.RemoveAll(stagingDir); err != nil {
 		return persistenceErr(err)
@@ -304,7 +345,8 @@ func mapIdentities(root *os.Root, in installation.Installation) (map[string]stri
 	seen := map[string]bool{}
 	for _, entry := range entries {
 		id := strings.ToLower(entry.Name())
-		if !identityIDPattern.MatchString(id) || !portals[id] {
+		// Validate proved every Portal ID is a lowercase UUID.
+		if !portals[id] {
 			continue
 		}
 		if seen[id] {
@@ -317,9 +359,11 @@ func mapIdentities(root *os.Root, in installation.Installation) (map[string]stri
 }
 
 // hashTree walks dir without following symlinks and returns each entry's
-// relative path mapped to its SHA-256, or "dir" for a directory.
-func hashTree(root *os.Root, dir string) (map[string]string, error) {
+// relative path mapped to its SHA-256 ("dir" for a directory) and the total
+// file size.
+func hashTree(root *os.Root, dir string) (map[string]string, int64, error) {
 	sums := map[string]string{}
+	var size int64
 	err := walkSafe(root, dir, func(rel string, info fs.FileInfo) error {
 		if info.IsDir() {
 			sums[rel] = "dir"
@@ -330,9 +374,10 @@ func hashTree(root *os.Root, dir string) (map[string]string, error) {
 			return persistenceErr(err)
 		}
 		sums[rel] = hash(data)
+		size += int64(len(data))
 		return nil
 	})
-	return sums, err
+	return sums, size, err
 }
 
 // copyTree copies dir into each destination, as 0700 directories and 0600

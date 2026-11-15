@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -299,6 +300,13 @@ func TestMigrationCrashBoundaries(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, ErrUnsupportedState},
+		{"service directory linked into the originals", func(t *testing.T, dir string) {
+			validSource(t, dir)
+			write(t, filepath.Join(dir, "tsnet", hermesOriginal, "staging", "x"), []byte("original"), 0o600)
+			if err := os.Symlink(filepath.Join("tsnet", hermesOriginal), filepath.Join(dir, serviceDir)); err != nil {
+				t.Fatal(err)
+			}
+		}, ErrUnsupportedState},
 		{"group-writable root", func(t *testing.T, dir string) {
 			validSource(t, dir)
 			if err := os.Chmod(dir, 0o770); err != nil {
@@ -330,10 +338,12 @@ func TestMigrationCrashBoundaries(t *testing.T) {
 				t.Fatalf("Open() error = %v", err)
 			}
 			assertGone(t, dir, manifestFile)
+			if entries, _ := os.ReadDir(filepath.Join(dir, stagingDir)); len(entries) != 0 {
+				t.Fatalf("failed import left staging behind: %v", entries)
+			}
 			if after := originals(t, dir); !reflect.DeepEqual(after, before) {
 				t.Fatalf("originals changed: %v -> %v", before, after)
 			}
-			// Reopening discards the incomplete staging and retries the import.
 			s := mustOpen(t, dir)
 			defer s.Close()
 			assertGone(t, dir, stagingDir)
@@ -345,6 +355,37 @@ func TestMigrationCrashBoundaries(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("crash leftovers in staging are discarded before the retry", func(t *testing.T) {
+		dir := t.TempDir()
+		validSource(t, dir)
+		write(t, filepath.Join(dir, stagingDir, "0123456789abcdef0123456789abcdef", "generation", "state.json"), []byte("partial"), 0o600)
+		s, err := Open(dir, Options{Hook: func(p Phase) error {
+			if entries, _ := os.ReadDir(filepath.Join(dir, stagingDir)); p == PhaseCopy && len(entries) != 1 {
+				return errors.New("stale staging survived until the copy")
+			}
+			return nil
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Close()
+	})
+
+	t.Run("identity changed during the copy is not committed", func(t *testing.T) {
+		dir := t.TempDir()
+		validSource(t, dir)
+		_, err := Open(dir, Options{Hook: func(p Phase) error {
+			if p == PhaseCopy {
+				write(t, filepath.Join(dir, "tsnet", hermesOriginal, "tailscaled.state"), []byte("rotated-key"), 0o600)
+			}
+			return nil
+		}})
+		if !errors.Is(err, ErrPersistenceUnavailable) || !strings.Contains(err.Error(), "changed while copying") {
+			t.Fatalf("Open() error = %v", err)
+		}
+		assertGone(t, dir, manifestFile)
+	})
 
 	t.Run("crash after manifest rolls the committed generation forward", func(t *testing.T) {
 		dir := t.TempDir()
@@ -454,4 +495,27 @@ func TestOwnershipBusy(t *testing.T) {
 	}
 	first.Close()
 	mustOpen(t, dir).Close()
+}
+
+func TestFreeSpaceCheckRejectsAnImpossibleCopy(t *testing.T) {
+	if err := checkFreeSpace(t.TempDir(), math.MaxInt64); !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("checkFreeSpace() error = %v", err)
+	}
+}
+
+// TestStateDocumentFormat pins the schema-v1 bytes: the document is decoded
+// strictly, so an unnoticed field rename would make committed state unreadable.
+func TestStateDocumentFormat(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "installation-v4.json"), fixture(t, "v4-remote-app.json"), 0o600)
+	s := mustOpen(t, dir)
+	defer s.Close()
+	data, err := os.ReadFile(filepath.Join(dir, s.generation, stateFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"schema":1,"revision":0,"installation":{"Binding":{"Name":"opaque-tailnet-id","MagicDNSSuffix":"one.ts.net"},"Portals":[{"ID":"9f55ca93-d7b3-4eab-a871-310ea576005a","Name":"hermes","Destination":{"kind":"remoteApp","scheme":"https","host":"app.example.com","port":8443},"PublicAccess":"private","CreatedAt":"2026-08-06T07:06:40Z","DesiredState":"stopped","Lifecycle":"pendingRemoval","RemovalAssignedName":"hermes-1"}],"Alerts":[{"ID":"1f93e456-69ec-445a-8374-d7fc5558d0c7","Kind":"crossTailnetRejection","PortalName":"hermes","AssignedName":"hermes-1","ExpectedMagicDNSSuffix":"one.ts.net","RejectedMagicDNSSuffix":"two.ts.net","CreatedAt":"2026-08-06T07:08:20Z"}],"Logging":"disabled","LaunchAtLoginOffer":"accepted"},"migration":{"source":"installation-v4.json","sourceVersion":4}}`
+	if string(data) != want {
+		t.Fatalf("state document = %s", data)
+	}
 }
