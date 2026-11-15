@@ -13,6 +13,7 @@ import (
 	"maps"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -84,6 +85,10 @@ type manifest struct {
 // MIG-1, excluding older app and helper writers, is not implemented here; it
 // is owned by #104/#105, so callers must pass an isolated root until then.
 func Open(rootPath string, opts Options) (*Store, error) {
+	rootPath, err := filepath.Abs(rootPath)
+	if err != nil {
+		return nil, persistenceErr(err)
+	}
 	root, err := os.OpenRoot(rootPath)
 	if err != nil {
 		return nil, persistenceErr(err)
@@ -102,6 +107,7 @@ func Open(rootPath string, opts Options) (*Store, error) {
 		s.Close()
 		return nil, err
 	}
+	s.identityRoot = filepath.Join(rootPath, filepath.FromSlash(s.generation), identitiesDir)
 	return s, nil
 }
 
