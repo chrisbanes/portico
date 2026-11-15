@@ -1,7 +1,9 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"reflect"
@@ -163,6 +165,74 @@ func TestInterruptedSetIsNeverPresented(t *testing.T) {
 			t.Fatalf("complete=%v: presented %d snapshots, want %d", complete, len(presented), want)
 		}
 	}
+}
+
+// TestCallsHonourTheirContextWhileTheServerStopsReading: a server that
+// stops reading cannot hold a call, or the calls queued behind it, past
+// their own deadlines.
+func TestCallsHonourTheirContextWhileTheServerStopsReading(t *testing.T) {
+	client, server := socketPair(t)
+	go func() {
+		if _, err := ipc.ReadFrame(server, ipc.MaxFrame); err != nil {
+			return
+		}
+		_ = ipc.WriteFrame(server, []byte(`{"type":"hello","version":1,"epoch":"e","capabilities":{"automaticDiscovery":"unavailable"}}`))
+		// Then never read again.
+	}()
+	c, err := newClient(t.Context(), client, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	big := map[string]string{"name": strings.Repeat("x", 512<<10)}
+	call := func(timeout time.Duration, m *Mutation) chan error {
+		result := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(t.Context(), timeout)
+			defer cancel()
+			result <- c.Call(ctx, "createPortal", m, big, nil)
+		}()
+		return result
+	}
+	// The mutation's write stalls; the read queued behind it keeps its own
+	// deadline, and the stalled mutation ends at its deadline as uncertain.
+	start := time.Now()
+	stalled := call(2*time.Second, &Mutation{RequestID: newUUID(), IssuedAt: time.Now()})
+	waitFor(t, "the mutation to hold the write slot", func() bool { return len(c.writeSlot) == 1 })
+	queued := call(100*time.Millisecond, nil)
+	for _, want := range []struct {
+		name   string
+		result chan error
+		err    error
+		by     time.Duration
+	}{{"queued read", queued, context.DeadlineExceeded, time.Second}, {"stalled mutation", stalled, ErrUncertain, 4 * time.Second}} {
+		select {
+		case err := <-want.result:
+			if !errors.Is(err, want.err) || !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("%s: Call = %v, want %v at its deadline", want.name, err, want.err)
+			}
+			if elapsed := time.Since(start); elapsed > want.by {
+				t.Errorf("%s returned after %v", want.name, elapsed)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s outlived its deadline behind a stalled write", want.name)
+		}
+	}
+}
+
+// TestEndedContextNeverClosesAHealthyConnection: a call whose ctx has
+// already ended sends nothing and leaves the connection usable.
+func TestEndedContextNeverClosesAHealthyConnection(t *testing.T) {
+	h := newHarness(t)
+	c := h.dial()
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+	for range 500 {
+		if err := c.Call(ended, "getSnapshot", nil, nil, nil); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Call = %v, want cancelled", err)
+		}
+	}
+	snapshot(t, c)
 }
 
 func TestCloseDoesNotWaitForUndrainedChannels(t *testing.T) {

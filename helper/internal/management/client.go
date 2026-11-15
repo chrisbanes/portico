@@ -32,7 +32,9 @@ type Client struct {
 	// record, for tests, sees every frame the client reads.
 	record func([]byte)
 
-	writeMu sync.Mutex
+	// writeSlot admits one writer at a time; unlike a mutex, waiting for it
+	// honours the caller's context.
+	writeSlot chan struct{}
 
 	mu      sync.Mutex
 	pending map[string]chan clientFrame
@@ -94,6 +96,7 @@ func newClient(ctx context.Context, conn *net.UnixConn, record func([]byte)) (*C
 		enrolment: make(chan service.EnrolmentEvent, 16),
 		done:      make(chan struct{}),
 		closing:   make(chan struct{}),
+		writeSlot: make(chan struct{}, 1),
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
@@ -233,10 +236,18 @@ func (c *Client) Call(ctx context.Context, method string, mutation *Mutation, pa
 		delete(c.pending, id)
 		c.mu.Unlock()
 	}()
-	c.writeMu.Lock()
-	err = ipc.WriteFrame(c.conn, payload)
-	c.writeMu.Unlock()
-	if err != nil {
+	if err := c.write(ctx, payload); err != nil {
+		switch {
+		case errors.Is(err, errNotSent) && ctx.Err() != nil:
+			return ctx.Err()
+		case errors.Is(err, errNotSent):
+			return net.ErrClosed
+		case mutation != nil && ctx.Err() != nil:
+			// Part of the frame may have reached the service.
+			return errors.Join(ErrUncertain, ctx.Err())
+		case ctx.Err() != nil:
+			return ctx.Err()
+		}
 		return c.lost(mutation)
 	}
 	select {
@@ -256,6 +267,44 @@ func (c *Client) Call(ctx context.Context, method string, mutation *Mutation, pa
 			return c.lost(mutation)
 		}
 	}
+}
+
+var errNotSent = errors.New("management: call not sent")
+
+// write sends one frame, giving up when ctx ends. A write that ctx cuts
+// part-way leaves the stream unusable, so it closes the connection.
+func (c *Client) write(ctx context.Context, payload []byte) error {
+	select {
+	case c.writeSlot <- struct{}{}:
+	case <-ctx.Done():
+		return errNotSent
+	case <-c.done:
+		return errNotSent
+	}
+	defer func() { <-c.writeSlot }()
+	// select may take the free slot for an already ended ctx; sending then
+	// would race the cut and could close a healthy connection.
+	if ctx.Err() != nil {
+		return errNotSent
+	}
+	cut := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = c.conn.SetWriteDeadline(time.Now())
+		close(cut)
+	})
+	err := ipc.WriteFrame(c.conn, payload)
+	if !stop() {
+		<-cut
+		if err == nil {
+			// The frame went out before the deadline landed; later writers
+			// need it cleared.
+			_ = c.conn.SetWriteDeadline(time.Time{})
+		}
+	}
+	if err != nil {
+		c.conn.Close()
+	}
+	return err
 }
 
 // lost is the error for a call whose connection dropped before its reply.
