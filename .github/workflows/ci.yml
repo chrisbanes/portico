@@ -80,6 +80,16 @@ jobs:
       - name: Test Go helper
         run: go test -race ${{ matrix.packages }}
 
+      # Runs the IPC probe as nobody and as root, and fails if it was skipped.
+      - name: Test IPC peer rejection across users
+        shell: bash
+        env:
+          PORTICO_IPC_CROSS_USER: '1'
+        run: |
+          go test -race -count=1 -v -run '^TestCrossUser' ./internal/ipc/ | tee "$RUNNER_TEMP/cross-user.log"
+          grep -q -- '--- PASS: TestCrossUserPeersAreRejected' "$RUNNER_TEMP/cross-user.log"
+          ! grep -q -- '--- SKIP' "$RUNNER_TEMP/cross-user.log"
+
   # The required "Go" check: passes only when every matrix leg passes.
   go:
     name: Go
