@@ -267,8 +267,13 @@ type Runtime struct {
 	closing             bool
 	stateRoot           string
 	factory             NodeFactory
+	factoryMu           sync.Mutex
 	proxyForDestination func(Destination) (http.Handler, error)
 	portals             map[string]*portalRuntime
+	// lifetime outlives every Reconcile: Portals run on it until they stop or
+	// Close cancels it.
+	lifetime       context.Context
+	cancelLifetime context.CancelFunc
 }
 
 type portalRuntime struct {
@@ -303,14 +308,19 @@ const (
 var errRuntimeClosing = errors.New("runtime is closing")
 
 func NewRuntime(stateRoot string, factory NodeFactory) *Runtime {
+	lifetime, cancelLifetime := context.WithCancel(context.Background())
 	return &Runtime{
 		stateRoot:           stateRoot,
 		factory:             factory,
 		proxyForDestination: newDestinationProxy,
 		portals:             make(map[string]*portalRuntime),
+		lifetime:            lifetime,
+		cancelLifetime:      cancelLifetime,
 	}
 }
 
+// Reconcile converges the Portals on configs. ctx bounds only its waits; the
+// Portals it starts run on the Runtime's lifetime until they stop or Close.
 func (r *Runtime) Reconcile(ctx context.Context, configs []Config, emit func(Event)) ([]ReconcileEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -346,12 +356,25 @@ func (r *Runtime) Reconcile(ctx context.Context, configs []Config, emit func(Eve
 	r.mu.Unlock()
 	sort.Strings(portalIDs)
 
-	entries := make([]ReconcileEntry, 0, len(portalIDs))
-	for _, portalID := range portalIDs {
-		config, included := desired[portalID]
-		outcome := r.reconcilePortal(ctx, portalID, config, included, emit)
-		entries = append(entries, ReconcileEntry{PortalID: portalID, Outcome: outcome})
+	// Each Portal converges on its own goroutine within ctx, so a hung Portal
+	// cannot use up the time of the others. emit is called by one Portal at a
+	// time within this pass; Portals started by other passes may call it
+	// concurrently, as watchers always could.
+	var emitMu sync.Mutex
+	serialEmit := func(event Event) {
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		emit(event)
 	}
+	entries := make([]ReconcileEntry, len(portalIDs))
+	var group sync.WaitGroup
+	for i, portalID := range portalIDs {
+		group.Go(func() {
+			config, included := desired[portalID]
+			entries[i] = ReconcileEntry{PortalID: portalID, Outcome: r.reconcilePortal(ctx, portalID, config, included, serialEmit)}
+		})
+	}
+	group.Wait()
 	return entries, nil
 }
 
@@ -387,8 +410,8 @@ func (r *Runtime) reconcilePortal(
 				portal.release()
 				return OutcomeStartFailed
 			}
-			node := r.factory(filepath.Join(r.stateRoot, config.ID), config.Name)
-			events, err := portal.start(ctx, config, node, emit)
+			node := r.newNode(config)
+			events, err := portal.start(ctx, r.lifetime, config, node, emit)
 			if err != nil {
 				_ = r.closeAndRemoveHeld(ctx, portalID, portal)
 				for _, event := range events {
@@ -428,6 +451,14 @@ func (r *Runtime) reconcilePortal(
 			return OutcomeStartFailed
 		}
 	}
+}
+
+// newNode calls the factory one Portal at a time: a NodeFactory need not be
+// safe for concurrent use.
+func (r *Runtime) newNode(config Config) Node {
+	r.factoryMu.Lock()
+	defer r.factoryMu.Unlock()
+	return r.factory(filepath.Join(r.stateRoot, config.ID), config.Name)
 }
 
 func (r *Runtime) portal(portalID string) *portalRuntime {
@@ -646,6 +677,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 		}()
 	}
 	group.Wait()
+	r.cancelLifetime()
 	return errors.Join(errs...)
 }
 
@@ -677,7 +709,7 @@ func (r *portalRuntime) snapshot() (portalPhase, Config, Destination) {
 	return r.phase, *r.config, r.config.Destination
 }
 
-func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emit func(Event)) ([]Event, error) {
+func (r *portalRuntime) start(ctx, lifetime context.Context, config Config, node Node, emit func(Event)) ([]Event, error) {
 	r.mu.Lock()
 	r.config = &config
 	r.node = node
@@ -692,8 +724,8 @@ func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emi
 	if err := ctx.Err(); err != nil {
 		return r.startupFailure(err)
 	}
-	watchContext, cancel := context.WithCancel(ctx)
-	watcher, err := node.Watch(watchContext)
+	watchContext, cancel := context.WithCancel(lifetime)
+	watcher, err := watchWithin(ctx, watchContext, node)
 	if err != nil {
 		cancel()
 		return r.startupFailure(errors.New("watch portal status"))
@@ -707,13 +739,17 @@ func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emi
 	r.mu.Unlock()
 	r.watchDone.Add(1)
 	go r.watch(watchContext, watcher, startupDelivery)
-	status, err := node.Status(watchContext)
+	// Startup waits end with the operation or with the run.
+	waitContext, stopWait := context.WithCancel(ctx)
+	defer stopWait()
+	defer context.AfterFunc(watchContext, stopWait)()
+	status, err := node.Status(waitContext)
 	if err != nil {
 		return r.startupFailure(errors.New("read portal status"))
 	}
 	mapped := mapStatus(status)
 	if mapped.State == StateOnline && mapped.PortalURL != "" {
-		if err := r.ensureProxyLocked(watchContext); err != nil {
+		if err := r.ensureProxyLocked(waitContext, watchContext); err != nil {
 			return r.startupFailure(err)
 		}
 	}
@@ -730,6 +766,32 @@ func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emi
 	r.phase = portalRunning
 	r.mu.Unlock()
 	return []Event{{PortalID: config.ID, Status: &mapped}}, nil
+}
+
+// watchWithin starts node's watcher on run, giving up once ctx ends: tsnet
+// establishes the subscription before returning. A watcher that arrives
+// after that is closed.
+func watchWithin(ctx, run context.Context, node Node) (Watcher, error) {
+	type result struct {
+		watcher Watcher
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		watcher, err := node.Watch(run)
+		done <- result{watcher, err}
+	}()
+	select {
+	case res := <-done:
+		return res.watcher, res.err
+	case <-ctx.Done():
+		go func() {
+			if res := <-done; res.err == nil {
+				_ = res.watcher.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
 }
 
 func (r *portalRuntime) startupFailure(err error) ([]Event, error) {
@@ -848,15 +910,28 @@ func (r *portalRuntime) closeHeld(ctx context.Context, releaseWhenDone bool, onC
 	if node != nil {
 		nodeDone := make(chan error, 1)
 		go func() { nodeDone <- node.Close() }()
+		// A closed node is forgotten at once: a retry must not close it again,
+		// since tsnet fails a second Close.
+		clearNode := func(err error) {
+			if err != nil {
+				return
+			}
+			r.mu.Lock()
+			if r.node == node {
+				r.node = nil
+			}
+			r.mu.Unlock()
+		}
 		select {
 		case err := <-nodeDone:
+			clearNode(err)
 			if err != nil {
 				errs = append(errs, err)
 			}
 		case <-ctx.Done():
 			releaseGate = false
 			go func() {
-				<-nodeDone
+				clearNode(<-nodeDone)
 				r.markFailed()
 				r.release()
 			}()
@@ -977,7 +1052,7 @@ func (r *portalRuntime) statusEvents(ctx context.Context) []Event {
 	}
 	mapped := mapStatus(status)
 	if mapped.State == StateOnline && mapped.PortalURL != "" {
-		if err := r.ensureProxyLocked(ctx); err != nil {
+		if err := r.ensureProxyLocked(ctx, ctx); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -994,7 +1069,8 @@ func (r *portalRuntime) statusEvents(ctx context.Context) []Event {
 	return []Event{{PortalID: config.ID, Status: &mapped}}
 }
 
-func (r *portalRuntime) ensureProxyLocked(ctx context.Context) error {
+// ensureProxyLocked waits on ctx; the proxy it starts serves until run ends.
+func (r *portalRuntime) ensureProxyLocked(ctx, run context.Context) error {
 	if r.proxy != nil {
 		return nil
 	}
@@ -1019,7 +1095,7 @@ func (r *portalRuntime) ensureProxyLocked(ctx context.Context) error {
 	if tlsConfig := r.node.TLSConfig(); tlsConfig != nil {
 		listener = tls.NewListener(listener, tlsConfig)
 	}
-	r.proxy = startProxyServer(ctx, listener, handler, func(err error) {
+	r.proxy = startProxyServer(run, listener, handler, func(err error) {
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			r.fail()
 		}

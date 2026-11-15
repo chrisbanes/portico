@@ -74,9 +74,8 @@ type Engine struct {
 	stop    chan struct{}
 	stopped chan struct{}
 
-	// lifetime ends once Close has tried to close the runtime. portal.Runtime
-	// ties every Portal a Reconcile starts (watcher, run loop, HTTPS proxy) to
-	// the Reconcile context, so reconciles use it, as do reachability probes.
+	// lifetime ends once Close has tried to close the runtime; reachability
+	// probes use it.
 	lifetime       context.Context
 	cancelLifetime context.CancelFunc
 	reachKick      chan struct{}
@@ -155,8 +154,8 @@ func (e *Engine) Close(ctx context.Context) error {
 					err = &Error{Code: CodeRuntimeUnavailable}
 				}
 			}
-			// Portal contexts end only after the runtime has tried to close;
-			// this also releases a reconcile or probe still in flight.
+			// The lifetime ends only after the runtime has tried to close;
+			// this also releases a probe still in flight.
 			e.cancelLifetime()
 			<-e.stopped
 			<-e.reachStopped

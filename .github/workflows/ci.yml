@@ -48,9 +48,20 @@ jobs:
       - name: Run Swift unit and native UI suites
         run: bundle exec fastlane mac test
 
-  go:
-    name: Go
-    runs-on: macos-26
+  go-matrix:
+    name: Go ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            packages: ./...
+          # cmd/portico-helper is darwin-only.
+          - os: ubuntu-24.04
+            packages: ./internal/...
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: '1'
     defaults:
       run:
         working-directory: helper
@@ -63,7 +74,17 @@ jobs:
           cache-dependency-path: helper/go.sum
 
       - name: Build Go helper
+        if: runner.os == 'macOS'
         run: go build ./cmd/portico-helper
 
       - name: Test Go helper
-        run: go test -race ./...
+        run: go test -race ${{ matrix.packages }}
+
+  # The required "Go" check: passes only when every matrix leg passes.
+  go:
+    name: Go
+    needs: go-matrix
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - run: test "${{ needs.go-matrix.result }}" = success
