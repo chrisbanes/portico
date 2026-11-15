@@ -69,9 +69,9 @@ type Engine struct {
 	stop    chan struct{}
 	stopped chan struct{}
 
-	// lifetime ends when Close finishes. portal.Runtime ties every Portal a
-	// Reconcile starts (watcher, run loop, HTTPS proxy) to the Reconcile
-	// context, so reconciles use it, as do reachability probes.
+	// lifetime ends once Close has tried to close the runtime. portal.Runtime
+	// ties every Portal a Reconcile starts (watcher, run loop, HTTPS proxy) to
+	// the Reconcile context, so reconciles use it, as do reachability probes.
 	lifetime       context.Context
 	cancelLifetime context.CancelFunc
 	reachKick      chan struct{}

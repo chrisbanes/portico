@@ -142,8 +142,10 @@ func (e *Engine) converge() {
 	}
 
 	// Not a per-call deadline: Portals started here live on this context.
-	// shortcut: a reconcile that hangs has no bound; portal.Runtime would need
-	// separate operation and lifetime contexts to add one.
+	// shortcut: a Portal close that hangs during stop or removal blocks all
+	// convergence, with no closeFailed reported, until Engine.Close. Fixing it
+	// needs separate operation and lifetime contexts in portal.Runtime; do that
+	// before #104 hosts the engine.
 	entries, err := rt.Reconcile(e.lifetime, activeConfigs(state), e.emitter(gen))
 	outcomes := map[string]portal.ReconcileOutcome{}
 	for _, entry := range entries {

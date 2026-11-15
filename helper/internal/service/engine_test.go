@@ -156,24 +156,13 @@ func (r *fakeRuntime) reconcileCount() int {
 // as a running Portal's watcher would. A Portal whose context ended has no
 // watcher, so it sends nothing.
 func (r *fakeRuntime) emitStatus(id string, status portal.StatusEvent) {
-	r.send(portal.Event{PortalID: id, Status: &status})
-}
-
-func (r *fakeRuntime) send(event portal.Event) {
 	r.mu.Lock()
 	emit, ctx := r.emit, r.portalCtx
 	r.mu.Unlock()
 	if ctx == nil || ctx.Err() != nil {
 		return
 	}
-	emit(event)
-}
-
-// portalsAlive reports whether Portals started by the last Reconcile still run.
-func (r *fakeRuntime) portalsAlive() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.portalCtx != nil && r.portalCtx.Err() == nil
+	emit(portal.Event{PortalID: id, Status: &status})
 }
 
 type call struct {
