@@ -185,6 +185,8 @@ func (l *Listener) serveConn(c *net.UnixConn, handle func(*Conn)) {
 		overflow: make(chan struct{}),
 		done:     make(chan struct{}),
 		written:  make(chan struct{}),
+		last:     make(chan []byte, 1),
+		ending:   make(chan struct{}),
 	}
 	l.conns[conn] = struct{}{}
 	l.mu.Unlock()
@@ -232,6 +234,10 @@ type Conn struct {
 	done         chan struct{}
 	closeOnce    sync.Once
 	written      chan struct{}
+	// last holds CloseAfter's frame; ending refuses Sends once it is set.
+	last     chan []byte
+	ending   chan struct{}
+	lastOnce sync.Once
 }
 
 // Read returns the next frame. The first frame, and the rest of any frame
@@ -288,6 +294,8 @@ func (c *Conn) Send(payload []byte) error {
 	select {
 	case <-c.done:
 		return net.ErrClosed
+	case <-c.ending:
+		return net.ErrClosed
 	default:
 	}
 	select {
@@ -313,6 +321,9 @@ func (c *Conn) write() {
 			return
 		case <-c.done:
 			return
+		case payload := <-c.last:
+			c.writeLast(payload)
+			return
 		case payload := <-c.out:
 			select {
 			case <-c.overflow:
@@ -327,6 +338,42 @@ func (c *Conn) write() {
 		}
 	}
 }
+
+// writeLast writes what is still queued and then CloseAfter's frame, within
+// the deadline CloseAfter set, then closes.
+func (c *Conn) writeLast(payload []byte) {
+	defer c.Close()
+	for {
+		select {
+		case queued := <-c.out:
+			if writeFrame(c.c, queued) != nil {
+				return
+			}
+		default:
+			_ = writeFrame(c.c, payload)
+			return
+		}
+	}
+}
+
+// CloseAfter sends payload after every frame already queued, then closes
+// the connection within FrameTimeout, without waiting for the client. Later
+// Sends fail; a Send racing CloseAfter may be dropped, as by Close.
+func (c *Conn) CloseAfter(payload []byte) {
+	if len(payload) == 0 || len(payload) > c.l.limits.MaxFrame {
+		c.Close()
+		return
+	}
+	c.lastOnce.Do(func() {
+		// The deadline also cuts a write already stalled on this client.
+		_ = c.c.SetWriteDeadline(time.Now().Add(c.l.limits.FrameTimeout))
+		close(c.ending)
+		c.last <- payload
+	})
+}
+
+// MaxFrame is the largest payload Send accepts on this connection.
+func (c *Conn) MaxFrame() int { return c.l.limits.MaxFrame }
 
 func (c *Conn) writeSlowConsumer() {
 	_ = writeError(c.c, CodeSlowConsumer)

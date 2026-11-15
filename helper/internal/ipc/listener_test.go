@@ -392,3 +392,60 @@ func TestSendAfterOverflowFails(t *testing.T) {
 		}
 	}
 }
+
+func TestCloseAfterDeliversQueuedFramesThenClosesPromptly(t *testing.T) {
+	limits := testLimits()
+	s := serve(t, limits, func(c *Conn) {
+		for _, frame := range []string{"one", "two"} {
+			if err := c.Send([]byte(frame)); err != nil {
+				t.Error(err)
+			}
+		}
+		c.CloseAfter([]byte("last"))
+		if err := c.Send([]byte("late")); !errors.Is(err, net.ErrClosed) {
+			t.Errorf("Send after CloseAfter = %v", err)
+		}
+		if c.MaxFrame() != limits.MaxFrame {
+			t.Errorf("MaxFrame = %d", c.MaxFrame())
+		}
+		<-c.Done()
+	})
+	c := s.dial(t)
+	var got []string
+	for {
+		frame, err := ReadFrame(c, MaxFrame)
+		if err != nil {
+			break
+		}
+		got = append(got, string(frame))
+	}
+	if strings.Join(got, ",") != "one,two,last" {
+		t.Fatalf("frames = %q, want one,two,last", got)
+	}
+}
+
+// TestCloseAfterIsBoundedForAClientThatNeverReads: a writer stalled on a
+// large frame does not hold the connection open past FrameTimeout.
+func TestCloseAfterIsBoundedForAClientThatNeverReads(t *testing.T) {
+	limits := testLimits()
+	closed := make(chan time.Duration, 1)
+	s := serve(t, limits, func(c *Conn) {
+		if err := c.Send(bytes.Repeat([]byte("x"), MaxFrame)); err != nil {
+			t.Error(err)
+		}
+		time.Sleep(50 * time.Millisecond) // let the writer stall
+		started := time.Now()
+		c.CloseAfter([]byte("last"))
+		<-c.Done()
+		closed <- time.Since(started)
+	})
+	s.dial(t)
+	select {
+	case elapsed := <-closed:
+		if elapsed > limits.FrameTimeout+time.Second {
+			t.Errorf("closed after %v", elapsed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("CloseAfter waited on a client that never reads")
+	}
+}
