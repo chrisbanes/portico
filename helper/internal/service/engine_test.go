@@ -249,7 +249,8 @@ type fakeFactory struct {
 	// arrived with their deadline already passed.
 	reconcileDelay time.Duration
 	expiredCalls   int
-	// reconcileHangs is how many next Reconciles run out their deadline.
+	// reconcileHangs is how many of the next Reconciles block until their
+	// deadline.
 	reconcileHangs int
 }
 

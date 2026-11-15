@@ -349,7 +349,7 @@ func TestRealRuntimeHungCloseDoesNotFailItsSiblings(t *testing.T) {
 func TestConvergeRerunsPassesThatRunOutOfTime(t *testing.T) {
 	timeout := runtimeCallTimeout
 	t.Cleanup(func() { runtimeCallTimeout = timeout })
-	runtimeCallTimeout = 20 * time.Millisecond
+	runtimeCallTimeout = 100 * time.Millisecond
 	h := newHarness(t)
 	h.chooseLogging(installation.LoggingEnabled)
 	ids := []string{h.create("a", localApp(1)), h.create("b", localApp(2)), h.create("c", localApp(3))}

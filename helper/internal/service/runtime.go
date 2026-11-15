@@ -148,8 +148,8 @@ func (e *Engine) converge() {
 
 	// The deadline bounds only this pass; Portals run until the runtime closes.
 	// A pass that ran out of time may have starved the Portals after a hung
-	// close, so another pass runs; the runtime skips each close still
-	// unproven, so one pass per Portal is enough.
+	// close, so another pass runs; the runtime skips each watcher or node
+	// close still unproven, so one pass per Portal is enough.
 	var entries []portal.ReconcileEntry
 	var err error
 	for range len(state.Installation.Portals) + 1 {
