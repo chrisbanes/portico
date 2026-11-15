@@ -5,6 +5,7 @@ package management
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -91,13 +92,13 @@ type snapshotBegin struct {
 	PageCount int    `json:"pageCount"`
 }
 
-type snapshotPage[P any] struct {
+type snapshotPage struct {
 	Type      string `json:"type"`
 	CallID    string `json:"callID,omitempty"`
 	PageIndex int    `json:"pageIndex"`
 	// Snapshot, on page 0 only, holds the installation fields with no Portals.
 	Snapshot *service.Snapshot `json:"snapshot,omitempty"`
-	Portals  []P               `json:"portals"`
+	Portals  []json.RawMessage `json:"portals"`
 }
 
 type snapshotEnd struct {

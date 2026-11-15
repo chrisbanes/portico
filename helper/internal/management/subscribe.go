@@ -39,17 +39,21 @@ func (c *conn) pump() {
 		case <-ready:
 			snapshots, ready = c.snapshots, nil
 		case s := <-snapshots:
-			frames, err := snapshotFrames(s, "", c.maxFrame)
+			frames, err := snapshotFrames(s, "", c.ic.MaxFrame())
 			if err != nil {
 				c.closeWith(wireError(err), nil)
 				return
 			}
-			// A failed send means the transport is disconnecting the client.
-			if c.send(frames...) != nil {
+			if err := c.send(frames...); err != nil {
+				c.failed(err)
 				return
 			}
 		case event := <-c.events:
-			if c.sendJSON(enrolmentEventFrame(event)) != nil {
+			if c.park(event) {
+				continue
+			}
+			if err := c.sendJSON(enrolmentEventFrame(event)); err != nil {
+				c.failed(err)
 				return
 			}
 		}
@@ -87,7 +91,7 @@ func snapshotFrames(s service.Snapshot, callID string, maxFrame int) ([][]byte, 
 		if len(pages) == maxPages {
 			return nil, tooLarge
 		}
-		page := snapshotPage[json.RawMessage]{Type: "snapshotPage", CallID: callID, PageIndex: len(pages), Portals: []json.RawMessage{}}
+		page := snapshotPage{Type: "snapshotPage", CallID: callID, PageIndex: len(pages), Portals: []json.RawMessage{}}
 		if len(pages) == 0 {
 			page.Snapshot = &head
 		}

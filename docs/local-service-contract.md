@@ -163,7 +163,7 @@ not proof of rejection. `retryable` never instructs a client to allocate a new
 request ID for an uncertain mutation.
 Unauthenticated peers are closed without state/error detail.
 
-### Message shapes (T3)
+### Message shapes
 
 These fill in shapes the rules above leave open; they change none of them.
 `helper/internal/management` implements them.
@@ -184,15 +184,18 @@ These fill in shapes the rules above leave open; they change none of them.
   ending in `Z`, and `expectedRevision` is an integer ≥ 0. Non-mutating methods
   must not carry any of the three. Envelope faults in a parsed call (unknown
   `method`, missing or unexpected envelope member, bad `params`) are reply
-  errors `invalidRequest` with `field` set to that member's name.
+  errors `invalidRequest` with `field` set to that member's name. A `portalID`
+  or `alertID` param that is not a canonical lower-case UUID is
+  `invalidRequest` with `field` `portalID` or `alertID`.
 - **Replies** are `{"type":"reply","callID",...}` with `"result":{...}`, or
-  `"error":{code,field?,portalID?,retryable}`, or `"uncertain":true`. Each call
-  has a 10-second deadline. A mutation past it gets `uncertain`: its outcome
-  is unknown, its engine work continues, and the client recovers it by
-  `getRequestResult` with the same request ID. A read past it gets
-  `runtimeUnavailable` (retryable). A call over the in-flight limits gets
-  `capacityExceeded` (retryable). An internal failure without a contract code
-  is `runtimeUnavailable` (retryable) with no detail.
+  `"error":{code,field?,portalID?,retryable}`, or `"uncertain":true`. `uncertain`
+  extends the rule above that a reply has either `result` or `error`, for
+  timed-out mutations only. Each call has a 10-second deadline. A mutation
+  past it gets `uncertain`: its outcome is unknown, its engine work continues,
+  and the client recovers it by `getRequestResult` with the same request ID.
+  A read past it gets `runtimeUnavailable` (retryable). A call over the
+  in-flight limits gets `capacityExceeded` (retryable). An internal failure
+  without a contract code is `runtimeUnavailable` (retryable) with no detail.
 - **Mutation params:**
 
   | Method | Params |
@@ -238,7 +241,9 @@ These fill in shapes the rules above leave open; they change none of them.
   subscription.
 - **Enrolment events** go only to the connection that called `resumeEnrolment`:
   `{"type":"enrolment","event":"authenticationURL"|"cancelled"|"failed","requestID","portalID","nonce","url"?}`,
-  with `url` only for `authenticationURL`.
+  with `url` only for `authenticationURL`. An event never precedes the reply
+  to the `resumeEnrolment` call that requested it, whether that reply is the
+  receipt, an error or `uncertain`.
 
 ## Durable acceptance, retry and observation
 

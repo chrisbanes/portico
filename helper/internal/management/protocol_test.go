@@ -51,7 +51,6 @@ func TestMalformedInputClosesTheConnection(t *testing.T) {
 		"unknown envelope name": {true, `{"type":"call","callID":"11111111-1111-4111-8111-111111111111","method":"getSnapshot","params":{},"x":1}`},
 	} {
 		t.Run(name, func(t *testing.T) {
-			t.Parallel() // each waits out closeGrace
 			c := h.raw(t)
 			if tc.hello {
 				rawHello(t, c)
@@ -260,4 +259,36 @@ func authenticating(t *testing.T, h *harness, c *Client, id string) {
 		p := findPortal(s, id)
 		return p != nil && p.Availability[service.OpResumeEnrolment].Available
 	})
+}
+
+// TestIdentifierParamsMustBeCanonical keeps arbitrary client strings out of
+// error.portalID: a portalID or alertID that is not a canonical UUID is
+// refused before the engine sees it.
+func TestIdentifierParamsMustBeCanonical(t *testing.T) {
+	h := newHarness(t)
+	c := h.dial()
+	bad := "/tmp/" + strings.ToUpper(newUUID())
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+		field  string
+	}{
+		{"getDiagnostics", map[string]any{"portalID": bad}, "portalID"},
+		{"setDesiredState", map[string]any{"portalID": bad, "state": "stopped"}, "portalID"},
+		{"setDestination", map[string]any{"portalID": bad, "destination": map[string]any{"kind": "localApp", "port": 8080}}, "portalID"},
+		{"removePortal", map[string]any{"portalID": bad, "confirmed": true}, "portalID"},
+		{"retryRemoval", map[string]any{"portalID": bad}, "portalID"},
+		{"resumeEnrolment", map[string]any{"portalID": bad}, "portalID"},
+		{"dismissAlert", map[string]any{"alertID": bad}, "alertID"},
+	} {
+		var m *Mutation
+		if tc.method != "getDiagnostics" {
+			m = newMutation(t, c)
+		}
+		err := c.Call(ctx(t), tc.method, m, tc.params, nil)
+		var e *Error
+		if !errors.As(err, &e) || e.Code != "invalidRequest" || e.Field != tc.field || e.PortalID != "" {
+			t.Errorf("%s = %v, want invalidRequest field %s with no portalID", tc.method, err, tc.field)
+		}
+	}
 }

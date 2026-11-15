@@ -2,6 +2,7 @@ package management
 
 import (
 	"bytes"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -11,7 +12,8 @@ import (
 	"github.com/chrisbanes/portico/helper/internal/service"
 )
 
-const authURL = "https://login.tailscale.com/a/5f0e9c2d7b1a"
+// authURL has characters encoding/json v1 escapes, so a leak in either form is caught.
+const authURL = "https://login.tailscale.com/a/5f0e9c2d7b1a?x=1&y=<2>"
 
 // recorder keeps every frame one client reads.
 type recorder struct {
@@ -122,6 +124,11 @@ func TestNoFrameExposesPathsOrTheURL(t *testing.T) {
 		}
 	}
 	secrets = append(secrets, "management.sock")
+	escaped, _ := json.Marshal(authURL)
+	urlForms := [][]byte{[]byte(authURL), bytes.Trim(escaped, `"`)}
+	if bytes.Equal(urlForms[0], urlForms[1]) {
+		t.Fatal("authURL has nothing for encoding/json to escape")
+	}
 	urls := 0
 	for name, r := range map[string]*recorder{"requester": e.requesterFrames, "other": e.otherFrames, "setup": e.setupFrames} {
 		frames := r.all()
@@ -134,7 +141,7 @@ func TestNoFrameExposesPathsOrTheURL(t *testing.T) {
 					t.Fatalf("a %s frame exposes %q: %s", name, secret, f)
 				}
 			}
-			if bytes.Contains(f, []byte(authURL)) {
+			if bytes.Contains(f, urlForms[0]) || bytes.Contains(f, urlForms[1]) {
 				if name != "requester" || !bytes.Contains(f, []byte(`"type":"enrolment"`)) || !bytes.Contains(f, []byte(`"event":"authenticationURL"`)) {
 					t.Fatalf("a %s frame exposes the URL: %s", name, f)
 				}
@@ -144,5 +151,40 @@ func TestNoFrameExposesPathsOrTheURL(t *testing.T) {
 	}
 	if urls != 1 {
 		t.Fatalf("the URL was delivered %d times, want once", urls)
+	}
+}
+
+// TestResumeEnrolmentReplyPrecedesItsEvent has the login fail at once, so
+// the engine emits the failed event while the call is still replying.
+func TestResumeEnrolmentReplyPrecedesItsEvent(t *testing.T) {
+	h := newHarness(t)
+	setup := h.dial()
+	chooseLogging(t, setup)
+	id := createPortal(t, setup, "web")
+	authenticating(t, h, setup, id)
+	h.factory.set(func(f *fakeFactory) { f.authErr = errBuild })
+	frames := &recorder{}
+	c := h.dialRecording(frames.record)
+	seen := 0
+	for i := range 200 {
+		r := mustMutate(t, c, "resumeEnrolment", service.ResumeEnrolmentParams{PortalID: id})
+		select {
+		case e := <-c.Enrolment():
+			if e.Kind != service.EnrolmentFailed || e.RequestID != r.RequestID {
+				t.Fatalf("iteration %d: event %v for request %s", i, e, r.RequestID)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("iteration %d: no enrolment event", i)
+		}
+		all := frames.all()
+		for _, f := range all[seen:] {
+			if bytes.Contains(f, []byte(r.RequestID)) {
+				if !bytes.Contains(f, []byte(`"type":"reply"`)) {
+					t.Fatalf("iteration %d: %s came before the reply", i, f)
+				}
+				break
+			}
+		}
+		seen = len(all)
 	}
 }

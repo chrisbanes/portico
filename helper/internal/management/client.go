@@ -41,6 +41,10 @@ type Client struct {
 	snapshots chan service.Snapshot
 	enrolment chan service.EnrolmentEvent
 	done      chan struct{}
+	// closing is closed by Close, so readLoop never blocks delivering to a
+	// channel nobody reads.
+	closing   chan struct{}
+	closeOnce sync.Once
 }
 
 // clientFrame is every member a server frame may carry. Unknown members are
@@ -89,6 +93,7 @@ func newClient(ctx context.Context, conn *net.UnixConn, record func([]byte)) (*C
 		snapshots: make(chan service.Snapshot, 1024),
 		enrolment: make(chan service.EnrolmentEvent, 16),
 		done:      make(chan struct{}),
+		closing:   make(chan struct{}),
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
@@ -153,8 +158,8 @@ func (c *Client) readLoop() {
 		case "reply":
 			c.deliver(frame)
 		case "snapshot":
-			if frame.Snapshot != nil {
-				c.snapshots <- *frame.Snapshot
+			if frame.Snapshot != nil && !c.put(*frame.Snapshot) {
+				return
 			}
 		case "snapshotBegin", "snapshotPage", "snapshotEnd":
 			s, ok := sets.feed(frame)
@@ -163,17 +168,31 @@ func (c *Client) readLoop() {
 			case frame.CallID != "":
 				result, _ := json.Marshal(s)
 				c.deliver(clientFrame{Type: "reply", CallID: frame.CallID, Result: result})
-			default:
-				c.snapshots <- s
+			case !c.put(s):
+				return
 			}
 		case "enrolment":
-			c.enrolment <- service.EnrolmentEvent{Kind: service.EnrolmentEventKind(frame.Event), RequestID: frame.RequestID, PortalID: frame.PortalID, Nonce: frame.Nonce, URL: frame.URL}
+			select {
+			case c.enrolment <- service.EnrolmentEvent{Kind: service.EnrolmentEventKind(frame.Event), RequestID: frame.RequestID, PortalID: frame.PortalID, Nonce: frame.Nonce, URL: frame.URL}:
+			case <-c.closing:
+				return
+			}
 		case "error":
 			c.mu.Lock()
 			c.err = frame.Error
 			c.mu.Unlock()
 			return
 		}
+	}
+}
+
+// put delivers a subscription snapshot, or reports false once Close is called.
+func (c *Client) put(s service.Snapshot) bool {
+	select {
+	case c.snapshots <- s:
+		return true
+	case <-c.closing:
+		return false
 	}
 }
 
@@ -189,7 +208,8 @@ func (c *Client) deliver(frame clientFrame) {
 
 // Call makes one call and decodes its result into result, which may be nil.
 // mutation is required for mutating methods and must be nil otherwise.
-// Errors are a reply's *Error, ErrUncertain, or a transport error.
+// Errors are a reply's *Error, ErrUncertain (joined with ctx.Err() when ctx
+// ends a written mutation), ctx.Err(), or a transport error.
 func (c *Client) Call(ctx context.Context, method string, mutation *Mutation, params, result any) error {
 	if params == nil {
 		params = struct{}{}
@@ -223,6 +243,10 @@ func (c *Client) Call(ctx context.Context, method string, mutation *Mutation, pa
 	case r := <-reply:
 		return decodeReply(r, result)
 	case <-ctx.Done():
+		// The frame was written, so a mutation may already be accepted.
+		if mutation != nil {
+			return errors.Join(ErrUncertain, ctx.Err())
+		}
 		return ctx.Err()
 	case <-c.done:
 		select {
@@ -276,6 +300,7 @@ func (c *Client) Err() error {
 }
 
 func (c *Client) Close() error {
+	c.closeOnce.Do(func() { close(c.closing) })
 	err := c.conn.Close()
 	<-c.done
 	return err

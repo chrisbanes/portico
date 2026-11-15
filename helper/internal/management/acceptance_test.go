@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -160,5 +161,21 @@ func TestTimedOutMutationIsUncertainAndRecoverable(t *testing.T) {
 	})
 	if result.Receipt.Operation != "createPortal" || findPortal(snapshot(t, c), result.Receipt.PortalID) == nil {
 		t.Fatalf("recovered receipt %+v does not name the created Portal", result.Receipt)
+	}
+}
+
+// TestMutationWhoseContextEndsIsUncertain ends the caller's context after
+// the frame is written and while the engine is busy with it.
+func TestMutationWhoseContextEndsIsUncertain(t *testing.T) {
+	clock := &slowClock{}
+	h := newHarness(t, func(h *harness) { h.opts.Clock = clock.now })
+	c := h.dial()
+	chooseLogging(t, c)
+	m := newMutation(t, c)
+	clock.armed.Store(true)
+	short, cancel := context.WithTimeout(ctx(t), 100*time.Millisecond)
+	defer cancel()
+	if err := c.Call(short, "createPortal", m, web, nil); !errors.Is(err, ErrUncertain) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("create past the caller's deadline = %v, want ErrUncertain and DeadlineExceeded", err)
 	}
 }

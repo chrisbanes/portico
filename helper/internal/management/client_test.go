@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/chrisbanes/portico/helper/internal/installation"
 	"github.com/chrisbanes/portico/helper/internal/ipc"
@@ -160,6 +161,42 @@ func TestInterruptedSetIsNeverPresented(t *testing.T) {
 		}
 		if want := map[bool]int{false: 0, true: 1}[complete]; len(presented) != want {
 			t.Fatalf("complete=%v: presented %d snapshots, want %d", complete, len(presented), want)
+		}
+	}
+}
+
+func TestCloseDoesNotWaitForUndrainedChannels(t *testing.T) {
+	snapshotFrame, _ := json.Marshal(snapshotFrame{Type: "snapshot", Snapshot: smallSnapshot(0)})
+	eventFrame, _ := json.Marshal(enrolmentFrame{Type: "enrolment", Event: service.EnrolmentFailed, RequestID: newUUID(), PortalID: newUUID(), Nonce: newUUID()})
+	for name, payload := range map[string][]byte{"Snapshots": snapshotFrame, "Enrolment": eventFrame} {
+		client, server := socketPair(t)
+		go func() {
+			if _, err := ipc.ReadFrame(server, ipc.MaxFrame); err != nil {
+				return
+			}
+			_ = ipc.WriteFrame(server, []byte(`{"type":"hello","version":1,"epoch":"e","capabilities":{"automaticDiscovery":"unavailable"}}`))
+			// Until the client closes, so its channel fills and stays full.
+			for ipc.WriteFrame(server, payload) == nil {
+			}
+		}()
+		c, err := newClient(t.Context(), client, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		full := func() bool { return len(c.Snapshots()) == cap(c.Snapshots()) }
+		if name == "Enrolment" {
+			full = func() bool { return len(c.Enrolment()) == cap(c.Enrolment()) }
+		}
+		waitFor(t, name+" full", full)
+		closed := make(chan struct{})
+		go func() {
+			c.Close()
+			close(closed)
+		}()
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("Close hung with %s undrained", name)
 		}
 	}
 }

@@ -150,7 +150,9 @@ func TestSlowConsumerIsDisconnectedWithoutStallingTheEngine(t *testing.T) {
 	go func() {
 		start := time.Now()
 		states := []portal.State{portal.StateConnecting, portal.StateOnline}
-		for i := range 1000 {
+		// Just past both queues: the client must start reading within the
+		// transport's 1 s slowConsumer grace, which runs from overflow.
+		for i := range 2*queueSize + 64 {
 			rt.status(id, states[i%2])
 		}
 		flooded <- time.Since(start)
@@ -173,7 +175,7 @@ func TestSlowConsumerIsDisconnectedWithoutStallingTheEngine(t *testing.T) {
 	select {
 	case elapsed := <-flooded:
 		if elapsed > 5*time.Second {
-			t.Fatalf("1000 publications took %v", elapsed)
+			t.Fatalf("the publications took %v", elapsed)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the engine stalled behind a slow subscriber")
@@ -345,5 +347,22 @@ func TestPagedSetsAreContiguous(t *testing.T) {
 		case f["type"] == "snapshotEnd":
 			open = nil
 		}
+	}
+}
+
+// TestSubscribeReplyPrecedesTheStream holds the reply back after the initial
+// snapshot is queued; that snapshot must still follow the reply.
+func TestSubscribeReplyPrecedesTheStream(t *testing.T) {
+	setVar(t, &afterSubscribe, func() { time.Sleep(50 * time.Millisecond) })
+	h := newHarness(t)
+	r := h.raw(t)
+	rawHello(t, r)
+	call := rawCall("subscribe", map[string]any{})
+	writeJSON(t, r, call)
+	if f := readJSON(t, r); f["type"] != "reply" || f["callID"] != call["callID"] {
+		t.Fatalf("first frame = %v, want the subscribe reply", f["type"])
+	}
+	if f := readJSON(t, r); f["type"] != "snapshot" {
+		t.Fatalf("second frame = %v, want the initial snapshot", f["type"])
 	}
 }

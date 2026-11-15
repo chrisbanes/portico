@@ -25,6 +25,7 @@ type fakeFactory struct {
 	runtimes  []*fakeRuntime
 	buildErr  error
 	removeErr error
+	authErr   error
 }
 
 func (f *fakeFactory) build(string, installation.Logging) (service.Runtime, error) {
@@ -97,6 +98,12 @@ func (r *fakeRuntime) Reconcile(_ context.Context, configs []portal.Config, emit
 }
 
 func (r *fakeRuntime) AuthenticateAttempt(_ context.Context, id, attempt string) error {
+	r.f.mu.Lock()
+	err := r.f.authErr
+	r.f.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.attempts == nil {
@@ -237,7 +244,7 @@ func (h *harness) start() {
 	h.store, h.engine, h.listener, h.served = store, engine, listener, make(chan struct{})
 	go func() {
 		defer close(h.served)
-		if err := Serve(listener, h.limits, engine); err != nil {
+		if err := Serve(listener, engine); err != nil {
 			h.t.Errorf("Serve: %v", err)
 		}
 	}()
