@@ -92,7 +92,7 @@ func (e *Engine) converge() {
 		return
 	}
 	rt, gen := e.runtime, e.runtimeGen
-	replace := rt != nil && e.runtimeLogging != logging
+	replace := rt != nil && (e.closePending || e.runtimeLogging != logging)
 	// Every change that needs runtime work commits a new revision, so an
 	// unchanged revision on the same runtime has nothing to converge.
 	if !replace && rt != nil && e.converged == (convergedAt{state.Revision, gen}) {
@@ -110,8 +110,9 @@ func (e *Engine) converge() {
 		e.mu.Lock()
 		if err != nil {
 			e.failure = runtimeFailureClose
+			e.closePending = true
 		} else {
-			e.runtime, rt = nil, nil
+			e.runtime, rt, e.closePending = nil, nil, false
 			e.markLastKnownLocked()
 		}
 		e.publishLocked()
@@ -140,9 +141,10 @@ func (e *Engine) converge() {
 		e.mu.Unlock()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), runtimeCallTimeout)
-	entries, err := rt.Reconcile(ctx, activeConfigs(state), e.emitter(gen))
-	cancel()
+	// Not a per-call deadline: Portals started here live on this context.
+	// shortcut: a reconcile that hangs has no bound; portal.Runtime would need
+	// separate operation and lifetime contexts to add one.
+	entries, err := rt.Reconcile(e.lifetime, activeConfigs(state), e.emitter(gen))
 	outcomes := map[string]portal.ReconcileOutcome{}
 	for _, entry := range entries {
 		outcomes[strings.ToLower(entry.PortalID)] = entry.Outcome

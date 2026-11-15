@@ -494,6 +494,35 @@ func TestLoggingRuntimeReconfigurationAndFailure(t *testing.T) {
 	})
 }
 
+func TestRevertedLoggingStillRetriesTheFailedClose(t *testing.T) {
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	id := h.create("hermes", localApp(1))
+	old := h.factory.runtime()
+	h.factory.set(func(f *fakeFactory) { f.closeErr = errors.New("still running") })
+	h.chooseLogging(installation.LoggingDisabled)
+	// Reverting the choice must not hand the half-closed runtime back.
+	h.chooseLogging(installation.LoggingEnabled)
+	if got := h.session.GetSnapshot().Service.Runtime; got != runtimeUnavailable {
+		t.Fatalf("runtime after a failed close and a reverted choice = %q", got)
+	}
+	h.factory.set(func(f *fakeFactory) { f.closeErr = nil })
+	if _, err := h.session.RetryRuntime(h.req()); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	if n := len(h.factory.callsNamed("close")); n != 2 {
+		t.Fatalf("close calls = %d, want the failed close retried", n)
+	}
+	rt := h.factory.runtime()
+	if rt == old || rt.logging != installation.LoggingEnabled || h.session.GetSnapshot().Service.Runtime != runtimeRunning {
+		t.Fatal("no fresh runtime replaced the closed one")
+	}
+	if last := rt.lastReconcile(); len(last) != 1 || last[0].ID != id {
+		t.Fatalf("new runtime reconciled %+v", last)
+	}
+}
+
 func TestRealRuntimeFactorySetsLoggingKnobBeforeNewRuntime(t *testing.T) {
 	original := newPortalRuntime
 	defer func() { newPortalRuntime = original }()

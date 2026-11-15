@@ -135,8 +135,7 @@ func (e *Engine) probeReachability() {
 	var wg sync.WaitGroup
 	for id, port := range targets {
 		wg.Go(func() {
-			// Close cancels in-flight probes through e.probeCtx.
-			ctx, cancel := context.WithTimeout(e.probeCtx, reachabilityProbeTimeout)
+			ctx, cancel := context.WithTimeout(e.lifetime, reachabilityProbeTimeout)
 			defer cancel()
 			reachable := e.opts.Prober.Reachable(ctx, port)
 			mu.Lock()

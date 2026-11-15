@@ -52,24 +52,31 @@ type Engine struct {
 	runtimeGen     uint64
 	runtimeLogging installation.Logging
 	failure        runtimeFailure
-	converged      convergedAt
-	live           map[string]Connection
-	problems       map[string]Problem
-	removalFailed  map[string]bool
-	cleanupFailed  map[string]bool
-	evidence       map[string]rejectionEvidence
-	reach          map[string]reachEntry
+	// closePending holds a runtime whose close failed: it must be closed
+	// before anything else uses or replaces it, even if the logging choice
+	// that triggered the close is reverted.
+	closePending  bool
+	converged     convergedAt
+	live          map[string]Connection
+	problems      map[string]Problem
+	removalFailed map[string]bool
+	cleanupFailed map[string]bool
+	evidence      map[string]rejectionEvidence
+	reach         map[string]reachEntry
 
 	kick    chan struct{}
 	syncReq chan chan struct{}
 	stop    chan struct{}
 	stopped chan struct{}
 
-	probeCtx     context.Context
-	cancelProbes context.CancelFunc
-	reachKick    chan struct{}
-	reachSync    chan chan struct{}
-	reachStopped chan struct{}
+	// lifetime ends when Close finishes. portal.Runtime ties every Portal a
+	// Reconcile starts (watcher, run loop, HTTPS proxy) to the Reconcile
+	// context, so reconciles use it, as do reachability probes.
+	lifetime       context.Context
+	cancelLifetime context.CancelFunc
+	reachKick      chan struct{}
+	reachSync      chan chan struct{}
+	reachStopped   chan struct{}
 }
 
 // New starts an engine over an opened store. Enabled Portals are reconciled,
@@ -105,7 +112,7 @@ func New(store *Store, opts EngineOptions) (*Engine, error) {
 		stopped:       make(chan struct{}),
 		closed:        make(chan struct{}),
 	}
-	e.probeCtx, e.cancelProbes = context.WithCancel(context.Background())
+	e.lifetime, e.cancelLifetime = context.WithCancel(context.Background())
 	e.mu.Lock()
 	e.publishLocked()
 	e.mu.Unlock()
@@ -132,7 +139,6 @@ func (e *Engine) Close(ctx context.Context) error {
 			s.subscribers = nil
 		}
 		close(e.stop)
-		e.cancelProbes()
 		go func() {
 			var err error
 			if rt != nil {
@@ -141,6 +147,9 @@ func (e *Engine) Close(ctx context.Context) error {
 					err = &Error{Code: CodeRuntimeUnavailable}
 				}
 			}
+			// Portal contexts end only after the runtime has tried to close;
+			// this also releases a reconcile or probe still in flight.
+			e.cancelLifetime()
 			<-e.stopped
 			<-e.reachStopped
 			e.closeErr = err

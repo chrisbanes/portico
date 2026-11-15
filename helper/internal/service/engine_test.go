@@ -36,7 +36,11 @@ func (c *fakeClock) set(t time.Time) {
 }
 
 // fakeRuntime records every call together with the on-disk state at call
-// time, so tests can prove intent was durable before any side effect.
+// time, so tests can prove intent was durable before any side effect. It
+// models the portal.Runtime lifetime rules the engine depends on: Portals
+// live on the context of the Reconcile that started them, so their events
+// stop when it ends; and Close marks the runtime closing for good, even when
+// it fails, after which Reconcile is refused.
 type fakeRuntime struct {
 	f       *fakeFactory
 	logging installation.Logging
@@ -44,18 +48,27 @@ type fakeRuntime struct {
 	mu         sync.Mutex
 	reconciles [][]portal.Config
 	emit       func(portal.Event)
+	portalCtx  context.Context
+	closing    bool
 	closed     bool
 }
 
-func (r *fakeRuntime) Reconcile(_ context.Context, configs []portal.Config, emit func(portal.Event)) ([]portal.ReconcileEntry, error) {
+var errFakeRuntimeClosing = errors.New("runtime closing")
+
+func (r *fakeRuntime) Reconcile(ctx context.Context, configs []portal.Config, emit func(portal.Event)) ([]portal.ReconcileEntry, error) {
 	r.f.record("reconcile")
 	r.f.mu.Lock()
 	delay := r.f.reconcileDelay
 	r.f.mu.Unlock()
 	time.Sleep(delay)
 	r.mu.Lock()
+	if r.closing {
+		r.mu.Unlock()
+		return nil, errFakeRuntimeClosing
+	}
 	r.reconciles = append(r.reconciles, slices.Clone(configs))
 	r.emit = emit
+	r.portalCtx = ctx
 	r.mu.Unlock()
 	r.f.mu.Lock()
 	defer r.f.mu.Unlock()
@@ -101,6 +114,9 @@ func (r *fakeRuntime) RemovePortal(ctx context.Context, id string) error {
 
 func (r *fakeRuntime) Close(ctx context.Context) error {
 	r.f.record("close")
+	r.mu.Lock()
+	r.closing = true
+	r.mu.Unlock()
 	r.f.mu.Lock()
 	block, err := r.f.closeBlock, r.f.closeErr
 	r.f.mu.Unlock()
@@ -136,12 +152,28 @@ func (r *fakeRuntime) reconcileCount() int {
 	return len(r.reconciles)
 }
 
-// emitStatus sends a status event through the emitter the runtime was given.
+// emitStatus sends a status event through the emitter the runtime was given,
+// as a running Portal's watcher would. A Portal whose context ended has no
+// watcher, so it sends nothing.
 func (r *fakeRuntime) emitStatus(id string, status portal.StatusEvent) {
+	r.send(portal.Event{PortalID: id, Status: &status})
+}
+
+func (r *fakeRuntime) send(event portal.Event) {
 	r.mu.Lock()
-	emit := r.emit
+	emit, ctx := r.emit, r.portalCtx
 	r.mu.Unlock()
-	emit(portal.Event{PortalID: id, Status: &status})
+	if ctx == nil || ctx.Err() != nil {
+		return
+	}
+	emit(event)
+}
+
+// portalsAlive reports whether Portals started by the last Reconcile still run.
+func (r *fakeRuntime) portalsAlive() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.portalCtx != nil && r.portalCtx.Err() == nil
 }
 
 type call struct {
