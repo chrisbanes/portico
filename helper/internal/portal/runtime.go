@@ -874,8 +874,21 @@ func (r *portalRuntime) closeHeld(ctx context.Context, releaseWhenDone bool, onC
 	if node != nil {
 		nodeDone := make(chan error, 1)
 		go func() { nodeDone <- node.Close() }()
+		// A closed node is forgotten at once: a retry must not close it again,
+		// since tsnet fails a second Close.
+		clearNode := func(err error) {
+			if err != nil {
+				return
+			}
+			r.mu.Lock()
+			if r.node == node {
+				r.node = nil
+			}
+			r.mu.Unlock()
+		}
 		select {
 		case err := <-nodeDone:
+			clearNode(err)
 			if err != nil {
 				errs = append(errs, err)
 			}
@@ -883,7 +896,7 @@ func (r *portalRuntime) closeHeld(ctx context.Context, releaseWhenDone bool, onC
 			releaseGate = false
 			r.setCloseUnproven(true)
 			go func() {
-				<-nodeDone
+				clearNode(<-nodeDone)
 				r.markFailed()
 				r.setCloseUnproven(false)
 				r.release()

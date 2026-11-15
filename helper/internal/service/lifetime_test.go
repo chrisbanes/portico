@@ -285,3 +285,60 @@ func TestRealRuntimeHungCloseReportsWithinTheReconcileDeadline(t *testing.T) {
 		})
 	}
 }
+
+// switchableCloseNode is Online; once hang is set, Close blocks until
+// release closes.
+type switchableCloseNode struct {
+	onlineNode
+	hang    atomic.Bool
+	release chan struct{}
+}
+
+func (n *switchableCloseNode) Close() error {
+	if n.hang.Load() {
+		<-n.release
+	}
+	return nil
+}
+
+// TestRealRuntimeHungCloseDoesNotFailItsSiblings: a hung close that uses up
+// a reconcile's deadline does not leave a running Portal sorted after it
+// reported as failed.
+func TestRealRuntimeHungCloseDoesNotFailItsSiblings(t *testing.T) {
+	timeout := runtimeCallTimeout
+	t.Cleanup(func() { runtimeCallTimeout = timeout })
+	runtimeCallTimeout = 100 * time.Millisecond
+	release := make(chan struct{})
+	var mu sync.Mutex
+	nodes := map[string]*switchableCloseNode{}
+	h := newHarness(t, func(h *harness) {
+		h.opts.RuntimeFactory = func(stateRoot string, _ installation.Logging) (Runtime, error) {
+			return portal.NewRuntime(stateRoot, func(_, name string) portal.Node {
+				mu.Lock()
+				defer mu.Unlock()
+				nodes[name] = &switchableCloseNode{release: release}
+				return nodes[name]
+			}), nil
+		}
+	})
+	t.Cleanup(func() { close(release) })
+	h.chooseLogging(installation.LoggingEnabled)
+	ids := map[string]string{"a": h.create("a", localApp(1)), "b": h.create("b", localApp(2))}
+	hung, sibling := "a", "b"
+	if ids["b"] < ids["a"] {
+		hung, sibling = "b", "a"
+	}
+	mu.Lock()
+	nodes[hung].hang.Store(true)
+	mu.Unlock()
+	if _, err := h.session.SetDesiredState(h.req(), SetDesiredStateParams{PortalID: ids[hung], State: portal.DesiredStateStopped}); err != nil {
+		t.Fatal(err)
+	}
+	h.settleWithin(2 * time.Second)
+	if p := h.portal(ids[hung]); p.Problem != ProblemCloseFailed {
+		t.Fatalf("hung Portal problem = %q, want closeFailed", p.Problem)
+	}
+	if p := h.portal(ids[sibling]); p.Problem != "" {
+		t.Fatalf("running sibling problem = %q, want none", p.Problem)
+	}
+}

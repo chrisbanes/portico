@@ -164,13 +164,15 @@ func (*lifecycleNode) Close() error           { return nil }
 func lifecycleStatus() Status { return Status{BackendState: "Running"} }
 
 // hungCloseFactory starts a fresh recording node per call; the first node
-// for hungID blocks in Close until release closes.
+// for hungID blocks in Close, or in its watcher's Close when hangWatcher is
+// set, until release closes.
 type hungCloseFactory struct {
-	mu      sync.Mutex
-	hungID  string
-	release chan struct{}
-	started map[string]int
-	nodes   []*fakeNode
+	mu          sync.Mutex
+	hungID      string
+	hangWatcher bool
+	release     chan struct{}
+	started     map[string]int
+	nodes       []*fakeNode
 }
 
 func newHungCloseFactory(hungID string) *hungCloseFactory {
@@ -185,12 +187,19 @@ func (f *hungCloseFactory) new(dir, _ string) Node {
 	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
 	f.nodes = append(f.nodes, node)
 	if id == f.hungID && f.started[id] == 1 {
+		if f.hangWatcher {
+			watcher := newBlockedCloseWatcher()
+			watcher.releaseClose = f.release
+			node.watcherOverride = watcher
+			return node
+		}
 		return &hungCloseNode{fakeNode: node, release: f.release}
 	}
 	return node
 }
 
-// hungCloseNode blocks in its first Close until release closes.
+// hungCloseNode blocks in its first Close until release closes and, like
+// tsnet, fails every later Close.
 type hungCloseNode struct {
 	*fakeNode
 	release chan struct{}
@@ -198,8 +207,12 @@ type hungCloseNode struct {
 }
 
 func (n *hungCloseNode) Close() error {
-	n.once.Do(func() { <-n.release })
-	return n.fakeNode.Close()
+	err := net.ErrClosed
+	n.once.Do(func() {
+		<-n.release
+		err = n.fakeNode.Close()
+	})
+	return err
 }
 
 func (f *hungCloseFactory) count(id string) int {
@@ -270,33 +283,36 @@ func TestReconcileDeadlineBoundsHungNodeClose(t *testing.T) {
 	}
 }
 
-// TestHungPortalDoesNotStopAnotherPortalConverging: while Portal A's close
-// hangs, Portal B, sorted after it, converges on its next pass.
+// TestHungPortalDoesNotStopAnotherPortalConverging: while Portal A's node or
+// watcher close hangs, Portal B, sorted after it, converges on its next pass.
 func TestHungPortalDoesNotStopAnotherPortalConverging(t *testing.T) {
-	hung, other := secondPortalID, testPortalID // A sorts first
-	factory := newHungCloseFactory(hung)
-	runtime := NewRuntime(t.TempDir(), factory.new)
-	defer func() { _ = runtime.Close(context.Background()) }()
-	defer close(factory.release)
-	a := enabledConfig(hung, "atlas", 8788)
-	if got := reconcileWithin(t, runtime, time.Second, a); got[hung] != OutcomeConverged {
-		t.Fatalf("start A = %v", got)
-	}
-	a.DesiredState = DesiredStateStopped
-	if got := reconcileWithin(t, runtime, 50*time.Millisecond, a); got[hung] != OutcomeCloseFailed {
-		t.Fatalf("hung close of A = %v", got)
-	}
-	b := enabledConfig(other, "hermes", 8787)
-	got := reconcileWithin(t, runtime, 200*time.Millisecond, a, b)
-	if got[other] != OutcomeConverged || got[hung] != OutcomeCloseFailed {
-		t.Fatalf("next pass = %v, want B converged while A's close is unproven", got)
-	}
-	// Re-enabling A is skipped too, so a third Portal still converges.
-	a.DesiredState = DesiredStateEnabled
-	third := enabledConfig("7ea74329-3144-4ba2-925f-138d14d61fcc", "selina", 8789)
-	got = reconcileWithin(t, runtime, 200*time.Millisecond, a, b, third)
-	if got[third.ID] != OutcomeConverged || got[hung] != OutcomeStartFailed || factory.count(hung) != 1 {
-		t.Fatalf("re-enable pass = %v with %d nodes for A, want the third Portal converged", got, factory.count(hung))
+	for _, hangWatcher := range []bool{false, true} {
+		hung, other := secondPortalID, testPortalID // A sorts first
+		factory := newHungCloseFactory(hung)
+		factory.hangWatcher = hangWatcher
+		runtime := NewRuntime(t.TempDir(), factory.new)
+		t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+		t.Cleanup(func() { close(factory.release) })
+		a := enabledConfig(hung, "atlas", 8788)
+		if got := reconcileWithin(t, runtime, time.Second, a); got[hung] != OutcomeConverged {
+			t.Fatalf("start A = %v", got)
+		}
+		a.DesiredState = DesiredStateStopped
+		if got := reconcileWithin(t, runtime, 50*time.Millisecond, a); got[hung] != OutcomeCloseFailed {
+			t.Fatalf("hung close of A (hangWatcher=%v) = %v", hangWatcher, got)
+		}
+		b := enabledConfig(other, "hermes", 8787)
+		got := reconcileWithin(t, runtime, 200*time.Millisecond, a, b)
+		if got[other] != OutcomeConverged || got[hung] != OutcomeCloseFailed {
+			t.Fatalf("next pass = %v, want B converged while A's close is unproven", got)
+		}
+		// Re-enabling A is skipped too, so a third Portal still converges.
+		a.DesiredState = DesiredStateEnabled
+		third := enabledConfig("7ea74329-3144-4ba2-925f-138d14d61fcc", "selina", 8789)
+		got = reconcileWithin(t, runtime, 200*time.Millisecond, a, b, third)
+		if got[third.ID] != OutcomeConverged || got[hung] != OutcomeStartFailed || factory.count(hung) != 1 {
+			t.Fatalf("re-enable pass = %v with %d nodes for A, want the third Portal converged", got, factory.count(hung))
+		}
 	}
 }
 
@@ -342,5 +358,34 @@ func TestRuntimeCloseClosesNodesThenEndsLifetime(t *testing.T) {
 			node.mu.Unlock()
 		}
 		factory.mu.Unlock()
+	}
+}
+
+// TestCloseRetryDoesNotCloseAClosedNodeAgain: after a close fails on the
+// listener but closes the node, a retry finishes without a second
+// Node.Close, which tsnet would fail.
+func TestCloseRetryDoesNotCloseAClosedNodeAgain(t *testing.T) {
+	factory := newFakeFactory()
+	factory.status = Status{BackendState: "Running", DNSName: "hermes.example.ts.net.", CertDomains: []string{"hermes.example.ts.net"}}
+	runtime := NewRuntime(t.TempDir(), factory.New)
+	if err := reconcileOne(runtime, enabledConfig(testPortalID, "hermes", 8787), func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	listener := factory.node.listener
+	setCloseErr := func(err error) {
+		listener.mu.Lock()
+		listener.closeErr = err
+		listener.mu.Unlock()
+	}
+	setCloseErr(errors.New("close failed"))
+	if err := runtime.Close(context.Background()); err == nil {
+		t.Fatal("Close = nil, want the listener failure")
+	}
+	setCloseErr(nil)
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close retry: %v", err)
+	}
+	if calls := factory.node.closeCalls; calls != 1 {
+		t.Fatalf("Node.Close calls = %d, want 1", calls)
 	}
 }

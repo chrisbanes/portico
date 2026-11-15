@@ -147,11 +147,21 @@ func (e *Engine) converge() {
 	}
 
 	// The deadline bounds only this pass; Portals run until the runtime closes.
+	// A pass that used up its deadline on a hung close starved the Portals
+	// after it, so one more pass runs: the runtime skips the unproven close.
 	var entries []portal.ReconcileEntry
-	err := callRuntime(func(ctx context.Context) (err error) {
-		entries, err = rt.Reconcile(ctx, activeConfigs(state), e.emitter(gen))
-		return err
-	})
+	var err error
+	for range 2 {
+		expired := false
+		err = callRuntime(func(ctx context.Context) (err error) {
+			entries, err = rt.Reconcile(ctx, activeConfigs(state), e.emitter(gen))
+			expired = ctx.Err() != nil
+			return err
+		})
+		if !expired {
+			break
+		}
+	}
 	outcomes := map[string]portal.ReconcileOutcome{}
 	for _, entry := range entries {
 		outcomes[strings.ToLower(entry.PortalID)] = entry.Outcome
