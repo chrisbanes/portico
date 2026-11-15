@@ -23,6 +23,8 @@ type Discoverer interface {
 type EngineOptions struct {
 	RuntimeFactory RuntimeFactory
 	Discoverer     Discoverer
+	// Prober checks Local App reachability; it defaults to LoopbackProber.
+	Prober Prober
 	// Clock defaults to time.Now.
 	Clock func() time.Time
 	// LaunchAtLoginOfferCapable is true only for the macOS production service.
@@ -56,11 +58,16 @@ type Engine struct {
 	removalFailed  map[string]bool
 	cleanupFailed  map[string]bool
 	evidence       map[string]rejectionEvidence
+	reach          map[string]reachEntry
 
 	kick    chan struct{}
 	syncReq chan chan struct{}
 	stop    chan struct{}
 	stopped chan struct{}
+
+	reachKick    chan struct{}
+	reachSync    chan chan struct{}
+	reachStopped chan struct{}
 }
 
 // New starts an engine over an opened store. Enabled Portals are reconciled,
@@ -73,6 +80,9 @@ func New(store *Store, opts EngineOptions) (*Engine, error) {
 	if opts.Clock == nil {
 		opts.Clock = time.Now
 	}
+	if opts.Prober == nil {
+		opts.Prober = LoopbackProber{}
+	}
 	e := &Engine{
 		store:         store,
 		opts:          opts,
@@ -83,6 +93,10 @@ func New(store *Store, opts EngineOptions) (*Engine, error) {
 		removalFailed: map[string]bool{},
 		cleanupFailed: map[string]bool{},
 		evidence:      map[string]rejectionEvidence{},
+		reach:         map[string]reachEntry{},
+		reachKick:     make(chan struct{}, 1),
+		reachSync:     make(chan chan struct{}),
+		reachStopped:  make(chan struct{}),
 		kick:          make(chan struct{}, 1),
 		syncReq:       make(chan chan struct{}),
 		stop:          make(chan struct{}),
@@ -93,6 +107,7 @@ func New(store *Store, opts EngineOptions) (*Engine, error) {
 	e.publishLocked()
 	e.mu.Unlock()
 	go e.run()
+	go e.reachLoop()
 	e.wake()
 	return e, nil
 }
@@ -100,7 +115,8 @@ func New(store *Store, opts EngineOptions) (*Engine, error) {
 // Close stops the engine and closes the runtime within ctx's deadline. If the
 // runtime does not close in time the error is returned; the caller must then
 // keep the store (and its ownership lock) open, since replacement is unsafe
-// until the old nodes are proven closed.
+// until the old nodes are proven closed. A failed close is final: the host
+// should exit while still holding the lock, which ends the in-process nodes.
 //
 // Every call reports the same shutdown: a later call waits for the first one
 // to finish rather than reporting success while nodes may still run.
@@ -122,6 +138,7 @@ func (e *Engine) Close(ctx context.Context) error {
 				}
 			}
 			<-e.stopped
+			<-e.reachStopped
 			e.closeErr = err
 			close(e.closed)
 		}()
@@ -383,14 +400,16 @@ type ServiceState struct {
 }
 
 type PortalSnapshot struct {
-	ID           string                     `json:"id"`
-	Name         string                     `json:"name"`
-	Destination  portal.Destination         `json:"destination"`
-	PublicAccess portal.PublicAccessMode    `json:"publicAccess"`
-	DesiredState portal.DesiredState        `json:"desiredState"`
-	Lifecycle    installation.Lifecycle     `json:"lifecycle"`
-	Connection   *Connection                `json:"connection,omitempty"`
-	Problem      Problem                    `json:"problem,omitempty"`
+	ID           string                  `json:"id"`
+	Name         string                  `json:"name"`
+	Destination  portal.Destination      `json:"destination"`
+	PublicAccess portal.PublicAccessMode `json:"publicAccess"`
+	DesiredState portal.DesiredState     `json:"desiredState"`
+	Lifecycle    installation.Lifecycle  `json:"lifecycle"`
+	Connection   *Connection             `json:"connection,omitempty"`
+	Problem      Problem                 `json:"problem,omitempty"`
+	// Reachability is set for active Local App Portals only.
+	Reachability Reachability               `json:"reachability,omitempty"`
 	Availability map[Operation]Availability `json:"availability"`
 }
 
@@ -446,6 +465,9 @@ func (e *Engine) buildSnapshot(state State) Snapshot {
 			Lifecycle:    p.Lifecycle,
 			Problem:      e.portalProblem(p),
 		}
+		if entry, ok := e.reach[p.ID]; ok && p.Lifecycle == installation.LifecycleActive {
+			ps.Reachability = entry.state
+		}
 		if c, ok := e.live[p.ID]; ok && p.Lifecycle == installation.LifecycleActive {
 			c.Addresses = append([]string(nil), c.Addresses...)
 			ps.Connection = &c
@@ -468,6 +490,9 @@ func (e *Engine) portalProblem(p installation.Portal) Problem {
 
 // publishLocked builds the next snapshot and delivers it to subscribers.
 func (e *Engine) publishLocked() {
+	if e.trackReachabilityLocked() {
+		e.wakeReachability()
+	}
 	e.sequence++
 	snapshot := e.buildSnapshot(e.store.state)
 	snapshot.Sequence = e.sequence

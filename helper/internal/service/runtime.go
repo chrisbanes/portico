@@ -24,8 +24,8 @@ type Runtime interface {
 // identity directory, configured for the given logging choice.
 type RuntimeFactory func(stateRoot string, logging installation.Logging) (Runtime, error)
 
-// runtimeCallTimeout bounds each runtime call the engine makes.
-const runtimeCallTimeout = 30 * time.Second
+// runtimeCallTimeout bounds each runtime call the engine makes; tests lower it.
+var runtimeCallTimeout = 30 * time.Second
 
 // runtimeFailure is why no usable runtime exists. Each is recoverable through
 // retryRuntime; persistence and ownership failures are not runtime failures.

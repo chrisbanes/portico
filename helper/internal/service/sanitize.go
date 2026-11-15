@@ -116,6 +116,7 @@ func renderDiagnostics(snapshot Snapshot) string {
 			line(&b, "  MagicDNS suffix", c.MagicDNSSuffix)
 		}
 		fmt.Fprintf(&b, "  Tailscale: %s\n  Facts: %s\n", state, freshness)
+		line(&b, "  Reachability", string(p.Reachability))
 		line(&b, "  Problem", string(p.Problem))
 	}
 	report := b.String()

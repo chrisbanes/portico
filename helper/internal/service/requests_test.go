@@ -174,7 +174,8 @@ func TestReceiptConflictExpiryAndCapacity(t *testing.T) {
 		}
 	})
 	t.Run("capacity rejects new requests but still recovers duplicates", func(t *testing.T) {
-		defer func(limit int) { maxReceipts = limit }(maxReceipts)
+		limit := maxReceipts
+		t.Cleanup(func() { maxReceipts = limit })
 		maxReceipts = 2
 		h := newHarness(t)
 		h.chooseLogging(installation.LoggingEnabled)
@@ -196,7 +197,8 @@ func TestReceiptConflictExpiryAndCapacity(t *testing.T) {
 		}
 	})
 	t.Run("an oversized snapshot is refused before acceptance", func(t *testing.T) {
-		defer func(limit int) { maxStateSize = limit }(maxStateSize)
+		limit := maxStateSize
+		t.Cleanup(func() { maxStateSize = limit })
 		h := newHarness(t)
 		h.chooseLogging(installation.LoggingEnabled)
 		var id string

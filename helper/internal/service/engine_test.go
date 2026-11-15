@@ -49,6 +49,10 @@ type fakeRuntime struct {
 
 func (r *fakeRuntime) Reconcile(_ context.Context, configs []portal.Config, emit func(portal.Event)) ([]portal.ReconcileEntry, error) {
 	r.f.record("reconcile")
+	r.f.mu.Lock()
+	delay := r.f.reconcileDelay
+	r.f.mu.Unlock()
+	time.Sleep(delay)
 	r.mu.Lock()
 	r.reconciles = append(r.reconciles, slices.Clone(configs))
 	r.emit = emit
@@ -76,15 +80,17 @@ func (r *fakeRuntime) Reconcile(_ context.Context, configs []portal.Config, emit
 
 func (r *fakeRuntime) Authenticate(context.Context, string) error { return nil }
 
-func (r *fakeRuntime) CleanupRejectedPortal(_ context.Context, id string) error {
+func (r *fakeRuntime) CleanupRejectedPortal(ctx context.Context, id string) error {
 	r.f.record("cleanup:" + id)
+	r.f.noteCtx(ctx)
 	r.f.mu.Lock()
 	defer r.f.mu.Unlock()
 	return r.f.cleanupErr
 }
 
-func (r *fakeRuntime) RemovePortal(_ context.Context, id string) error {
+func (r *fakeRuntime) RemovePortal(ctx context.Context, id string) error {
 	r.f.record("remove:" + id)
+	r.f.noteCtx(ctx)
 	r.f.mu.Lock()
 	defer r.f.mu.Unlock()
 	if r.f.onRemove != nil {
@@ -99,7 +105,12 @@ func (r *fakeRuntime) Close(ctx context.Context) error {
 	block, err := r.f.closeBlock, r.f.closeErr
 	r.f.mu.Unlock()
 	if block != nil {
-		<-block
+		// Like portal.Runtime.Close, give up when the deadline passes.
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	if err != nil {
 		return err
@@ -153,6 +164,18 @@ type fakeFactory struct {
 	closeBlock   chan struct{}
 	outcomes     map[string]portal.ReconcileOutcome
 	onRemove     func()
+	// reconcileDelay slows Reconcile; expiredCalls counts runtime calls that
+	// arrived with their deadline already passed.
+	reconcileDelay time.Duration
+	expiredCalls   int
+}
+
+func (f *fakeFactory) noteCtx(ctx context.Context) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if ctx.Err() != nil {
+		f.expiredCalls++
+	}
 }
 
 func (f *fakeFactory) build(stateRoot string, logging installation.Logging) (Runtime, error) {
@@ -237,6 +260,7 @@ type harness struct {
 	factory  *fakeFactory
 	opts     EngineOptions
 	storeOpt Options
+	prober   *fakeProber
 	store    *Store
 	engine   *Engine
 	session  *Session
@@ -250,7 +274,8 @@ func newHarness(t *testing.T, configure ...func(h *harness)) *harness {
 	h.factory = &fakeFactory{t: t, diskPath: func() string {
 		return filepath.Join(h.dir, h.store.generation, stateFileName)
 	}, outcomes: map[string]portal.ReconcileOutcome{}}
-	h.opts = EngineOptions{RuntimeFactory: h.factory.build, Clock: h.clock.Now, LaunchAtLoginOfferCapable: true}
+	h.prober = &fakeProber{reachable: map[uint16]bool{}}
+	h.opts = EngineOptions{RuntimeFactory: h.factory.build, Clock: h.clock.Now, LaunchAtLoginOfferCapable: true, Prober: h.prober}
 	for _, c := range configure {
 		c(h)
 	}
@@ -620,15 +645,14 @@ func TestEngineCloseHonoursDeadline(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 2*time.Second {
 		t.Fatalf("Close() = %v after %v, want the deadline", err, time.Since(started))
 	}
-	// A retried Close must not report success while the runtime still runs.
-	retry, cancelRetry := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancelRetry()
-	if err := h.engine.Close(retry); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("second Close() = %v while the runtime is still closing", err)
+	// Ownership stays with the failed engine's store.
+	if _, err := Open(h.dir, Options{}); !errors.Is(err, ErrOwnershipBusy) {
+		t.Fatalf("Open() after a failed close = %v, want ownershipBusy", err)
 	}
+	// A failed close is final: a retry never reports success.
 	h.factory.set(func(f *fakeFactory) { close(f.closeBlock); f.closeBlock = nil })
-	if err := h.engine.Close(context.Background()); err != nil {
-		t.Fatalf("Close() once the runtime closed = %v", err)
+	if err := h.engine.Close(context.Background()); !IsCode(err, CodeRuntimeUnavailable) {
+		t.Fatalf("retried Close() = %v, want runtimeUnavailable", err)
 	}
 	h.store.Close()
 	h.engine = nil
@@ -843,5 +867,29 @@ func TestSubscribeAfterCloseIsIgnored(t *testing.T) {
 	session.Subscribe(func(Snapshot) { called = true })
 	if called {
 		t.Fatal("Subscribe delivered after Engine.Close")
+	}
+}
+
+func TestEachRuntimeCallGetsItsOwnDeadline(t *testing.T) {
+	// Restore after the harness's cleanup has stopped the engine.
+	timeout := runtimeCallTimeout
+	t.Cleanup(func() { runtimeCallTimeout = timeout })
+	runtimeCallTimeout = 100 * time.Millisecond
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	a := h.create("a", localApp(1))
+	b := h.create("b", localApp(2))
+	h.factory.set(func(f *fakeFactory) { f.reconcileDelay = 150 * time.Millisecond })
+	for _, id := range []string{a, b} {
+		if _, err := h.session.RemovePortal(h.req(), RemovePortalParams{PortalID: id, Confirmed: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.settle()
+	h.factory.mu.Lock()
+	expired := h.factory.expiredCalls
+	h.factory.mu.Unlock()
+	if expired != 0 || len(h.factory.callsNamed("remove:"+a))+len(h.factory.callsNamed("remove:"+b)) == 0 {
+		t.Fatalf("%d removal calls arrived after a slow reconcile used up their deadline", expired)
 	}
 }
