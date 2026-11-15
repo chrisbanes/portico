@@ -179,3 +179,46 @@ func TestMutationWhoseContextEndsIsUncertain(t *testing.T) {
 		t.Fatalf("create past the caller's deadline = %v, want ErrUncertain and DeadlineExceeded", err)
 	}
 }
+
+// TestConnectionOutlastsItsDeadlineTimer has the deadline timer still
+// running when the engine returns: the call, and so the connection's
+// handler, must not end before the timer's reply is done.
+func TestConnectionOutlastsItsDeadlineTimer(t *testing.T) {
+	setVar(t, &callTimeout, 200*time.Millisecond)
+	var watching, slow atomic.Bool
+	mutated := make(chan struct{})
+	setVar(t, &afterMutation, func() {
+		if slow.CompareAndSwap(true, false) {
+			close(mutated)
+		}
+	})
+	closed := make(chan struct{})
+	var finished atomic.Bool
+	setVar(t, &afterDeadline, func() {
+		if !watching.CompareAndSwap(true, false) {
+			return
+		}
+		<-mutated
+		select {
+		case <-closed:
+		case <-time.After(time.Second):
+		}
+		finished.Store(true)
+	})
+	clock := &slowClock{}
+	h := newHarness(t, func(h *harness) { h.opts.Clock = clock.now })
+	c := h.dial()
+	chooseLogging(t, c)
+	m := newMutation(t, c)
+	watching.Store(true)
+	slow.Store(true)
+	clock.armed.Store(true)
+	go func() { _ = c.Call(ctx(t), "createPortal", m, web, nil) }()
+	<-mutated
+	h.listener.Close()
+	done := finished.Load()
+	close(closed)
+	if !done {
+		t.Fatal("the connection ended while its deadline timer was still replying")
+	}
+}

@@ -1,7 +1,11 @@
 package management
 
 import (
+	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -15,9 +19,18 @@ import (
 func TestVersionMismatchClosesWithoutReadingCommands(t *testing.T) {
 	h := newHarness(t)
 	c := h.raw(t)
-	writeJSON(t, c, map[string]any{"type": "hello", "version": 2})
-	// A command right behind the hello must never be read.
-	writeJSON(t, c, rawMutation("setOperationalLogging", map[string]any{"logging": "enabled"}, 0))
+	// A command right behind the hello must never be read. One write puts
+	// both in the socket before the server reads, and before it closes.
+	var both bytes.Buffer
+	for _, v := range []any{map[string]any{"type": "hello", "version": 2}, rawMutation("setOperationalLogging", map[string]any{"logging": "enabled"}, 0)} {
+		payload, _ := json.Marshal(v)
+		if err := ipc.WriteFrame(&both, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.Write(both.Bytes()); err != nil {
+		t.Fatal(err)
+	}
 
 	frames := readUntilClosed(t, c)
 	if len(frames) != 1 || frames[0]["type"] != "error" || errorCode(frames[0]) != "incompatibleVersion" {
@@ -289,6 +302,37 @@ func TestIdentifierParamsMustBeCanonical(t *testing.T) {
 		var e *Error
 		if !errors.As(err, &e) || e.Code != "invalidRequest" || e.Field != tc.field || e.PortalID != "" {
 			t.Errorf("%s = %v, want invalidRequest field %s with no portalID", tc.method, err, tc.field)
+		}
+	}
+}
+
+// TestCloseIsBoundedBehindAStalledWrite queues a reply larger than the
+// socket buffers to a client that never reads, then sends a malformed frame.
+// The close must not wait for the client: within FrameTimeout the stalled
+// write is cut, so the final error frame never arrives.
+func TestCloseIsBoundedBehindAStalledWrite(t *testing.T) {
+	h := newHarness(t, func(h *harness) { h.seed = seedPortals(largeInstall) })
+	r := h.raw(t)
+	rawHello(t, r)
+	writeJSON(t, r, rawCall("getSnapshot", map[string]any{}))
+	// The first header shows the paged reply is queued and being written.
+	var header [4]byte
+	if err := r.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := ipc.WriteFrame(r, []byte(`[1]`)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(h.limits.FrameTimeout + 500*time.Millisecond)
+	if _, err := io.ReadFull(r, make([]byte, binary.BigEndian.Uint32(header[:]))); err != nil {
+		return // cut inside the first frame
+	}
+	for _, f := range readUntilClosed(t, r) {
+		if f["type"] == "error" {
+			t.Fatalf("the final %v arrived once the client read: the close waited for it", f)
 		}
 	}
 }

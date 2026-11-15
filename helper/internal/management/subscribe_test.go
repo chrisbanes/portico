@@ -366,3 +366,54 @@ func TestSubscribeReplyPrecedesTheStream(t *testing.T) {
 		t.Fatalf("second frame = %v, want the initial snapshot", f["type"])
 	}
 }
+
+// TestSubscribePastItsDeadlineGetsNoStream completes a subscribe after its
+// deadline answered runtimeUnavailable: the connection closes with an error
+// frame after that reply, and no snapshot follows it.
+func TestSubscribePastItsDeadlineGetsNoStream(t *testing.T) {
+	setVar(t, &callTimeout, 100*time.Millisecond)
+	setVar(t, &afterSubscribe, func() { time.Sleep(300 * time.Millisecond) })
+	h := newHarness(t)
+	r := h.raw(t)
+	rawHello(t, r)
+	call := rawCall("subscribe", map[string]any{})
+	writeJSON(t, r, call)
+	frames := readUntilClosed(t, r)
+	if len(frames) != 2 || frames[0]["type"] != "reply" || frames[0]["callID"] != call["callID"] || errorCode(frames[0]) != "runtimeUnavailable" ||
+		frames[1]["type"] != "error" || errorCode(frames[1]) != "runtimeUnavailable" {
+		t.Fatalf("frames = %v, want the runtimeUnavailable reply then that error", frames)
+	}
+}
+
+// TestTransportOverflowStillSendsSlowConsumer overflows the transport's
+// queue, not this package's, so the pump's own Send fails with
+// slowConsumer. The transport still owes the client that final frame.
+func TestTransportOverflowStillSendsSlowConsumer(t *testing.T) {
+	h := newHarness(t, func(h *harness) {
+		// Snapshots larger than the socket buffers stall the writer at once.
+		h.seed = seedPortals(200)
+		h.limits.OutputQueue = 2
+	})
+	c := h.dial()
+	id := createPortal(t, c, "web")
+	waitFor(t, "the Portal started", func() bool { return h.factory.runtime() != nil && h.factory.runtime().configured(id) })
+
+	blocked := h.raw(t)
+	rawHello(t, blocked)
+	writeJSON(t, blocked, rawCall("subscribe", map[string]any{}))
+	for {
+		if f := readJSON(t, blocked); f["type"] == "snapshot" {
+			break
+		}
+	}
+	rt := h.factory.runtime()
+	states := []portal.State{portal.StateConnecting, portal.StateOnline}
+	for i := range 16 {
+		rt.status(id, states[i%2])
+	}
+	// Read within the transport's 1 s slowConsumer grace.
+	frames := readUntilClosed(t, blocked)
+	if len(frames) == 0 || frames[len(frames)-1]["type"] != "error" || errorCode(frames[len(frames)-1]) != "slowConsumer" {
+		t.Fatalf("%d frames, want them to end with slowConsumer", len(frames))
+	}
+}

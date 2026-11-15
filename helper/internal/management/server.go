@@ -23,6 +23,10 @@ var callTimeout = 10 * time.Second
 // and before the reply is sent.
 var afterMutation func()
 
+// afterDeadline, for tests only, runs in the deadline timer once it has
+// claimed the reply.
+var afterDeadline func()
+
 // afterSubscribe, for tests only, runs once the initial snapshot is queued
 // and before the subscribe reply is sent.
 var afterSubscribe func()
@@ -151,6 +155,8 @@ func decodeParams(raw jsontext.Value, p any) error {
 		PortalID *string `json:"portalID"`
 		AlertID  *string `json:"alertID"`
 	}
+	// Case-insensitive v1 is safe here: the strict Decode above already
+	// refused any member not spelled exactly as p declares it.
 	_ = json.Unmarshal(raw, &ids)
 	switch {
 	case ids.PortalID != nil && !uuidPattern.MatchString(*ids.PortalID):
@@ -334,6 +340,9 @@ func (c *conn) run(id, held string, m method, req service.Request, params jsonte
 		if !replied.CompareAndSwap(false, true) {
 			return
 		}
+		if afterDeadline != nil {
+			afterDeadline()
+		}
 		if m.mutating {
 			payload, _ := json.Marshal(replyFrame{Type: "reply", CallID: id, Uncertain: true})
 			c.sendReply(held, payload)
@@ -348,8 +357,9 @@ func (c *conn) run(id, held string, m method, req service.Request, params jsonte
 	if replied.CompareAndSwap(false, true) {
 		c.reply(id, held, result, err)
 	} else if _, ok := result.(subscribed); ok {
-		// The client was told subscribe failed, so it expects no stream.
-		c.ic.Close()
+		// The client was told subscribe failed, so it expects no stream. The
+		// error frame follows the queued runtimeUnavailable reply.
+		c.closeWith(&Error{Code: ipc.Code(service.CodeRuntimeUnavailable), Retryable: true}, nil)
 	}
 }
 

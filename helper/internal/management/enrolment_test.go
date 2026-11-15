@@ -3,6 +3,7 @@ package management
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -186,5 +187,70 @@ func TestResumeEnrolmentReplyPrecedesItsEvent(t *testing.T) {
 			}
 		}
 		seen = len(all)
+	}
+}
+
+// TestTimedOutResumeEnrolmentReleasesItsEvents times a resumeEnrolment out
+// while its login fails: the failed event must follow the uncertain reply,
+// not stay parked behind a reply that never comes.
+func TestTimedOutResumeEnrolmentReleasesItsEvents(t *testing.T) {
+	setVar(t, &callTimeout, 200*time.Millisecond)
+	clock := &slowClock{}
+	h := newHarness(t, func(h *harness) { h.opts.Clock = clock.now })
+	setup := h.dial()
+	chooseLogging(t, setup)
+	id := createPortal(t, setup, "web")
+	authenticating(t, h, setup, id)
+	h.factory.set(func(f *fakeFactory) { f.authErr = errBuild })
+	frames := &recorder{}
+	c := h.dialRecording(frames.record)
+	m := newMutation(t, c)
+	clock.armed.Store(true)
+	if err := c.Call(ctx(t), "resumeEnrolment", m, service.ResumeEnrolmentParams{PortalID: id}, nil); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("slow resumeEnrolment = %v, want ErrUncertain", err)
+	}
+	select {
+	case e := <-c.Enrolment():
+		if e.Kind != service.EnrolmentFailed || e.RequestID != m.RequestID {
+			t.Fatalf("event %v, want failed for request %s", e, m.RequestID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the failed event stayed parked behind the uncertain reply")
+	}
+	uncertain, event := -1, -1
+	for i, f := range frames.all() {
+		if bytes.Contains(f, []byte(`"uncertain":true`)) {
+			uncertain = i
+		}
+		if bytes.Contains(f, []byte(`"type":"enrolment"`)) && event < 0 {
+			event = i
+		}
+	}
+	if uncertain < 0 || event < uncertain {
+		t.Fatalf("uncertain reply at frame %d, event at frame %d", uncertain, event)
+	}
+}
+
+// TestUnsendableEventClosesTheConnection sends an enrolment event too large
+// for a frame. The stream cannot continue, so the connection must close
+// rather than stay open with its events silently gone.
+func TestUnsendableEventClosesTheConnection(t *testing.T) {
+	h := newHarness(t, func(h *harness) { h.limits.MaxFrame = 8 << 10 })
+	setup := h.dial()
+	chooseLogging(t, setup)
+	id := createPortal(t, setup, "web")
+	authenticating(t, h, setup, id)
+	c := h.dial()
+	mustMutate(t, c, "resumeEnrolment", service.ResumeEnrolmentParams{PortalID: id})
+	rt := h.factory.runtime()
+	waitFor(t, "the login attempt", func() bool { return rt.attempt(id) != "" })
+	rt.url(id, rt.attempt(id), "https://login.example.com/"+strings.Repeat("a", 16<<10))
+	select {
+	case e, ok := <-c.Enrolment():
+		if ok {
+			t.Fatalf("got %v, want the connection closed", e)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the connection stayed open with its stream dead")
 	}
 }

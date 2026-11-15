@@ -165,7 +165,9 @@ Unauthenticated peers are closed without state/error detail.
 
 ### Message shapes
 
-These fill in shapes the rules above leave open; they change none of them.
+These fill in shapes the contract leaves open; the only extension is that a
+timed-out mutation's reply may carry `uncertain` instead of `result` or
+`error`, as the transport section's "uncertain outcome" requires.
 `helper/internal/management` implements them.
 
 - **Hello.** The reply's `epoch` is the snapshot epoch. A first frame that is
@@ -178,7 +180,9 @@ These fill in shapes the rules above leave open; they change none of them.
   lower-case UUID get `invalidRequest` (not retryable). The transport sends
   `slowConsumer` and its client-limit `capacityExceeded` (both retryable). A
   snapshot set over the paging limits on a subscription gets `capacityExceeded`
-  (not retryable).
+  (not retryable). A `subscribe` already answered `runtimeUnavailable` at its
+  deadline whose registration then completes gets `runtimeUnavailable`
+  (retryable), so no stream follows that reply.
 - **Calls.** `params` is always an object, `{}` when empty, decoded strictly
   per method. `requestID` is a canonical lower-case UUID, `issuedAt` is RFC 3339
   ending in `Z`, and `expectedRevision` is an integer ≥ 0. Non-mutating methods
@@ -188,8 +192,7 @@ These fill in shapes the rules above leave open; they change none of them.
   or `alertID` param that is not a canonical lower-case UUID is
   `invalidRequest` with `field` `portalID` or `alertID`.
 - **Replies** are `{"type":"reply","callID",...}` with `"result":{...}`, or
-  `"error":{code,field?,portalID?,retryable}`, or `"uncertain":true`. `uncertain`
-  extends the rule above that a reply has either `result` or `error`, for
+  `"error":{code,field?,portalID?,retryable}`, or `"uncertain":true` for
   timed-out mutations only. Each call has a 10-second deadline. A mutation
   past it gets `uncertain`: its outcome is unknown, its engine work continues,
   and the client recovers it by `getRequestResult` with the same request ID.
