@@ -235,6 +235,34 @@ func TestEndedContextNeverClosesAHealthyConnection(t *testing.T) {
 	snapshot(t, c)
 }
 
+// TestCancellationEndsAStalledHandshake: a service that never answers hello
+// cannot hold Dial past its context, cancelled or expired.
+func TestCancellationEndsAStalledHandshake(t *testing.T) {
+	for name, cancelAfter := range map[string]time.Duration{"cancel": 50 * time.Millisecond, "deadline": 0} {
+		client, server := socketPair(t)
+		go func() { _, _ = ipc.ReadFrame(server, ipc.MaxFrame) }()
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		if cancelAfter > 0 {
+			ctx, cancel = context.WithCancel(t.Context())
+			time.AfterFunc(cancelAfter, cancel)
+		}
+		result := make(chan error, 1)
+		go func() {
+			_, err := newClient(ctx, client, nil)
+			result <- err
+		}()
+		select {
+		case err := <-result:
+			if ctx.Err() == nil || !errors.Is(err, ctx.Err()) {
+				t.Errorf("%s: newClient = %v, want %v", name, err, ctx.Err())
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: the handshake outlived its context", name)
+		}
+		cancel()
+	}
+}
+
 func TestCloseDoesNotWaitForUndrainedChannels(t *testing.T) {
 	snapshotFrame, _ := json.Marshal(snapshotFrame{Type: "snapshot", Snapshot: smallSnapshot(0)})
 	eventFrame, _ := json.Marshal(enrolmentFrame{Type: "enrolment", Event: service.EnrolmentFailed, RequestID: newUUID(), PortalID: newUUID(), Nonce: newUUID()})

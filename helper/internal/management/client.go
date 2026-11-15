@@ -98,13 +98,24 @@ func newClient(ctx context.Context, conn *net.UnixConn, record func([]byte)) (*C
 		closing:   make(chan struct{}),
 		writeSlot: make(chan struct{}, 1),
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	}
+	// ctx ending, by cancellation or deadline, cuts the handshake's I/O.
+	cut := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = conn.SetDeadline(time.Now())
+		close(cut)
+	})
 	hello, err := c.handshake()
-	_ = conn.SetDeadline(time.Time{})
+	if !stop() {
+		<-cut
+		if err == nil {
+			err = ctx.Err()
+		}
+	}
 	if err != nil {
 		conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
 	}
 	c.Epoch, c.Capabilities = hello.Epoch, hello.Capabilities
