@@ -97,10 +97,14 @@ func (r *fakeRuntime) Reconcile(ctx context.Context, configs []portal.Config, em
 // closing), and otherwise leaves one login pending, labelled with attempt.
 func (r *fakeRuntime) AuthenticateAttempt(_ context.Context, id, attempt string) error {
 	r.f.mu.Lock()
-	gate := r.f.authGate
+	gate, pause := r.f.authGate, r.f.authPause
+	r.f.authPause = nil
 	r.f.mu.Unlock()
 	if gate != nil {
 		<-gate
+	}
+	if pause != nil {
+		pause()
 	}
 	r.mu.Lock()
 	running := !r.closing && len(r.reconciles) > 0 && slices.ContainsFunc(r.reconciles[len(r.reconciles)-1], func(c portal.Config) bool {
@@ -231,6 +235,7 @@ type fakeFactory struct {
 	closeErr     error
 	authErr      error
 	authGate     chan struct{} // holds AuthenticateAttempt until closed
+	authPause    func()        // runs once inside the next AuthenticateAttempt
 	closeBlock   chan struct{}
 	outcomes     map[string]portal.ReconcileOutcome
 	onRemove     func()

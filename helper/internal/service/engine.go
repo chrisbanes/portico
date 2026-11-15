@@ -63,11 +63,11 @@ type Engine struct {
 	cleanupFailed map[string]bool
 	reach         map[string]reachEntry
 	leases        map[string]*lease
-	// authStarts serializes login starts per Portal. authStartHook, for tests
-	// only, runs at "queued" (before the boundary) and "starting" (inside it,
-	// just before the runtime call).
+	// authStarts serializes login starts per Portal; entries are never
+	// removed, so a waiting start keeps the same boundary. authStartHook, for
+	// tests only, runs just before a start enters that boundary.
 	authStarts    map[string]*sync.Mutex
-	authStartHook func(stage, attempt string)
+	authStartHook func()
 
 	kick    chan struct{}
 	syncReq chan chan struct{}

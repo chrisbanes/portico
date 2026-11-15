@@ -151,7 +151,7 @@ func (e *Engine) startLeaseLocked(s *Session, requestID, portalID string) {
 		hook := e.authStartHook
 		e.mu.Unlock()
 		if hook != nil {
-			hook("queued", l.nonce)
+			hook()
 		}
 		starts.Lock()
 		e.mu.Lock()
@@ -161,9 +161,6 @@ func (e *Engine) startLeaseLocked(s *Session, requestID, portalID string) {
 			// Superseded or disconnected before the login started.
 			starts.Unlock()
 			return
-		}
-		if hook != nil {
-			hook("starting", l.nonce)
 		}
 		err := callRuntime(func(ctx context.Context) error { return rt.AuthenticateAttempt(ctx, portalID, l.nonce) })
 		starts.Unlock()

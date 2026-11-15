@@ -517,41 +517,34 @@ func TestEnrolmentRefusedWhileTheRuntimeIsReplaced(t *testing.T) {
 }
 
 // TestEnrolmentDelayedSupersededStartCannotOverwriteTheCurrentAttempt: A's
-// login start is delayed after its lease check; B supersedes A meanwhile. B's
-// attempt must end up pending on the runtime, so B gets its URL.
+// login start is paused inside the runtime call; B supersedes A meanwhile. B's
+// start must wait for A's to finish, so B's attempt ends up pending and B gets
+// its URL.
 func TestEnrolmentDelayedSupersededStartCannotOverwriteTheCurrentAttempt(t *testing.T) {
 	h := newHarness(t)
 	h.chooseLogging(installation.LoggingEnabled)
 	id := h.create("hermes", localApp(1))
 	h.authenticating(id)
 	paused, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	h.engine.mu.Lock()
-	h.engine.authStartHook = func(stage, _ string) {
-		if stage != "starting" {
-			return
-		}
-		first := false
-		once.Do(func() { first = true })
-		if first {
+	h.factory.set(func(f *fakeFactory) {
+		f.authPause = func() {
 			close(paused)
 			<-release
 		}
-	}
-	h.engine.mu.Unlock()
+	})
 
 	a, _, _ := h.connect()
 	if _, err := a.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: id}); err != nil {
 		t.Fatal(err)
 	}
-	<-paused // A passed its lease check and is about to call the runtime.
+	<-paused // A's start is inside the runtime call.
 	b, bEvents, _ := h.connect()
 	bReq := h.req()
 	if _, err := b.ResumeEnrolment(bReq, ResumeEnrolmentParams{PortalID: id}); err != nil {
 		t.Fatal(err)
 	}
-	// Give B's start every chance to run first, as it could without the
-	// per-Portal boundary.
+	// Without the per-Portal boundary B's start would complete here, and A's
+	// would then overwrite it.
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(deadline) && len(h.factory.callsNamed("auth:"+id)) == 0 {
 		time.Sleep(time.Millisecond)
@@ -575,10 +568,7 @@ func TestEnrolmentQueuedSupersededStartIsSkipped(t *testing.T) {
 	paused, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	h.engine.mu.Lock()
-	h.engine.authStartHook = func(stage, _ string) {
-		if stage != "queued" {
-			return
-		}
+	h.engine.authStartHook = func() {
 		first := false
 		once.Do(func() { first = true })
 		if first {
