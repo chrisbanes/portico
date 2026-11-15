@@ -159,8 +159,8 @@ func (s *Store) migrate() (err error) {
 	// anything is written, and sizes the free-space check.
 	sources := map[string]string{}
 	originals := map[string]map[string]string{}
-	// The checkpoint keeps the source bytes and the state document is at most
-	// their normalised size.
+	// The checkpoint keeps the source bytes; the state document is a small
+	// multiple of them, and the margin absorbs the difference.
 	need := 2*int64(len(source.Data)) + freeSpaceMargin
 	if source.File != "" {
 		sources[source.File] = hash(source.Data)
