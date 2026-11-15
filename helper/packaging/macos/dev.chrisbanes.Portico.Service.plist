@@ -16,7 +16,8 @@
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
-	<!-- Restart after a crash or failed exit, not after a clean stop. -->
+	<!-- Restart after a crash or failed exit, not after a clean exit or a
+	     launchctl bootout. -->
 	<key>KeepAlive</key>
 	<dict>
 		<key>SuccessfulExit</key>

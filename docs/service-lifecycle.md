@@ -20,15 +20,19 @@ registering the macOS LaunchAgent belongs to #105.
   `$XDG_RUNTIME_DIR` is refused; there is no `/tmp` fallback.
 - Only the test variant takes path flags. The service never takes a path from
   a client.
-- The service creates a missing state root with mode 0700 and tightens a
-  looser one it owns. It refuses a root that is a symlink or that another
-  user owns.
+- The service refuses to run as root, before it touches any file.
+- The service creates a missing state root with mode 0700. It tightens an
+  existing root it owns that others can only read or search, and refuses one
+  that is a symlink, that another user owns, or that its group or others can
+  write, since they may have planted entries in it.
 
 **macOS production and Dev are refused for now.** An older Portico app may
 still write those roots, and nothing yet stops it. Until #104's T5 slice
 installs the MIG-1 legacy-writer guard, `portico-service` exits with status 1
-for these two variants before it touches any state. The test variant and
-both Linux variants run normally, because no older app runs on Linux.
+for these two variants before it touches any state. On macOS the test variant
+also refuses a `--state-root` that is, contains or is inside either root,
+after resolving symlinks and ignoring case. The test variant and both Linux
+variants otherwise run normally, because no older app runs on Linux.
 
 ## Startup and shutdown
 
@@ -64,9 +68,22 @@ install and starts no runtime. Instead it keeps the lock and serves:
 - that same code as the error for every other call.
 
 It also logs `startup failure: <code>` to standard error. Logs carry codes
-only, never paths. When stopped it exits 1, so the service manager records a
-failed run and restarts it after its back-off. Recovery is manual: fix or
-restore the state root, then restart the service.
+only, never paths.
+
+- `unsupportedState` needs a person: the service serves it until it is
+  stopped. Recovery is manual: fix or restore the state root, then restart
+  the service.
+- `persistenceUnavailable` may clear by itself, for example once a volume is
+  mounted again. The service serves it for 30 seconds, then exits 1, so the
+  service manager's back-off loads the state again. The failure stays
+  visible: in the snapshot while it is served, and in the manager's status
+  and log between runs. Under systemd the start limit below ends the retries
+  after five failed starts.
+
+Either way the service exits 1 when it stops, so the manager records a
+failed run. An explicit `launchctl bootout` or `systemctl --user stop` does
+not restart it; only an unexpected exit, such as a signal from elsewhere or
+the `persistenceUnavailable` exit, does.
 
 ## macOS: launchd
 
@@ -80,7 +97,8 @@ restore the state root, then restart the service.
 
 Each LaunchAgent runs at load and is restarted after a crash or failed exit
 (`KeepAlive` with `SuccessfulExit` false), throttled to one start per 10
-seconds, with umask 077. The service runs for the login session: logout or
+seconds, with umask 077. `launchctl bootout` removes the job without a
+restart. The service runs for the login session: logout or
 shutdown ends it. To inspect a loaded agent, run
 `launchctl print gui/$(id -u)/<label>`. Its `state`, `pid`, `runs` and
 `last exit code` show a crash loop or a failed start.
@@ -110,9 +128,10 @@ journalctl --user -u portico-service            # full log, where readable
 ```
 
 `Restart=on-failure` restarts the service after a crash or a failed exit, 5
-seconds apart. Five starts within 5 minutes leaves the unit failed until
-`systemctl --user reset-failed portico-service` or a manual start. A clean
-stop is not restarted.
+seconds apart. Five starts within 5 minutes leaves the unit failed, and while
+that limit holds even a manual start is refused, until the 5 minutes pass or
+`systemctl --user reset-failed portico-service` runs. `systemctl --user stop`
+is never followed by a restart, whatever the exit status.
 
 **Session-only lifetime.** The unit is wanted by the user's
 `default.target`, so it starts when the user manager does, at the user's

@@ -123,6 +123,93 @@ func TestResolveTestVariant(t *testing.T) {
 	}
 }
 
+// Root is refused before anything else, so no root-owned state is created.
+func TestResolveRefusesRootFirst(t *testing.T) {
+	defer func(f func() int) { geteuid = f }(geteuid)
+	geteuid = func() int { return 0 }
+	base := shortTemp(t)
+	root := filepath.Join(t.TempDir(), "state")
+	for _, variant := range []ipc.Variant{ipc.Test, ipc.Production, ipc.Dev} {
+		stateRoot, runtimeDir := root, base
+		if variant != ipc.Test {
+			stateRoot, runtimeDir = "", ""
+		}
+		if _, err := Resolve(variant, stateRoot, runtimeDir); !errors.Is(err, ipc.ErrRoot) {
+			t.Errorf("Resolve(%s) as root = %v, want ErrRoot", variant, err)
+		}
+	}
+	if _, err := os.Lstat(root); !os.IsNotExist(err) {
+		t.Errorf("root still created the state root: %v", err)
+	}
+}
+
+// On macOS the test variant may not name the production or Dev roots, or
+// anything inside or around them, however it spells them.
+func TestTestVariantRefusesTheGuardedRoots(t *testing.T) {
+	home := t.TempDir()
+	support := filepath.Join(home, "Library", "Application Support")
+	production := filepath.Join(support, "Portico")
+	if err := os.MkdirAll(production, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	links := t.TempDir()
+	for name, target := range map[string]string{"production": production, "support": support} {
+		if err := os.Symlink(target, filepath.Join(links, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refused := map[string]string{
+		"production":                production,
+		"inside production":         filepath.Join(production, "service", "new"),
+		"dev, missing":              filepath.Join(support, "Portico Dev"),
+		"inside dev, missing":       filepath.Join(support, "Portico Dev", "x"),
+		"containing both":           support,
+		"the home":                  home,
+		"other case":                filepath.Join(home, "library", "application support", "PORTICO"),
+		"unclean":                   support + "/x/../Portico/",
+		"symlink to production":     filepath.Join(links, "production"),
+		"inside symlinked support":  filepath.Join(links, "support", "Portico", "state"),
+		"symlinked support for dev": filepath.Join(links, "support", "Portico Dev"),
+	}
+	allowed := map[string]string{
+		"a sibling":         filepath.Join(support, "Portico Test"),
+		"a name prefix":     filepath.Join(support, "PorticoX"),
+		"another directory": t.TempDir(),
+	}
+	for name, root := range refused {
+		if err := refuseGuardedRoot(root, home); !errors.Is(err, ErrUnguardedVariant) {
+			t.Errorf("%s: refuseGuardedRoot = %v, want ErrUnguardedVariant", name, err)
+		}
+	}
+	for name, root := range allowed {
+		if err := refuseGuardedRoot(root, home); err != nil {
+			t.Errorf("%s: refuseGuardedRoot = %v", name, err)
+		}
+	}
+
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	// Resolve applies it before touching anything, with the fake home only.
+	defer func(f func() (string, error)) { userHome = f }(userHome)
+	userHome = func() (string, error) { return home, nil }
+	base := shortTemp(t)
+	for name, root := range refused {
+		if _, err := Resolve(ipc.Test, root, base); !errors.Is(err, ErrUnguardedVariant) {
+			t.Errorf("%s: Resolve = %v, want ErrUnguardedVariant", name, err)
+		}
+	}
+	if info, err := os.Stat(production); err != nil || info.Mode().Perm() != 0o755 {
+		t.Errorf("the production root was changed: %v, %v", info.Mode(), err)
+	}
+	if _, err := os.Lstat(filepath.Join(support, "Portico Dev")); !os.IsNotExist(err) {
+		t.Errorf("the Dev root was created: %v", err)
+	}
+	if _, err := Resolve(ipc.Test, allowed["a sibling"], base); err != nil {
+		t.Errorf("a sibling: Resolve = %v", err)
+	}
+}
+
 func TestResolveRejectsUnsafeRoots(t *testing.T) {
 	base := shortTemp(t)
 	dir := t.TempDir()
@@ -137,6 +224,33 @@ func TestResolveRejectsUnsafeRoots(t *testing.T) {
 	for name, root := range map[string]string{"symlinked root": link, "file root": file, "root under a file": filepath.Join(file, "state")} {
 		if _, err := Resolve(ipc.Test, root, base); !errors.Is(err, ErrInvalidRoots) {
 			t.Errorf("%s: error = %v", name, err)
+		}
+	}
+
+	// A root others can write may hold their entries: refused, not tightened.
+	for _, mode := range []os.FileMode{0o720, 0o702, 0o775, 0o777} {
+		root := t.TempDir()
+		if err := os.Chmod(root, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Resolve(ipc.Test, root, base); !errors.Is(err, ErrInvalidRoots) {
+			t.Errorf("root mode %v: error = %v", mode, err)
+		}
+		if info, _ := os.Lstat(root); info.Mode().Perm() != mode {
+			t.Errorf("root mode %v changed to %v", mode, info.Mode().Perm())
+		}
+	}
+
+	// An existing root another user owns, whether or not its mode would
+	// need tightening: /usr is 0755, the others usually 0700.
+	if os.Geteuid() != 0 {
+		for _, root := range []string{"/usr", "/private/var/audit", "/root"} {
+			if _, err := os.Lstat(root); err != nil {
+				continue
+			}
+			if _, err := Resolve(ipc.Test, root, base); !errors.Is(err, ErrInvalidRoots) {
+				t.Errorf("root-owned %s: error = %v", root, err)
+			}
 		}
 	}
 

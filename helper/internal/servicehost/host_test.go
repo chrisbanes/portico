@@ -358,3 +358,30 @@ func TestFailedCloseKeepsTheLock(t *testing.T) {
 	// stays held until the process exits.
 	wantBusy(t, roots.StateRoot, "after a failed close")
 }
+
+// persistenceUnavailable may clear by itself, so the host serves it only
+// for a while and then exits failed for the service manager to retry the
+// load; unsupportedState needs a person and is served until stopped.
+func TestOnlyPersistenceFailureExitsForARetry(t *testing.T) {
+	defer func(d time.Duration) { persistenceRetryAfter = d }(persistenceRetryAfter)
+	persistenceRetryAfter = 200 * time.Millisecond
+
+	unreadable := testRoots(t, []byte(`{"version":6}`))
+	if err := os.Chmod(filepath.Join(unreadable.StateRoot, "installation-v5.json"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	h := runHost(t, unreadable, newRuntimes())
+	var failure *StartupFailure
+	if err := h.wait(t); !errors.As(err, &failure) || failure.Reason != service.CodePersistenceUnavailable {
+		t.Fatalf("Run() = %v, want StartupFailure(persistenceUnavailable) without a stop", err)
+	}
+	wantFree(t, unreadable.StateRoot, "after the host exits for a retry")
+
+	unsupported := testRoots(t, []byte(`{"version":6}`))
+	h = runHost(t, unsupported, newRuntimes())
+	getSnapshot(t, dial(t, unsupported.Endpoint))
+	time.Sleep(4 * persistenceRetryAfter)
+	if !h.running() {
+		t.Fatal("an unsupportedState host exited before it was stopped")
+	}
+}

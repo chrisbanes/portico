@@ -11,8 +11,14 @@ import (
 	"github.com/chrisbanes/portico/helper/internal/service"
 )
 
-// closeTimeout bounds Engine.Close at shutdown; tests lower it.
-var closeTimeout = 10 * time.Second
+var (
+	// closeTimeout bounds Engine.Close at shutdown; tests lower it.
+	closeTimeout = 10 * time.Second
+	// persistenceRetryAfter is how long a persistenceUnavailable failure is
+	// served before the host exits, so the service manager's back-off loads
+	// the state again; tests lower it.
+	persistenceRetryAfter = 30 * time.Second
+)
 
 // Config is one service process.
 type Config struct {
@@ -41,46 +47,57 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	store, openErr := owner.Open(service.Options{})
-	var engine *service.Engine
-	if openErr == nil {
-		if engine, err = service.New(store, cfg.Engine); err != nil {
-			return errors.Join(err, store.Close())
-		}
+	store, err := owner.Open(service.Options{})
+	if err != nil {
+		return serveFailure(ctx, cfg, owner, err)
+	}
+	engine, err := service.New(store, cfg.Engine)
+	if err != nil {
+		return errors.Join(err, store.Close())
 	}
 	listener, err := ipc.Listen(cfg.Roots.Endpoint, owner.LockFile(), cfg.Limits)
 	if err != nil {
-		if engine == nil {
-			return errors.Join(err, owner.Close())
-		}
 		return errors.Join(err, shutdown(engine, store))
 	}
-
 	served := make(chan error, 1)
-	var failure *StartupFailure
-	if engine != nil {
-		go func() { served <- management.Serve(listener, engine) }()
-	} else {
-		failure = &StartupFailure{Reason: service.CodeUnsupportedState}
-		if errors.Is(openErr, service.ErrPersistenceUnavailable) {
-			failure.Reason = service.CodePersistenceUnavailable
-		}
-		log.Print(failure)
-		go func() { served <- management.ServeStartupFailure(listener, failure.Reason) }()
+	go func() { served <- management.Serve(listener, engine) }()
+	serveErr := stopServing(ctx, listener, served, nil)
+	return errors.Join(serveErr, shutdown(engine, store))
+}
+
+// serveFailure serves the state's load error with the lock held and no
+// engine. unsupportedState is served until ctx ends; persistenceUnavailable,
+// which may clear by itself, only for persistenceRetryAfter.
+func serveFailure(ctx context.Context, cfg Config, owner *service.Owner, openErr error) error {
+	failure := &StartupFailure{Reason: service.CodeUnsupportedState}
+	var retry <-chan time.Time
+	if errors.Is(openErr, service.ErrPersistenceUnavailable) {
+		failure.Reason = service.CodePersistenceUnavailable
+		retry = time.After(persistenceRetryAfter)
 	}
-	// Stop accepting and close every session before the engine.
-	var serveErr error
+	listener, err := ipc.Listen(cfg.Roots.Endpoint, owner.LockFile(), cfg.Limits)
+	if err != nil {
+		return errors.Join(err, owner.Close())
+	}
+	log.Print(failure)
+	served := make(chan error, 1)
+	go func() { served <- management.ServeStartupFailure(listener, failure.Reason) }()
+	serveErr := stopServing(ctx, listener, served, retry)
+	return errors.Join(failure, serveErr, owner.Close())
+}
+
+// stopServing waits for ctx, retry or the server to end, then stops
+// accepting and closes every session before returning the server's result.
+func stopServing(ctx context.Context, listener *ipc.Listener, served <-chan error, retry <-chan time.Time) error {
 	select {
 	case <-ctx.Done():
+	case <-retry:
+	case err := <-served:
 		listener.Close()
-		serveErr = <-served
-	case serveErr = <-served:
-		listener.Close()
+		return err
 	}
-	if engine == nil {
-		return errors.Join(failure, serveErr, owner.Close())
-	}
-	return errors.Join(serveErr, shutdown(engine, store))
+	listener.Close()
+	return <-served
 }
 
 // shutdown closes the engine within closeTimeout, then the store, whose

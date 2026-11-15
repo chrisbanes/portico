@@ -25,14 +25,11 @@ case "$os" in
   *) fail "unsupported OS $os" ;;
 esac
 
-# Refuse anything but the test label and a fresh temporary work directory.
+# Every root lives in a fresh work directory directly under /tmp, never in
+# the production or Dev roots; the label and unit are readonly test names.
 refuse_unsafe() {
-  [[ "$LABEL" == dev.chrisbanes.Portico.ServiceTest && "$UNIT" == portico-service-test.service ]] ||
-    fail "refusing a non-test label"
-  case "$work" in
-    *"Application Support/Portico"* | */.local/state/portico* | */Library/LaunchAgents*) fail "refusing a non-test root" ;;
-  esac
-  [[ "$work" == "$tmp_base"/portico-lc.* ]] || fail "refusing a root outside the temporary directory"
+  [[ ("$tmp_base" == /tmp || "$tmp_base" == /private/tmp) && "$work" == "$tmp_base"/portico-lc.?????? ]] ||
+    fail "refusing a work directory outside /tmp"
 }
 
 job_loaded() {
@@ -291,8 +288,10 @@ step 6 "unsupported manifest: startupFailure=unsupportedState over IPC, mutation
 # 7. No TCP listener, and private modes.
 pid=$(service_pid)
 if [[ "$os" == Darwin ]]; then
+  command -v lsof >/dev/null || fail "lsof is required to check for TCP listeners"
   if lsof -nP -a -p "$pid" -iTCP -sTCP:LISTEN 2>/dev/null | grep -q LISTEN; then fail "the service listens on TCP"; fi
 else
+  command -v ss >/dev/null || fail "ss is required to check for TCP listeners"
   if ss -ltnpH 2>/dev/null | grep -q "pid=$pid,"; then fail "the service listens on TCP"; fi
 fi
 for dir in "$state" "$state/service" "$generation" "$run_dir/portico-test"; do

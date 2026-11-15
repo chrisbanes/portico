@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -94,5 +95,27 @@ func TestStartupFailureRejectsAMismatchedVersion(t *testing.T) {
 	writeJSON(t, conn, map[string]any{"type": "hello", "version": 2})
 	if f := readJSON(t, conn); errorCode(f) != "incompatibleVersion" {
 		t.Fatalf("frame = %v", f)
+	}
+}
+
+// On the wire the field is the raw code, and a loaded service omits it.
+func TestStartupFailureFieldOnTheWire(t *testing.T) {
+	key := []byte(`"startupFailure"`)
+	failed := &recorder{}
+	c, err := dial(ctx(t), serveFailure(t, service.CodeUnsupportedState), failed.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	snapshot(t, c)
+	if !bytes.Contains(bytes.Join(failed.all(), nil), []byte(`"startupFailure":"unsupportedState"`)) {
+		t.Fatalf("no raw startupFailure in the failure snapshot's frames: %s", failed.all())
+	}
+
+	loaded := &recorder{}
+	snapshot(t, newHarness(t).dialRecording(loaded.record))
+	frames := loaded.all()
+	if len(frames) < 2 || bytes.Contains(bytes.Join(frames, nil), key) {
+		t.Fatalf("a loaded snapshot's frames carry startupFailure: %s", frames)
 	}
 }

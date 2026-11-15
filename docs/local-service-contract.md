@@ -246,7 +246,8 @@ timed-out mutation's reply may carry `uncertain` instead of `result` or
   state cannot load, it still answers hello and an authenticated
   `getSnapshot`. That snapshot's `service.startupFailure` is the reason code,
   `unsupportedState` or `persistenceUnavailable`, never text; its `runtime`
-  is `unavailable` and it has no Portals. Every other well-formed call gets
+  is `unavailable`, it has no Portals and its `availability` is empty: no
+  operation is available. Every other well-formed call gets
   that code as its reply error, so no mutation can create an empty install.
   The field is absent from a loaded service's snapshots.
 - **Enrolment events** go only to the connection that called `resumeEnrolment`:
