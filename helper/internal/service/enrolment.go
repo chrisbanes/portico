@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/chrisbanes/portico/helper/internal/installation"
@@ -136,15 +137,36 @@ func (e *Engine) startLeaseLocked(s *Session, requestID, portalID string) {
 	l := &lease{session: s, requestID: requestID, portalID: portalID, gen: e.runtimeGen, nonce: newUUID()}
 	e.leases[portalID] = l
 	rt := e.runtime
+	starts := e.authStarts[portalID]
+	if starts == nil {
+		starts = &sync.Mutex{}
+		e.authStarts[portalID] = starts
+	}
 	go func() {
+		// One login start per Portal at a time, with the lease rechecked
+		// inside: a superseded start that was delayed cannot run after the
+		// current one and overwrite the runtime's pending attempt. The engine
+		// lock is never held across the runtime call.
+		e.mu.Lock()
+		hook := e.authStartHook
+		e.mu.Unlock()
+		if hook != nil {
+			hook("queued", l.nonce)
+		}
+		starts.Lock()
 		e.mu.Lock()
 		current := e.leases[portalID] == l
 		e.mu.Unlock()
 		if !current {
 			// Superseded or disconnected before the login started.
+			starts.Unlock()
 			return
 		}
+		if hook != nil {
+			hook("starting", l.nonce)
+		}
 		err := callRuntime(func(ctx context.Context) error { return rt.AuthenticateAttempt(ctx, portalID, l.nonce) })
+		starts.Unlock()
 		if err == nil {
 			return
 		}

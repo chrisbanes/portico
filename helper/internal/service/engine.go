@@ -63,6 +63,11 @@ type Engine struct {
 	cleanupFailed map[string]bool
 	reach         map[string]reachEntry
 	leases        map[string]*lease
+	// authStarts serializes login starts per Portal. authStartHook, for tests
+	// only, runs at "queued" (before the boundary) and "starting" (inside it,
+	// just before the runtime call).
+	authStarts    map[string]*sync.Mutex
+	authStartHook func(stage, attempt string)
 
 	kick    chan struct{}
 	syncReq chan chan struct{}
@@ -103,6 +108,7 @@ func New(store *Store, opts EngineOptions) (*Engine, error) {
 		cleanupFailed: map[string]bool{},
 		reach:         map[string]reachEntry{},
 		leases:        map[string]*lease{},
+		authStarts:    map[string]*sync.Mutex{},
 		reachKick:     make(chan struct{}, 1),
 		reachSync:     make(chan chan struct{}),
 		reachStopped:  make(chan struct{}),

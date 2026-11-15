@@ -515,3 +515,97 @@ func TestEnrolmentRefusedWhileTheRuntimeIsReplaced(t *testing.T) {
 		t.Fatalf("an attempt started on a closing runtime: %d Authenticate calls, events %v", n, events.all())
 	}
 }
+
+// TestEnrolmentDelayedSupersededStartCannotOverwriteTheCurrentAttempt: A's
+// login start is delayed after its lease check; B supersedes A meanwhile. B's
+// attempt must end up pending on the runtime, so B gets its URL.
+func TestEnrolmentDelayedSupersededStartCannotOverwriteTheCurrentAttempt(t *testing.T) {
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	id := h.create("hermes", localApp(1))
+	h.authenticating(id)
+	paused, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	h.engine.mu.Lock()
+	h.engine.authStartHook = func(stage, _ string) {
+		if stage != "starting" {
+			return
+		}
+		first := false
+		once.Do(func() { first = true })
+		if first {
+			close(paused)
+			<-release
+		}
+	}
+	h.engine.mu.Unlock()
+
+	a, _, _ := h.connect()
+	if _, err := a.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: id}); err != nil {
+		t.Fatal(err)
+	}
+	<-paused // A passed its lease check and is about to call the runtime.
+	b, bEvents, _ := h.connect()
+	bReq := h.req()
+	if _, err := b.ResumeEnrolment(bReq, ResumeEnrolmentParams{PortalID: id}); err != nil {
+		t.Fatal(err)
+	}
+	// Give B's start every chance to run first, as it could without the
+	// per-Portal boundary.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) && len(h.factory.callsNamed("auth:"+id)) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	waitFor(t, "both login starts", func() bool { return len(h.factory.callsNamed("auth:"+id)) == 2 })
+	h.factory.runtime().emitURL(id, enrolmentURL)
+	if urls := bEvents.of(EnrolmentAuthenticationURL); len(urls) != 1 || urls[0].RequestID != bReq.ID {
+		t.Fatalf("B's events = %v, want its URL", bEvents.all())
+	}
+}
+
+// TestEnrolmentQueuedSupersededStartIsSkipped: A's start is delayed before the
+// per-Portal boundary while B's start completes; A must then see it is no
+// longer current and not call the runtime at all.
+func TestEnrolmentQueuedSupersededStartIsSkipped(t *testing.T) {
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	id := h.create("hermes", localApp(1))
+	h.authenticating(id)
+	paused, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	h.engine.mu.Lock()
+	h.engine.authStartHook = func(stage, _ string) {
+		if stage != "queued" {
+			return
+		}
+		first := false
+		once.Do(func() { first = true })
+		if first {
+			close(paused)
+			<-release
+		}
+	}
+	h.engine.mu.Unlock()
+
+	a, _, _ := h.connect()
+	if _, err := a.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: id}); err != nil {
+		t.Fatal(err)
+	}
+	<-paused
+	b, bEvents, _ := h.connect()
+	bReq := h.req()
+	if _, err := b.ResumeEnrolment(bReq, ResumeEnrolmentParams{PortalID: id}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "B's login start", func() bool { return len(h.factory.callsNamed("auth:"+id)) == 1 })
+	close(release)
+	time.Sleep(50 * time.Millisecond)
+	if n := len(h.factory.callsNamed("auth:" + id)); n != 1 {
+		t.Fatalf("login starts = %d; the superseded start ran after the current one", n)
+	}
+	h.factory.runtime().emitURL(id, enrolmentURL)
+	if urls := bEvents.of(EnrolmentAuthenticationURL); len(urls) != 1 || urls[0].RequestID != bReq.ID {
+		t.Fatalf("B's events = %v, want its URL", bEvents.all())
+	}
+}
