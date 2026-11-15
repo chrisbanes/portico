@@ -284,7 +284,8 @@ func TestReconcileDeadlineBoundsHungNodeClose(t *testing.T) {
 }
 
 // TestHungPortalDoesNotStopAnotherPortalConverging: while Portal A's node or
-// watcher close hangs, Portal B, sorted after it, converges on its next pass.
+// watcher close hangs, Portal B, sorted after it, converges in the same pass,
+// and no new node starts for A until its close completes.
 func TestHungPortalDoesNotStopAnotherPortalConverging(t *testing.T) {
 	for _, hangWatcher := range []bool{false, true} {
 		hung, other := secondPortalID, testPortalID // A sorts first
@@ -298,15 +299,11 @@ func TestHungPortalDoesNotStopAnotherPortalConverging(t *testing.T) {
 			t.Fatalf("start A = %v", got)
 		}
 		a.DesiredState = DesiredStateStopped
-		if got := reconcileWithin(t, runtime, 50*time.Millisecond, a); got[hung] != OutcomeCloseFailed {
-			t.Fatalf("hung close of A (hangWatcher=%v) = %v", hangWatcher, got)
-		}
 		b := enabledConfig(other, "hermes", 8787)
 		got := reconcileWithin(t, runtime, 200*time.Millisecond, a, b)
-		if got[other] != OutcomeConverged || got[hung] != OutcomeCloseFailed {
-			t.Fatalf("next pass = %v, want B converged while A's close is unproven", got)
+		if got[hung] != OutcomeCloseFailed || got[other] != OutcomeConverged {
+			t.Fatalf("hung close of A (hangWatcher=%v) = %v, want B converged", hangWatcher, got)
 		}
-		// Re-enabling A is skipped too, so a third Portal still converges.
 		a.DesiredState = DesiredStateEnabled
 		third := enabledConfig("7ea74329-3144-4ba2-925f-138d14d61fcc", "selina", 8789)
 		got = reconcileWithin(t, runtime, 200*time.Millisecond, a, b, third)
@@ -314,6 +311,75 @@ func TestHungPortalDoesNotStopAnotherPortalConverging(t *testing.T) {
 			t.Fatalf("re-enable pass = %v with %d nodes for A, want the third Portal converged", got, factory.count(hung))
 		}
 	}
+}
+
+// TestReconcileDeadlineBoundsWatcherSubscription: a node whose Watch blocks
+// while subscribing fails that start at the Reconcile deadline, and the
+// subscription is cancelled.
+func TestReconcileDeadlineBoundsWatcherSubscription(t *testing.T) {
+	node := &subscribeBlockingNode{fakeNode: &fakeNode{watcher: newFakeWatcher()}, watching: make(chan context.Context, 1)}
+	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = runtime.Close(ctx)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan []ReconcileEntry, 1)
+	go func() {
+		entries, _ := runtime.Reconcile(ctx, []Config{enabledConfig(testPortalID, "hermes", 8787)}, func(Event) {})
+		done <- entries
+	}()
+	select {
+	case entries := <-done:
+		if len(entries) != 1 || entries[0].Outcome != OutcomeStartFailed {
+			t.Fatalf("Reconcile = %+v, want startFailed", entries)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Reconcile waited on a blocked watcher subscription past its deadline")
+	}
+	select {
+	case <-(<-node.watching).Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("the abandoned subscription was not cancelled")
+	}
+}
+
+// TestHungStartupDoesNotStopOtherPortals: a Portal whose startup readiness
+// wait hangs until the deadline fails alone; a running Portal and a new one
+// sorted after it converge in the same pass.
+func TestHungStartupDoesNotStopOtherPortals(t *testing.T) {
+	hung, running, added := secondPortalID, "7ea74329-3144-4ba2-925f-138d14d61fcc", testPortalID // sorted in this order
+	runtime := NewRuntime(t.TempDir(), func(dir, _ string) Node {
+		if filepath.Base(dir) == hung {
+			return &fakeNode{watcher: newFakeWatcher(), upEntered: make(chan struct{}), upCanceled: make(chan struct{}), status: Status{
+				BackendState: "Running", DNSName: "atlas.example.ts.net.", CertDomains: []string{"atlas.example.ts.net"},
+			}}
+		}
+		return &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+	})
+	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
+	if got := reconcileWithin(t, runtime, time.Second, enabledConfig(running, "selina", 8789)); got[running] != OutcomeConverged {
+		t.Fatalf("start the running Portal = %v", got)
+	}
+	got := reconcileWithin(t, runtime, 200*time.Millisecond,
+		enabledConfig(hung, "atlas", 8788), enabledConfig(running, "selina", 8789), enabledConfig(added, "hermes", 8787))
+	if got[hung] != OutcomeStartFailed || got[running] != OutcomeConverged || got[added] != OutcomeConverged {
+		t.Fatalf("pass with a hung startup = %v, want only it failed", got)
+	}
+}
+
+// subscribeBlockingNode's Watch blocks until its context ends.
+type subscribeBlockingNode struct {
+	*fakeNode
+	watching chan context.Context
+}
+
+func (n *subscribeBlockingNode) Watch(ctx context.Context) (Watcher, error) {
+	n.watching <- ctx
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 // TestRuntimeCloseClosesNodesThenEndsLifetime: Close closes every node before

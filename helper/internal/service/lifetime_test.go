@@ -342,27 +342,3 @@ func TestRealRuntimeHungCloseDoesNotFailItsSiblings(t *testing.T) {
 		t.Fatalf("running sibling problem = %q, want none", p.Problem)
 	}
 }
-
-// TestConvergeRerunsPassesThatRunOutOfTime: a pass that runs out of its
-// deadline is followed by another, until one finishes in time, at most one
-// more pass than there are Portals.
-func TestConvergeRerunsPassesThatRunOutOfTime(t *testing.T) {
-	timeout := runtimeCallTimeout
-	t.Cleanup(func() { runtimeCallTimeout = timeout })
-	runtimeCallTimeout = 100 * time.Millisecond
-	h := newHarness(t)
-	h.chooseLogging(installation.LoggingEnabled)
-	ids := []string{h.create("a", localApp(1)), h.create("b", localApp(2)), h.create("c", localApp(3))}
-	for _, tc := range []struct{ hangs, want int }{{2, 3}, {10, len(ids) + 1}} {
-		before := h.factory.runtime().reconcileCount()
-		h.factory.set(func(f *fakeFactory) { f.reconcileHangs = tc.hangs })
-		if _, err := h.session.SetDestination(h.req(), SetDestinationParams{PortalID: ids[0], Destination: localApp(uint16(10 + tc.hangs))}); err != nil {
-			t.Fatal(err)
-		}
-		h.settle()
-		if got := h.factory.runtime().reconcileCount() - before; got != tc.want {
-			t.Fatalf("%d hung passes ran %d passes, want %d", tc.hangs, got, tc.want)
-		}
-		h.factory.set(func(f *fakeFactory) { f.reconcileHangs = 0 })
-	}
-}

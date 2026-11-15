@@ -146,23 +146,13 @@ func (e *Engine) converge() {
 		e.mu.Unlock()
 	}
 
-	// The deadline bounds only this pass; Portals run until the runtime closes.
-	// A pass that ran out of time may have starved the Portals after a hung
-	// close, so another pass runs; the runtime skips each watcher or node
-	// close still unproven, so one pass per Portal is enough.
+	// The deadline bounds only this pass, shared out between its Portals;
+	// Portals run until the runtime closes.
 	var entries []portal.ReconcileEntry
-	var err error
-	for range len(state.Installation.Portals) + 1 {
-		expired := false
-		err = callRuntime(func(ctx context.Context) (err error) {
-			entries, err = rt.Reconcile(ctx, activeConfigs(state), e.emitter(gen))
-			expired = ctx.Err() != nil
-			return err
-		})
-		if !expired {
-			break
-		}
-	}
+	err := callRuntime(func(ctx context.Context) (err error) {
+		entries, err = rt.Reconcile(ctx, activeConfigs(state), e.emitter(gen))
+		return err
+	})
 	outcomes := map[string]portal.ReconcileOutcome{}
 	for _, entry := range entries {
 		outcomes[strings.ToLower(entry.PortalID)] = entry.Outcome

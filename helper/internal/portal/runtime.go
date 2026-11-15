@@ -267,6 +267,7 @@ type Runtime struct {
 	closing             bool
 	stateRoot           string
 	factory             NodeFactory
+	factoryMu           sync.Mutex
 	proxyForDestination func(Destination) (http.Handler, error)
 	portals             map[string]*portalRuntime
 	// lifetime outlives every Reconcile: Portals run on it until they stop or
@@ -293,9 +294,6 @@ type portalRuntime struct {
 	authenticationPending bool
 	authenticationAttempt string
 	proxy                 *proxyServer
-	// closeUnproven is set while a close that outlived its caller's deadline
-	// still holds the gate; Reconcile skips the Portal rather than wait on it.
-	closeUnproven bool
 }
 
 type portalPhase string
@@ -358,12 +356,23 @@ func (r *Runtime) Reconcile(ctx context.Context, configs []Config, emit func(Eve
 	r.mu.Unlock()
 	sort.Strings(portalIDs)
 
-	entries := make([]ReconcileEntry, 0, len(portalIDs))
-	for _, portalID := range portalIDs {
-		config, included := desired[portalID]
-		outcome := r.reconcilePortal(ctx, portalID, config, included, emit)
-		entries = append(entries, ReconcileEntry{PortalID: portalID, Outcome: outcome})
+	// Each Portal converges on its own goroutine within ctx, so a hung Portal
+	// cannot use up the time of the others. Their events stay serialised.
+	var emitMu sync.Mutex
+	serialEmit := func(event Event) {
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		emit(event)
 	}
+	entries := make([]ReconcileEntry, len(portalIDs))
+	var group sync.WaitGroup
+	for i, portalID := range portalIDs {
+		group.Go(func() {
+			config, included := desired[portalID]
+			entries[i] = ReconcileEntry{PortalID: portalID, Outcome: r.reconcilePortal(ctx, portalID, config, included, serialEmit)}
+		})
+	}
+	group.Wait()
 	return entries, nil
 }
 
@@ -378,9 +387,6 @@ func (r *Runtime) reconcilePortal(
 		portal := r.portal(portalID)
 		if portal == nil {
 			return OutcomeConverged
-		}
-		if portal.isCloseUnproven() {
-			return OutcomeCloseFailed
 		}
 		if err := r.closeAndRemove(ctx, portalID, portal); err != nil {
 			return OutcomeCloseFailed
@@ -402,7 +408,7 @@ func (r *Runtime) reconcilePortal(
 				portal.release()
 				return OutcomeStartFailed
 			}
-			node := r.factory(filepath.Join(r.stateRoot, config.ID), config.Name)
+			node := r.newNode(config)
 			events, err := portal.start(ctx, r.lifetime, config, node, emit)
 			if err != nil {
 				_ = r.closeAndRemoveHeld(ctx, portalID, portal)
@@ -414,10 +420,6 @@ func (r *Runtime) reconcilePortal(
 			portal.release()
 			portal.emitStartupEvents(events)
 			return OutcomeConverged
-		}
-		// No new node starts for this UUID until its earlier close is proven.
-		if portal.isCloseUnproven() {
-			return OutcomeStartFailed
 		}
 		if err := portal.acquire(ctx); err != nil {
 			return OutcomeStartFailed
@@ -447,6 +449,14 @@ func (r *Runtime) reconcilePortal(
 			return OutcomeStartFailed
 		}
 	}
+}
+
+// newNode calls the factory one Portal at a time, as before Portals
+// reconciled concurrently.
+func (r *Runtime) newNode(config Config) Node {
+	r.factoryMu.Lock()
+	defer r.factoryMu.Unlock()
+	return r.factory(filepath.Join(r.stateRoot, config.ID), config.Name)
 }
 
 func (r *Runtime) portal(portalID string) *portalRuntime {
@@ -713,7 +723,7 @@ func (r *portalRuntime) start(ctx, lifetime context.Context, config Config, node
 		return r.startupFailure(err)
 	}
 	watchContext, cancel := context.WithCancel(lifetime)
-	watcher, err := node.Watch(watchContext)
+	watcher, err := watchWithin(ctx, watchContext, node)
 	if err != nil {
 		cancel()
 		return r.startupFailure(errors.New("watch portal status"))
@@ -754,6 +764,32 @@ func (r *portalRuntime) start(ctx, lifetime context.Context, config Config, node
 	r.phase = portalRunning
 	r.mu.Unlock()
 	return []Event{{PortalID: config.ID, Status: &mapped}}, nil
+}
+
+// watchWithin starts node's watcher on run, giving up once ctx ends: tsnet
+// establishes the subscription before returning. A watcher that arrives
+// after that is closed.
+func watchWithin(ctx, run context.Context, node Node) (Watcher, error) {
+	type result struct {
+		watcher Watcher
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		watcher, err := node.Watch(run)
+		done <- result{watcher, err}
+	}()
+	select {
+	case res := <-done:
+		return res.watcher, res.err
+	case <-ctx.Done():
+		go func() {
+			if res := <-done; res.err == nil {
+				_ = res.watcher.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
 }
 
 func (r *portalRuntime) startupFailure(err error) ([]Event, error) {
@@ -844,12 +880,10 @@ func (r *portalRuntime) closeHeld(ctx context.Context, releaseWhenDone bool, onC
 			clearWatcher()
 		case <-ctx.Done():
 			releaseGate = false
-			r.setCloseUnproven(true)
 			go func() {
 				<-watcherDone
 				clearWatcher()
 				r.markFailed()
-				r.setCloseUnproven(false)
 				r.release()
 			}()
 			return ctx.Err(), true
@@ -894,11 +928,9 @@ func (r *portalRuntime) closeHeld(ctx context.Context, releaseWhenDone bool, onC
 			}
 		case <-ctx.Done():
 			releaseGate = false
-			r.setCloseUnproven(true)
 			go func() {
 				clearNode(<-nodeDone)
 				r.markFailed()
-				r.setCloseUnproven(false)
 				r.release()
 			}()
 			return ctx.Err(), true
@@ -925,18 +957,6 @@ func (r *portalRuntime) closeHeld(ctx context.Context, releaseWhenDone bool, onC
 		onClose()
 	}
 	return nil, false
-}
-
-func (r *portalRuntime) setCloseUnproven(unproven bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.closeUnproven = unproven
-}
-
-func (r *portalRuntime) isCloseUnproven() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.closeUnproven
 }
 
 func (r *portalRuntime) requestStop() {

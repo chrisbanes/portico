@@ -59,15 +59,8 @@ func (r *fakeRuntime) Reconcile(ctx context.Context, configs []portal.Config, em
 	r.f.record("reconcile")
 	r.f.mu.Lock()
 	delay := r.f.reconcileDelay
-	hang := r.f.reconcileHangs > 0
-	if hang {
-		r.f.reconcileHangs--
-	}
 	r.f.mu.Unlock()
 	time.Sleep(delay)
-	if hang {
-		<-ctx.Done()
-	}
 	r.mu.Lock()
 	if r.closing {
 		r.mu.Unlock()
@@ -249,9 +242,6 @@ type fakeFactory struct {
 	// arrived with their deadline already passed.
 	reconcileDelay time.Duration
 	expiredCalls   int
-	// reconcileHangs is how many of the next Reconciles block until their
-	// deadline.
-	reconcileHangs int
 }
 
 func (f *fakeFactory) noteCtx(ctx context.Context) {
