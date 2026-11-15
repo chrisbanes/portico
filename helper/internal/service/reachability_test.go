@@ -107,31 +107,15 @@ func TestReachabilityResultAppliesOnlyToTheProbedPort(t *testing.T) {
 	t.Cleanup(func() { close(newPort) })
 
 	id := h.create("local", localApp(8787))
-	// Wait for the probe of the old port to start, then move the Portal.
-	for {
-		h.prober.mu.Lock()
-		n := len(h.prober.probed)
-		h.prober.mu.Unlock()
-		if n > 0 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	// Creating the Portal must start a probe of its port; then move it.
+	waitForProbes(t, h.prober, 1)
 	if _, err := h.session.SetDestination(h.req(), SetDestinationParams{PortalID: id, Destination: localApp(9000)}); err != nil {
 		t.Fatal(err)
 	}
 	close(oldPort)
-	// Let the old cycle finish; the new port's probe stays held.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		h.prober.mu.Lock()
-		n := len(h.prober.probed)
-		h.prober.mu.Unlock()
-		if n >= 2 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+	// The port change starts a new cycle once the old one has finished; the
+	// new port's probe stays held.
+	waitForProbes(t, h.prober, 2)
 	if got := h.portal(id).Reachability; got != ReachabilityUnknown {
 		t.Fatalf("reachability = %q; the old port's result was applied to the new one", got)
 	}
@@ -155,4 +139,20 @@ func TestLoopbackProber(t *testing.T) {
 	if (LoopbackProber{}).Reachable(ctx, 0) {
 		t.Fatal("port 0 is reachable")
 	}
+}
+
+// waitForProbes fails unless n probes start well before the periodic tick.
+func waitForProbes(t *testing.T, p *fakeProber, n int) {
+	t.Helper()
+	deadline := time.Now().Add(reachabilityInterval / 4)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		started := len(p.probed)
+		p.mu.Unlock()
+		if started >= n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("fewer than %d probes started; a change did not trigger one", n)
 }

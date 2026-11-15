@@ -123,9 +123,7 @@ func (e *Engine) probeReachability() {
 		e.mu.Unlock()
 		return
 	}
-	if e.trackReachabilityLocked() {
-		e.publishLocked()
-	}
+	// publishLocked keeps e.reach in step with every commit.
 	targets := map[string]uint16{}
 	for id, entry := range e.reach {
 		targets[id] = entry.port
@@ -137,7 +135,8 @@ func (e *Engine) probeReachability() {
 	var wg sync.WaitGroup
 	for id, port := range targets {
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), reachabilityProbeTimeout)
+			// Close cancels in-flight probes through e.probeCtx.
+			ctx, cancel := context.WithTimeout(e.probeCtx, reachabilityProbeTimeout)
 			defer cancel()
 			reachable := e.opts.Prober.Reachable(ctx, port)
 			mu.Lock()

@@ -65,6 +65,8 @@ type Engine struct {
 	stop    chan struct{}
 	stopped chan struct{}
 
+	probeCtx     context.Context
+	cancelProbes context.CancelFunc
 	reachKick    chan struct{}
 	reachSync    chan chan struct{}
 	reachStopped chan struct{}
@@ -103,6 +105,7 @@ func New(store *Store, opts EngineOptions) (*Engine, error) {
 		stopped:       make(chan struct{}),
 		closed:        make(chan struct{}),
 	}
+	e.probeCtx, e.cancelProbes = context.WithCancel(context.Background())
 	e.mu.Lock()
 	e.publishLocked()
 	e.mu.Unlock()
@@ -129,6 +132,7 @@ func (e *Engine) Close(ctx context.Context) error {
 			s.subscribers = nil
 		}
 		close(e.stop)
+		e.cancelProbes()
 		go func() {
 			var err error
 			if rt != nil {
