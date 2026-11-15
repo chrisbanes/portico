@@ -15,9 +15,9 @@ import (
 	"github.com/chrisbanes/portico/helper/internal/portal"
 )
 
-// Files lists the historical records in precedence order. The first one that
+// files lists the historical records in precedence order. The first one that
 // exists is authoritative; older files are never consulted after it.
-var Files = []struct {
+var files = [...]struct {
 	Name    string
 	Version int
 }{
@@ -36,9 +36,11 @@ type ErrorKind string
 const (
 	ErrUnreadable  ErrorKind = "unreadable"
 	ErrUnsafe      ErrorKind = "unsafe"
-	ErrCorrupt     ErrorKind = "corrupt"
 	ErrUnsupported ErrorKind = "unsupported"
-	ErrInvalid     ErrorKind = "invalid"
+	// ErrCorrupt (undecodable) and ErrInvalid (decoded but breaks a rule) are
+	// diagnostic only; both mean the record cannot be used.
+	ErrCorrupt ErrorKind = "corrupt"
+	ErrInvalid ErrorKind = "invalid"
 )
 
 // Error reports why Import refused a source. It never falls back to an older file.
@@ -64,9 +66,9 @@ type Source struct {
 // Import reads the authoritative historical record under root without
 // writing anything. A root with no record yields New() and an empty Source.
 func Import(root *os.Root) (Installation, Source, error) {
-	for _, f := range Files {
+	for _, f := range files {
 		data, err := readSource(root, f.Name)
-		if errors.Is(err, fs.ErrNotExist) {
+		if err == errAbsent {
 			continue
 		}
 		if err != nil {
@@ -89,10 +91,14 @@ func Import(root *os.Root) (Installation, Source, error) {
 	return New(), Source{}, nil
 }
 
+// errAbsent is returned unwrapped so that a file vanishing after Lstat stays
+// an unreadable-source error rather than a fall-back to an older file.
+var errAbsent = errors.New("absent")
+
 func readSource(root *os.Root, name string) ([]byte, error) {
 	info, err := root.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, err
+		return nil, errAbsent
 	}
 	if err != nil {
 		return nil, &Error{File: name, Kind: ErrUnreadable, Err: err}

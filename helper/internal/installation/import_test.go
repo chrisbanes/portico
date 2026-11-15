@@ -409,3 +409,42 @@ func TestImportRejectsUnsafeSources(t *testing.T) {
 		}
 	})
 }
+
+func TestImportKeepsSwiftDecodingEdgeCases(t *testing.T) {
+	const fractional = 807692800.123456
+	for _, tc := range []struct {
+		name, file, record string
+		check              func(Installation) bool
+	}{
+		{
+			// Swift's createdAt carries sub-second precision from Date().
+			"fractional createdAt", "installation-v5.json",
+			versionFive(`{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","destination":{"kind":"localApp","port":8787},"publicAccess":"private","createdAt":807692800.123456,"desiredState":"enabled","lifecycle":"active"}`),
+			func(in Installation) bool {
+				want := swiftReferenceDate.Add(time.Duration(fractional * float64(time.Second)))
+				diff := in.Portals[0].CreatedAt.Sub(want)
+				return diff < time.Microsecond && diff > -time.Microsecond && in.Portals[0].CreatedAt.Nanosecond() != 0
+			},
+		},
+		{
+			"v3 ignores removalAssignedName on an active Portal", "installation-v3.json",
+			`{"version":3,"portals":[{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","localAppPort":8787,"createdAt":807692800,"lifecycle":"active","removalAssignedName":"x"}],"alerts":[],"operationalLogging":"enabled","launchAtLoginOffer":"notOffered"}`,
+			func(in Installation) bool { return in.Portals[0].RemovalAssignedName == nil },
+		},
+		{
+			"v5 null removalAssignedName on a removing Portal", "installation-v5.json",
+			versionFive(`{"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A","name":"hermes","destination":{"kind":"localApp","port":8787},"publicAccess":"private","createdAt":807692800,"desiredState":"stopped","lifecycle":"pendingRemoval","removalAssignedName":null}`),
+			func(in Installation) bool {
+				return in.Portals[0].Lifecycle == LifecyclePendingRemoval && in.Portals[0].RemovalAssignedName == nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _ := writeRoot(t, map[string]string{tc.file: tc.record})
+			got, _, err := importDir(t, dir)
+			if err != nil || len(got.Portals) != 1 || !tc.check(got) {
+				t.Fatalf("Import() = %+v, %v", got, err)
+			}
+		})
+	}
+}

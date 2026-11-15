@@ -105,6 +105,7 @@ func Validate(in Installation) error {
 		// Config.Validate covers the UUID, the DNS-label name, the destination
 		// and the Local-App-only rule for public access.
 		config := portal.Config{ID: p.ID, Name: p.Name, Destination: p.Destination, PublicAccess: p.PublicAccess}
+		// uuidPattern additionally requires the stored lowercase form.
 		if ids[p.ID] || !uuidPattern.MatchString(p.ID) || config.Validate() != nil {
 			return errInvalid
 		}
