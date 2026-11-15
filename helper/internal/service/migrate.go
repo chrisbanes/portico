@@ -97,7 +97,7 @@ func Open(rootPath string, opts Options) (*Store, error) {
 		root.Close()
 		return nil, err
 	}
-	s := &Store{root: root, rootPath: rootPath, lock: lock, opts: opts}
+	s := &Store{root: root, lock: lock, opts: opts}
 	if err := s.open(); err != nil {
 		s.Close()
 		return nil, err
@@ -159,7 +159,9 @@ func (s *Store) migrate() (err error) {
 	// anything is written, and sizes the free-space check.
 	sources := map[string]string{}
 	originals := map[string]map[string]string{}
-	need := int64(len(source.Data)) + freeSpaceMargin
+	// The checkpoint keeps the source bytes and the state document is at most
+	// their normalised size.
+	need := 2*int64(len(source.Data)) + freeSpaceMargin
 	if source.File != "" {
 		sources[source.File] = hash(source.Data)
 	}
@@ -174,7 +176,7 @@ func (s *Store) migrate() (err error) {
 			sources[path.Join(identitiesDir, portalID, rel)] = sum
 		}
 	}
-	if err := checkFreeSpace(s.rootPath, need); err != nil {
+	if err := checkFreeSpace(s.lock, need); err != nil {
 		return err
 	}
 
@@ -187,7 +189,10 @@ func (s *Store) migrate() (err error) {
 		// Free the space now, unless the manifest committed this generation
 		// (it is then rolled forward on the next Open). Best effort: the
 		// next Open discards uncommitted staging anyway.
-		if _, statErr := s.root.Lstat(manifestFile); err != nil && errors.Is(statErr, fs.ErrNotExist) {
+		if err == nil {
+			return
+		}
+		if _, statErr := s.root.Lstat(manifestFile); errors.Is(statErr, fs.ErrNotExist) {
 			_ = s.root.RemoveAll(staged)
 		}
 	}()
@@ -197,8 +202,10 @@ func (s *Store) migrate() (err error) {
 			return err
 		}
 	}
-	if err := syncDir(s.root, "."); err != nil {
-		return err
+	for _, dir := range []string{".", serviceDir} {
+		if err := syncDir(s.root, dir); err != nil {
+			return err
+		}
 	}
 
 	if err := s.opts.hook(PhaseCopy); err != nil {

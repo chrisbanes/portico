@@ -498,7 +498,12 @@ func TestOwnershipBusy(t *testing.T) {
 }
 
 func TestFreeSpaceCheckRejectsAnImpossibleCopy(t *testing.T) {
-	if err := checkFreeSpace(t.TempDir(), math.MaxInt64); !errors.Is(err, ErrPersistenceUnavailable) {
+	file, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := checkFreeSpace(file, math.MaxInt64); !errors.Is(err, ErrPersistenceUnavailable) {
 		t.Fatalf("checkFreeSpace() error = %v", err)
 	}
 }

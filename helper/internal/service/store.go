@@ -53,7 +53,6 @@ type Migration struct {
 // use; the engine serializes access.
 type Store struct {
 	root       *os.Root
-	rootPath   string
 	lock       *os.File
 	opts       Options
 	generation string

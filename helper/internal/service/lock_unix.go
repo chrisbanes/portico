@@ -38,11 +38,15 @@ func lockOwner(root *os.Root) (*os.File, error) {
 	return file, nil
 }
 
-// checkFreeSpace fails before staging when the filesystem holding root
-// cannot fit need bytes.
-func checkFreeSpace(root string, need int64) error {
+// checkFreeSpace fails before staging when the filesystem holding file (the
+// lock, inside the opened root) cannot fit need bytes.
+//
+// shortcut: uses Bsize, which equals Linux's Frsize on ext4/xfs/btrfs/tmpfs but
+// can differ on FUSE or network mounts; a miss only means a later ENOSPC,
+// which the import already cleans up. Split per OS if that matters.
+func checkFreeSpace(file *os.File, need int64) error {
 	var st syscall.Statfs_t
-	if err := syscall.Statfs(root, &st); err != nil {
+	if err := syscall.Fstatfs(int(file.Fd()), &st); err != nil {
 		return persistenceErr(err)
 	}
 	if available := uint64(st.Bavail) * uint64(st.Bsize); available < uint64(need) {
