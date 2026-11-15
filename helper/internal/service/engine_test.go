@@ -91,7 +91,33 @@ func (r *fakeRuntime) Reconcile(ctx context.Context, configs []portal.Config, em
 	return entries, nil
 }
 
-func (r *fakeRuntime) Authenticate(context.Context, string) error { return nil }
+// Authenticate, like portal.Runtime, fails unless the Portal is running:
+// started by the last Reconcile, Enabled, on a runtime that is not closing.
+func (r *fakeRuntime) Authenticate(_ context.Context, id string) error {
+	r.f.record("auth:" + id)
+	r.mu.Lock()
+	running := !r.closing && len(r.reconciles) > 0 && slices.ContainsFunc(r.reconciles[len(r.reconciles)-1], func(c portal.Config) bool {
+		return c.ID == id && c.DesiredState == portal.DesiredStateEnabled
+	})
+	r.mu.Unlock()
+	if !running {
+		return errors.New("portal is not running")
+	}
+	r.f.mu.Lock()
+	defer r.f.mu.Unlock()
+	return r.f.authErr
+}
+
+// emitURL sends an authentication URL as a running Portal's watcher would.
+func (r *fakeRuntime) emitURL(id, rawURL string) {
+	r.mu.Lock()
+	emit, ctx := r.emit, r.portalCtx
+	r.mu.Unlock()
+	if ctx == nil || ctx.Err() != nil {
+		return
+	}
+	emit(portal.Event{PortalID: id, AuthenticationURL: rawURL})
+}
 
 func (r *fakeRuntime) CleanupRejectedPortal(ctx context.Context, id string) error {
 	r.f.record("cleanup:" + id)
@@ -185,6 +211,7 @@ type fakeFactory struct {
 	removeErr    error
 	cleanupErr   error
 	closeErr     error
+	authErr      error
 	closeBlock   chan struct{}
 	outcomes     map[string]portal.ReconcileOutcome
 	onRemove     func()

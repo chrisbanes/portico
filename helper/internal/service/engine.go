@@ -62,6 +62,7 @@ type Engine struct {
 	removalFailed map[string]bool
 	cleanupFailed map[string]bool
 	reach         map[string]reachEntry
+	leases        map[string]*lease
 
 	kick    chan struct{}
 	syncReq chan chan struct{}
@@ -101,6 +102,7 @@ func New(store *Store, opts EngineOptions) (*Engine, error) {
 		removalFailed: map[string]bool{},
 		cleanupFailed: map[string]bool{},
 		reach:         map[string]reachEntry{},
+		leases:        map[string]*lease{},
 		reachKick:     make(chan struct{}, 1),
 		reachSync:     make(chan chan struct{}),
 		reachStopped:  make(chan struct{}),
@@ -176,8 +178,9 @@ func (e *Engine) sync() {
 
 // Session is one client connection. Closing it drops its subscriptions.
 type Session struct {
-	engine      *Engine
-	subscribers []func(Snapshot)
+	engine        *Engine
+	subscribers   []func(Snapshot)
+	enrolmentSink func(EnrolmentEvent)
 }
 
 func (e *Engine) Connect() *Session {
@@ -188,11 +191,20 @@ func (e *Engine) Connect() *Session {
 	return s
 }
 
+// Close disconnects the session. Its enrolment attempts end silently; the
+// Portals and their Enabled intent stay.
 func (s *Session) Close() {
-	s.engine.mu.Lock()
-	defer s.engine.mu.Unlock()
-	delete(s.engine.sessions, s)
-	s.subscribers = nil
+	e := s.engine
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.sessions, s)
+	s.subscribers, s.enrolmentSink = nil, nil
+	for id, l := range e.leases {
+		if l.session == s {
+			delete(e.leases, id)
+		}
+	}
+	e.publishLocked()
 }
 
 // Subscribe delivers the current snapshot, then every replacement in
@@ -424,6 +436,7 @@ type PortalSnapshot struct {
 	// RemovalAssignedName is the node name recorded when removal started,
 	// which may need removing from the tailnet by hand.
 	RemovalAssignedName *string                    `json:"removalAssignedName,omitempty"`
+	Enrolment           *Enrolment                 `json:"enrolment,omitempty"`
 	Availability        map[Operation]Availability `json:"availability"`
 }
 
@@ -489,6 +502,7 @@ func (e *Engine) buildSnapshot(state State) Snapshot {
 			c.Addresses = append([]string(nil), c.Addresses...)
 			ps.Connection = &c
 		}
+		ps.Enrolment = e.portalEnrolment(state, p)
 		ps.Availability = e.portalAvailability(state, p, ps.Connection)
 		snapshot.Portals = append(snapshot.Portals, ps)
 	}

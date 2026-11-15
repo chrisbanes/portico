@@ -117,7 +117,11 @@ func (s *Session) SetDesiredState(req Request, p SetDesiredStateParams) (Receipt
 			return noOp(p.PortalID), nil
 		}
 		st.Installation.Portals[i].DesiredState = p.State
-		return accepted(p.PortalID), nil
+		c := accepted(p.PortalID)
+		if p.State == portal.DesiredStateStopped {
+			c.after = func() { s.engine.dropLeaseLocked(p.PortalID) }
+		}
+		return c, nil
 	})
 }
 
@@ -204,7 +208,10 @@ func (s *Session) RemovePortal(req Request, p RemovePortalParams) (Receipt, erro
 		st.Installation.Portals[i].Lifecycle = installation.LifecyclePendingRemoval
 		st.Installation.Portals[i].RemovalAssignedName = optional(e.live[p.PortalID].AssignedName)
 		c := accepted(p.PortalID)
-		c.after = func() { delete(e.live, p.PortalID) }
+		c.after = func() {
+			delete(e.live, p.PortalID)
+			e.dropLeaseLocked(p.PortalID)
+		}
 		return c, nil
 	})
 }
