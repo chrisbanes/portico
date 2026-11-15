@@ -62,6 +62,12 @@ type Engine struct {
 	removalFailed map[string]bool
 	cleanupFailed map[string]bool
 	reach         map[string]reachEntry
+	leases        map[string]*lease
+	// authStarts serializes login starts per Portal; entries are never
+	// removed, so a waiting start keeps the same boundary. authStartHook, for
+	// tests only, runs just before a start enters that boundary.
+	authStarts    map[string]*sync.Mutex
+	authStartHook func()
 
 	kick    chan struct{}
 	syncReq chan chan struct{}
@@ -101,6 +107,8 @@ func New(store *Store, opts EngineOptions) (*Engine, error) {
 		removalFailed: map[string]bool{},
 		cleanupFailed: map[string]bool{},
 		reach:         map[string]reachEntry{},
+		leases:        map[string]*lease{},
+		authStarts:    map[string]*sync.Mutex{},
 		reachKick:     make(chan struct{}, 1),
 		reachSync:     make(chan chan struct{}),
 		reachStopped:  make(chan struct{}),
@@ -134,8 +142,10 @@ func (e *Engine) Close(ctx context.Context) error {
 		e.closing = true
 		rt := e.runtime
 		for s := range e.sessions {
-			s.subscribers = nil
+			s.subscribers, s.enrolmentSink = nil, nil
 		}
+		// Shutdown ends every attempt silently, like a restart.
+		clear(e.leases)
 		close(e.stop)
 		go func() {
 			var err error
@@ -176,8 +186,9 @@ func (e *Engine) sync() {
 
 // Session is one client connection. Closing it drops its subscriptions.
 type Session struct {
-	engine      *Engine
-	subscribers []func(Snapshot)
+	engine        *Engine
+	subscribers   []func(Snapshot)
+	enrolmentSink func(EnrolmentEvent)
 }
 
 func (e *Engine) Connect() *Session {
@@ -188,11 +199,24 @@ func (e *Engine) Connect() *Session {
 	return s
 }
 
+// Close disconnects the session. Its enrolment attempts end silently; the
+// Portals and their Enabled intent stay.
 func (s *Session) Close() {
-	s.engine.mu.Lock()
-	defer s.engine.mu.Unlock()
-	delete(s.engine.sessions, s)
-	s.subscribers = nil
+	e := s.engine
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.sessions, s)
+	s.subscribers, s.enrolmentSink = nil, nil
+	removed := false
+	for id, l := range e.leases {
+		if l.session == s {
+			delete(e.leases, id)
+			removed = true
+		}
+	}
+	if removed {
+		e.publishLocked()
+	}
 }
 
 // Subscribe delivers the current snapshot, then every replacement in
@@ -424,6 +448,7 @@ type PortalSnapshot struct {
 	// RemovalAssignedName is the node name recorded when removal started,
 	// which may need removing from the tailnet by hand.
 	RemovalAssignedName *string                    `json:"removalAssignedName,omitempty"`
+	Enrolment           *Enrolment                 `json:"enrolment,omitempty"`
 	Availability        map[Operation]Availability `json:"availability"`
 }
 
@@ -489,6 +514,7 @@ func (e *Engine) buildSnapshot(state State) Snapshot {
 			c.Addresses = append([]string(nil), c.Addresses...)
 			ps.Connection = &c
 		}
+		ps.Enrolment = e.portalEnrolment(state, p)
 		ps.Availability = e.portalAvailability(state, p, ps.Connection)
 		snapshot.Portals = append(snapshot.Portals, ps)
 	}

@@ -257,6 +257,9 @@ type Event struct {
 	PortalID          string
 	Status            *StatusEvent
 	AuthenticationURL string
+	// AuthenticationAttempt is the attempt passed to AuthenticateAttempt that
+	// the URL answers; empty for Authenticate.
+	AuthenticationAttempt string
 }
 
 type Runtime struct {
@@ -284,6 +287,7 @@ type portalRuntime struct {
 	emit                  func(Event)
 	proxyForDestination   func(Destination) (http.Handler, error)
 	authenticationPending bool
+	authenticationAttempt string
 	proxy                 *proxyServer
 }
 
@@ -480,6 +484,13 @@ func (r *Runtime) current(portalID string, portal *portalRuntime) bool {
 }
 
 func (r *Runtime) Authenticate(ctx context.Context, portalID string) error {
+	return r.AuthenticateAttempt(ctx, portalID, "")
+}
+
+// AuthenticateAttempt is Authenticate with an attempt identity that the
+// resulting AuthenticationURL event carries, so a caller can tell a URL that
+// answers this attempt from one answering an earlier attempt.
+func (r *Runtime) AuthenticateAttempt(ctx context.Context, portalID, attempt string) error {
 	portalID, err := normalizePortalID(portalID)
 	if err != nil {
 		return errors.New("portal is not running")
@@ -488,7 +499,7 @@ func (r *Runtime) Authenticate(ctx context.Context, portalID string) error {
 	if portal == nil {
 		return errors.New("portal is not running")
 	}
-	return portal.authenticate(ctx)
+	return portal.authenticate(ctx, attempt)
 }
 
 func (r *Runtime) CleanupRejectedPortal(ctx context.Context, portalID string) error {
@@ -760,7 +771,7 @@ func (r *portalRuntime) updatePublicAccessLocked(publicAccess PublicAccessMode) 
 	}
 }
 
-func (r *portalRuntime) authenticate(ctx context.Context) error {
+func (r *portalRuntime) authenticate(ctx context.Context, attempt string) error {
 	if err := r.acquire(ctx); err != nil {
 		return errors.New("portal is not running")
 	}
@@ -771,7 +782,9 @@ func (r *portalRuntime) authenticate(ctx context.Context) error {
 	if err := r.node.StartLoginInteractive(ctx); err != nil {
 		return errors.New("start interactive login")
 	}
-	r.authenticationPending = true
+	r.mu.Lock()
+	r.authenticationPending, r.authenticationAttempt = true, attempt
+	r.mu.Unlock()
 	return nil
 }
 
@@ -864,7 +877,7 @@ func (r *portalRuntime) closeHeld(ctx context.Context, releaseWhenDone bool, onC
 	}
 	r.mu.Lock()
 	r.config, r.node, r.watcher, r.runContext, r.emit = nil, nil, nil, nil, nil
-	r.authenticationPending = false
+	r.authenticationPending, r.authenticationAttempt = false, ""
 	r.phase = portalFailed
 	r.mu.Unlock()
 	if onClose != nil {
@@ -927,7 +940,7 @@ func (r *portalRuntime) watch(ctx context.Context, watcher Watcher, startupDeliv
 		r.mu.Lock()
 		if notification.AuthURL != "" && r.authenticationPending && r.config != nil && r.emit != nil {
 			r.authenticationPending = false
-			events = append(events, Event{PortalID: r.config.ID, AuthenticationURL: notification.AuthURL})
+			events = append(events, Event{PortalID: r.config.ID, AuthenticationURL: notification.AuthURL, AuthenticationAttempt: r.authenticationAttempt})
 		}
 		r.mu.Unlock()
 		events = append(events, r.statusEvents(ctx)...)

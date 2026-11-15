@@ -24,7 +24,7 @@ var mutations = map[Operation]bool{
 	OpCreatePortal: true, OpSetDesiredState: true, OpSetDestination: true,
 	OpSetLaunchAtLoginOffer: true, OpSetOperationalLogging: true, OpRemovePortal: true,
 	OpRetryRemoval: true, OpDismissAlert: true, OpResetTailnet: true, OpRetryRuntime: true,
-	OpStart: true, OpStop: true, OpSelectRemoteApp: true,
+	OpStart: true, OpStop: true, OpSelectRemoteApp: true, OpResumeEnrolment: true,
 }
 
 func (e *Engine) withPersistence(ops map[Operation]Availability) map[Operation]Availability {
@@ -71,5 +71,6 @@ func (e *Engine) portalAvailability(state State, p installation.Portal, c *Conne
 		OpRetryRemoval:    retry,
 		OpCopyPortalURL:   availableIf(hasURL, CodeNotAvailable),
 		OpOpenPortalURL:   availableIf(hasURL && c.Freshness == freshnessCurrent && c.State == portal.StateOnline, CodeNotAvailable),
+		OpResumeEnrolment: e.enrolmentAvailability(state, p),
 	})
 }

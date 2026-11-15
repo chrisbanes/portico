@@ -49,6 +49,7 @@ type fakeRuntime struct {
 	reconciles [][]portal.Config
 	emit       func(portal.Event)
 	portalCtx  context.Context
+	pending    map[string]string // Portal ID -> pending login attempt
 	closing    bool
 	closed     bool
 }
@@ -91,7 +92,54 @@ func (r *fakeRuntime) Reconcile(ctx context.Context, configs []portal.Config, em
 	return entries, nil
 }
 
-func (r *fakeRuntime) Authenticate(context.Context, string) error { return nil }
+// AuthenticateAttempt, like portal.Runtime, fails unless the Portal is
+// running (started by the last Reconcile, Enabled, on a runtime that is not
+// closing), and otherwise leaves one login pending, labelled with attempt.
+func (r *fakeRuntime) AuthenticateAttempt(_ context.Context, id, attempt string) error {
+	r.f.mu.Lock()
+	gate, pause := r.f.authGate, r.f.authPause
+	r.f.authPause = nil
+	r.f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	if pause != nil {
+		pause()
+	}
+	r.mu.Lock()
+	running := !r.closing && len(r.reconciles) > 0 && slices.ContainsFunc(r.reconciles[len(r.reconciles)-1], func(c portal.Config) bool {
+		return c.ID == id && c.DesiredState == portal.DesiredStateEnabled
+	})
+	r.f.mu.Lock()
+	err := r.f.authErr
+	r.f.mu.Unlock()
+	if running && err == nil {
+		if r.pending == nil {
+			r.pending = map[string]string{}
+		}
+		r.pending[id] = attempt
+	}
+	r.mu.Unlock()
+	r.f.record("auth:" + id)
+	if !running {
+		return errors.New("portal is not running")
+	}
+	return err
+}
+
+// emitURL delivers a notification URL as portal.Runtime's watcher would: only
+// while a login is pending, once, labelled with the pending attempt.
+func (r *fakeRuntime) emitURL(id, rawURL string) {
+	r.mu.Lock()
+	emit, ctx := r.emit, r.portalCtx
+	attempt, pending := r.pending[id]
+	delete(r.pending, id)
+	r.mu.Unlock()
+	if ctx == nil || ctx.Err() != nil || !pending {
+		return
+	}
+	emit(portal.Event{PortalID: id, AuthenticationURL: rawURL, AuthenticationAttempt: attempt})
+}
 
 func (r *fakeRuntime) CleanupRejectedPortal(ctx context.Context, id string) error {
 	r.f.record("cleanup:" + id)
@@ -185,6 +233,9 @@ type fakeFactory struct {
 	removeErr    error
 	cleanupErr   error
 	closeErr     error
+	authErr      error
+	authGate     chan struct{} // holds AuthenticateAttempt until closed
+	authPause    func()        // runs once inside the next AuthenticateAttempt
 	closeBlock   chan struct{}
 	outcomes     map[string]portal.ReconcileOutcome
 	onRemove     func()

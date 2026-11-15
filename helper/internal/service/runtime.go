@@ -15,7 +15,9 @@ import (
 // tests use a fake.
 type Runtime interface {
 	Reconcile(ctx context.Context, configs []portal.Config, emit func(portal.Event)) ([]portal.ReconcileEntry, error)
-	Authenticate(ctx context.Context, portalID string) error
+	// AuthenticateAttempt starts an interactive login; the AuthenticationURL
+	// event that answers it carries attempt.
+	AuthenticateAttempt(ctx context.Context, portalID, attempt string) error
 	CleanupRejectedPortal(ctx context.Context, portalID string) error
 	RemovePortal(ctx context.Context, portalID string) error
 	Close(ctx context.Context) error
@@ -90,6 +92,10 @@ func (e *Engine) converge() {
 	}
 	rt, gen := e.runtime, e.runtimeGen
 	replace := rt != nil && (e.closePending || e.runtimeLogging != logging)
+	if replace {
+		// The runtime is going away, so every attempt on it ends now.
+		e.dropAllLeasesLocked()
+	}
 	// Every change that needs runtime work commits a new revision, so an
 	// unchanged revision on the same runtime has nothing to converge.
 	if !replace && rt != nil && e.converged == (convergedAt{state.Revision, gen}) {
@@ -134,6 +140,7 @@ func (e *Engine) converge() {
 			return
 		}
 		e.runtimeGen++
+		e.dropAllLeasesLocked()
 		e.runtime, e.runtimeLogging, gen, rt = created, logging, e.runtimeGen, created
 		e.publishLocked()
 		e.mu.Unlock()
@@ -264,6 +271,7 @@ func (e *Engine) finishRemoval(id string) {
 			return errUnchanged
 		}
 		st.Installation.Portals = append(st.Installation.Portals[:i], st.Installation.Portals[i+1:]...)
+		dropActions(st, id)
 		return nil
 	})
 	if err != nil && !errors.Is(err, errUnchanged) {
@@ -304,6 +312,7 @@ func (e *Engine) finishRejection(id string) {
 		}
 		st.Installation.Portals = append(st.Installation.Portals[:i], st.Installation.Portals[i+1:]...)
 		st.Installation.Alerts = append(st.Installation.Alerts, alert)
+		dropActions(st, id)
 		return nil
 	})
 	if err != nil && !errors.Is(err, errUnchanged) {
@@ -323,10 +332,16 @@ func (e *Engine) emitter(gen uint64) func(portal.Event) {
 	return func(event portal.Event) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		if e.closing || gen != e.runtimeGen || event.Status == nil {
+		if e.closing || gen != e.runtimeGen {
 			return
 		}
 		id := strings.ToLower(event.PortalID)
+		if event.AuthenticationURL != "" {
+			e.deliverURLLocked(gen, id, event.AuthenticationAttempt, event.AuthenticationURL)
+		}
+		if event.Status == nil {
+			return
+		}
 		state := e.store.state
 		i := portalIndex(&state, id)
 		if i < 0 || state.Installation.Portals[i].Lifecycle != installation.LifecycleActive {
@@ -368,6 +383,7 @@ func (e *Engine) observeTailnet(id string, c Connection, tailnetName string) {
 			return nil
 		})
 		if err == nil {
+			e.dropLeaseLocked(id)
 			delete(e.live, id)
 			e.wake()
 		}
@@ -402,6 +418,11 @@ func (e *Engine) markLastKnownLocked() {
 	for id := range e.live {
 		e.ageFactsLocked(id)
 	}
+}
+
+// dropActions forgets a removed Portal's action markers.
+func dropActions(st *State, id string) {
+	st.Actions = slices.DeleteFunc(st.Actions, func(a Action) bool { return a.PortalID == id })
 }
 
 func portalIndex(st *State, id string) int {
