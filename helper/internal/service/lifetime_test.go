@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/chrisbanes/portico/helper/internal/installation"
 	"github.com/chrisbanes/portico/helper/internal/portal"
@@ -201,5 +202,86 @@ func TestFailedReplacementAgesFacts(t *testing.T) {
 	h.chooseLogging(installation.LoggingDisabled)
 	if p := h.portal(id); p.Connection == nil || p.Connection.Freshness != freshnessLastKnown || p.Availability[OpOpenPortalURL].Available {
 		t.Fatalf("after a failed replacement: %+v", p.Connection)
+	}
+}
+
+// blockingCloseNode is Online, and its Close blocks until release closes.
+type blockingCloseNode struct {
+	onlineNode
+	release chan struct{}
+}
+
+func (n *blockingCloseNode) Close() error {
+	<-n.release
+	return nil
+}
+
+// settleWithin fails the test if one convergence pass outlasts limit.
+func (h *harness) settleWithin(limit time.Duration) {
+	h.t.Helper()
+	done := make(chan struct{})
+	go func() {
+		h.settle()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(limit):
+		h.t.Fatalf("a convergence pass outlasted %v", limit)
+	}
+}
+
+// TestRealRuntimeHungCloseReportsWithinTheReconcileDeadline: when the real
+// runtime's Node.Close hangs during a stop or a removal, the reconcile ends at
+// its deadline, the snapshot reports the failure, and no new node starts for
+// that UUID until the close completes.
+func TestRealRuntimeHungCloseReportsWithinTheReconcileDeadline(t *testing.T) {
+	timeout := runtimeCallTimeout
+	t.Cleanup(func() { runtimeCallTimeout = timeout })
+	runtimeCallTimeout = 100 * time.Millisecond
+	for _, removal := range []bool{false, true} {
+		t.Run(map[bool]string{false: "stop", true: "removal"}[removal], func(t *testing.T) {
+			var nodes atomic.Int32
+			node := &blockingCloseNode{release: make(chan struct{})}
+			h := newHarness(t, func(h *harness) {
+				h.opts.RuntimeFactory = func(stateRoot string, _ installation.Logging) (Runtime, error) {
+					return portal.NewRuntime(stateRoot, func(string, string) portal.Node {
+						nodes.Add(1)
+						return node
+					}), nil
+				}
+			})
+			// Runs before the harness's Close, so shutdown can succeed.
+			t.Cleanup(func() { close(node.release) })
+			h.chooseLogging(installation.LoggingEnabled)
+			id := h.create("hermes", localApp(8787))
+			var err error
+			if removal {
+				_, err = h.session.RemovePortal(h.req(), RemovePortalParams{PortalID: id, Confirmed: true})
+			} else {
+				_, err = h.session.SetDesiredState(h.req(), SetDesiredStateParams{PortalID: id, State: portal.DesiredStateStopped})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.settleWithin(2 * time.Second)
+			want := ProblemCloseFailed
+			if removal {
+				want = ProblemRemovalFailed
+			}
+			if p := h.portal(id); p == nil || p.Problem != want {
+				t.Fatalf("Portal after a hung close = %+v, want problem %q", p, want)
+			}
+			if removal {
+				return
+			}
+			if _, err := h.session.SetDesiredState(h.req(), SetDesiredStateParams{PortalID: id, State: portal.DesiredStateEnabled}); err != nil {
+				t.Fatal(err)
+			}
+			h.settleWithin(2 * time.Second)
+			if n := nodes.Load(); n != 1 {
+				t.Fatalf("%d nodes started for the UUID before its close completed, want 1", n)
+			}
+		})
 	}
 }

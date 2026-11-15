@@ -1918,24 +1918,48 @@ func TestStartAndCloseAreSerialized(t *testing.T) {
 	}
 }
 
+// TestPortalWatcherUsesRuntimeCancellationContext: a Portal outlives the
+// Reconcile that started it, through its watcher and HTTPS proxy, whether
+// that Reconcile's context is cancelled or expires; Runtime.Close ends it.
 func TestPortalWatcherUsesRuntimeCancellationContext(t *testing.T) {
-	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
-	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
-	ctx, cancel := context.WithCancel(context.Background())
-	if _, err := runtime.Reconcile(ctx, []Config{{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787), DesiredState: DesiredStateEnabled}}, func(Event) {}); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	if node.watchContext == nil {
-		t.Fatal("Watch was not called")
-	}
-	cancel()
-	select {
-	case <-node.watchContext.Done():
-	case <-time.After(time.Second):
-		t.Fatal("watch context did not inherit runtime cancellation")
-	}
-	if err := runtime.Close(context.Background()); err != nil {
-		t.Fatalf("Close: %v", err)
+	for _, expire := range []bool{false, true} {
+		localApp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "local") }))
+		t.Cleanup(localApp.Close)
+		port, _ := localAppPort(t, localApp.URL)
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		node := &fakeNode{watcher: newFakeWatcher(), realListener: listener, status: Status{
+			BackendState: "Running", DNSName: "hermes.example.ts.net.", CertDomains: []string{"hermes.example.ts.net"},
+		}}
+		runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		config := Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(uint16(port)), DesiredState: DesiredStateEnabled}
+		if entries, err := runtime.Reconcile(ctx, []Config{config}, func(Event) {}); err != nil || entries[0].Outcome != OutcomeConverged {
+			t.Fatalf("Reconcile = (%+v, %v)", entries, err)
+		}
+		if expire {
+			<-ctx.Done()
+		}
+		cancel()
+		if node.watchContext == nil {
+			t.Fatal("Watch was not called")
+		}
+		select {
+		case <-node.watchContext.Done():
+			t.Fatalf("watch context ended with its Reconcile (expire=%v)", expire)
+		case <-time.After(50 * time.Millisecond):
+		}
+		assertRemoteAppResponse(t, "http://"+listener.Addr().String(), "/", http.StatusOK, "local")
+		if err := runtime.Close(context.Background()); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		select {
+		case <-node.watchContext.Done():
+		case <-time.After(time.Second):
+			t.Fatal("watch context outlived Runtime.Close")
+		}
 	}
 }
 

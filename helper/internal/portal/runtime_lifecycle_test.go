@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -161,3 +162,185 @@ func (*lifecycleNode) TLSConfig() *tls.Config { return nil }
 func (*lifecycleNode) Close() error           { return nil }
 
 func lifecycleStatus() Status { return Status{BackendState: "Running"} }
+
+// hungCloseFactory starts a fresh recording node per call; the first node
+// for hungID blocks in Close until release closes.
+type hungCloseFactory struct {
+	mu      sync.Mutex
+	hungID  string
+	release chan struct{}
+	started map[string]int
+	nodes   []*fakeNode
+}
+
+func newHungCloseFactory(hungID string) *hungCloseFactory {
+	return &hungCloseFactory{hungID: hungID, release: make(chan struct{}), started: map[string]int{}}
+}
+
+func (f *hungCloseFactory) new(dir, _ string) Node {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := filepath.Base(dir)
+	f.started[id]++
+	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+	f.nodes = append(f.nodes, node)
+	if id == f.hungID && f.started[id] == 1 {
+		return &hungCloseNode{fakeNode: node, release: f.release}
+	}
+	return node
+}
+
+// hungCloseNode blocks in its first Close until release closes.
+type hungCloseNode struct {
+	*fakeNode
+	release chan struct{}
+	once    sync.Once
+}
+
+func (n *hungCloseNode) Close() error {
+	n.once.Do(func() { <-n.release })
+	return n.fakeNode.Close()
+}
+
+func (f *hungCloseFactory) count(id string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.started[id]
+}
+
+func reconcileWithin(t *testing.T, runtime *Runtime, deadline time.Duration, configs ...Config) map[string]ReconcileOutcome {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	started := time.Now()
+	entries, err := runtime.Reconcile(ctx, configs, func(Event) {})
+	if elapsed := time.Since(started); elapsed > deadline+time.Second {
+		t.Fatalf("Reconcile took %v, past its %v deadline", elapsed, deadline)
+	}
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	outcomes := map[string]ReconcileOutcome{}
+	for _, entry := range entries {
+		outcomes[entry.PortalID] = entry.Outcome
+	}
+	return outcomes
+}
+
+func enabledConfig(id, name string, port uint16) Config {
+	return Config{PublicAccess: PublicAccessModePrivate, ID: id, Name: name, Destination: localAppDestination(port), DesiredState: DesiredStateEnabled}
+}
+
+// TestReconcileDeadlineBoundsHungNodeClose: a Node.Close that blocks during a
+// stop or a removal ends that Reconcile at its deadline with closeFailed, and
+// no new node starts for the UUID until the close completes.
+func TestReconcileDeadlineBoundsHungNodeClose(t *testing.T) {
+	for _, removal := range []bool{false, true} {
+		factory := newHungCloseFactory(testPortalID)
+		runtime := NewRuntime(t.TempDir(), factory.new)
+		enabled := enabledConfig(testPortalID, "hermes", 8787)
+		if got := reconcileWithin(t, runtime, time.Second, enabled); got[testPortalID] != OutcomeConverged {
+			t.Fatalf("start = %v", got)
+		}
+		var configs []Config
+		if !removal {
+			stopped := enabled
+			stopped.DesiredState = DesiredStateStopped
+			configs = []Config{stopped}
+		}
+		if got := reconcileWithin(t, runtime, 50*time.Millisecond, configs...); got[testPortalID] != OutcomeCloseFailed {
+			t.Fatalf("hung close (removal=%v) = %v, want closeFailed", removal, got)
+		}
+		if got := reconcileWithin(t, runtime, 50*time.Millisecond, enabled); got[testPortalID] != OutcomeStartFailed || factory.count(testPortalID) != 1 {
+			t.Fatalf("restart before the close completed = %v with %d nodes, want startFailed and 1", got, factory.count(testPortalID))
+		}
+		close(factory.release)
+		// The late close hands the gate back once it completes.
+		portal := runtime.portal(testPortalID)
+		if err := portal.acquire(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		portal.release()
+		if got := reconcileWithin(t, runtime, time.Second, enabled); got[testPortalID] != OutcomeConverged || factory.count(testPortalID) != 2 {
+			t.Fatalf("restart after the close completed = %v with %d nodes", got, factory.count(testPortalID))
+		}
+		if err := runtime.Close(context.Background()); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+}
+
+// TestHungPortalDoesNotStopAnotherPortalConverging: while Portal A's close
+// hangs, Portal B, sorted after it, converges on its next pass.
+func TestHungPortalDoesNotStopAnotherPortalConverging(t *testing.T) {
+	hung, other := secondPortalID, testPortalID // A sorts first
+	factory := newHungCloseFactory(hung)
+	runtime := NewRuntime(t.TempDir(), factory.new)
+	defer func() { _ = runtime.Close(context.Background()) }()
+	defer close(factory.release)
+	a := enabledConfig(hung, "atlas", 8788)
+	if got := reconcileWithin(t, runtime, time.Second, a); got[hung] != OutcomeConverged {
+		t.Fatalf("start A = %v", got)
+	}
+	a.DesiredState = DesiredStateStopped
+	if got := reconcileWithin(t, runtime, 50*time.Millisecond, a); got[hung] != OutcomeCloseFailed {
+		t.Fatalf("hung close of A = %v", got)
+	}
+	b := enabledConfig(other, "hermes", 8787)
+	got := reconcileWithin(t, runtime, 200*time.Millisecond, a, b)
+	if got[other] != OutcomeConverged || got[hung] != OutcomeCloseFailed {
+		t.Fatalf("next pass = %v, want B converged while A's close is unproven", got)
+	}
+	// Re-enabling A is skipped too, so a third Portal still converges.
+	a.DesiredState = DesiredStateEnabled
+	third := enabledConfig("7ea74329-3144-4ba2-925f-138d14d61fcc", "selina", 8789)
+	got = reconcileWithin(t, runtime, 200*time.Millisecond, a, b, third)
+	if got[third.ID] != OutcomeConverged || got[hung] != OutcomeStartFailed || factory.count(hung) != 1 {
+		t.Fatalf("re-enable pass = %v with %d nodes for A, want the third Portal converged", got, factory.count(hung))
+	}
+}
+
+// TestRuntimeCloseClosesNodesThenEndsLifetime: Close closes every node before
+// cancelling the lifetime, a second Close is a no-op, and a Reconcile racing
+// Close leaves no Portal running.
+func TestRuntimeCloseClosesNodesThenEndsLifetime(t *testing.T) {
+	var runtime *Runtime
+	var lifetimeEndedFirst bool
+	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "Starting"}}
+	node.observeClose = func() { lifetimeEndedFirst = runtime.lifetime.Err() != nil }
+	runtime = NewRuntime(t.TempDir(), func(_, _ string) Node { return node })
+	if got := reconcileWithin(t, runtime, time.Second, enabledConfig(testPortalID, "hermes", 8787)); got[testPortalID] != OutcomeConverged {
+		t.Fatalf("start = %v", got)
+	}
+	for range 2 {
+		if err := runtime.Close(context.Background()); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+	if !node.closed || lifetimeEndedFirst || runtime.lifetime.Err() == nil {
+		t.Fatalf("node closed %v, lifetime ended before node close %v, lifetime ended %v", node.closed, lifetimeEndedFirst, runtime.lifetime.Err() != nil)
+	}
+
+	for range 20 {
+		factory := newHungCloseFactory("")
+		runtime := NewRuntime(t.TempDir(), factory.new)
+		reconciled := make(chan struct{})
+		go func() {
+			defer close(reconciled)
+			_, _ = runtime.Reconcile(context.Background(), []Config{enabledConfig(testPortalID, "hermes", 8787), enabledConfig(secondPortalID, "atlas", 8788)}, func(Event) {})
+		}()
+		if err := runtime.Close(context.Background()); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		<-reconciled
+		factory.mu.Lock()
+		for _, node := range factory.nodes {
+			node.mu.Lock()
+			if !node.closed || node.watchContext != nil && node.watchContext.Err() == nil {
+				t.Errorf("a Portal started by a racing Reconcile outlived Close")
+			}
+			node.mu.Unlock()
+		}
+		factory.mu.Unlock()
+	}
+}

@@ -269,6 +269,10 @@ type Runtime struct {
 	factory             NodeFactory
 	proxyForDestination func(Destination) (http.Handler, error)
 	portals             map[string]*portalRuntime
+	// lifetime outlives every Reconcile: Portals run on it until they stop or
+	// Close cancels it.
+	lifetime       context.Context
+	cancelLifetime context.CancelFunc
 }
 
 type portalRuntime struct {
@@ -289,6 +293,9 @@ type portalRuntime struct {
 	authenticationPending bool
 	authenticationAttempt string
 	proxy                 *proxyServer
+	// closeUnproven is set while a close that outlived its caller's deadline
+	// still holds the gate; Reconcile skips the Portal rather than wait on it.
+	closeUnproven bool
 }
 
 type portalPhase string
@@ -303,14 +310,19 @@ const (
 var errRuntimeClosing = errors.New("runtime is closing")
 
 func NewRuntime(stateRoot string, factory NodeFactory) *Runtime {
+	lifetime, cancelLifetime := context.WithCancel(context.Background())
 	return &Runtime{
 		stateRoot:           stateRoot,
 		factory:             factory,
 		proxyForDestination: newDestinationProxy,
 		portals:             make(map[string]*portalRuntime),
+		lifetime:            lifetime,
+		cancelLifetime:      cancelLifetime,
 	}
 }
 
+// Reconcile converges the Portals on configs. ctx bounds only its waits; the
+// Portals it starts run on the Runtime's lifetime until they stop or Close.
 func (r *Runtime) Reconcile(ctx context.Context, configs []Config, emit func(Event)) ([]ReconcileEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -367,6 +379,9 @@ func (r *Runtime) reconcilePortal(
 		if portal == nil {
 			return OutcomeConverged
 		}
+		if portal.isCloseUnproven() {
+			return OutcomeCloseFailed
+		}
 		if err := r.closeAndRemove(ctx, portalID, portal); err != nil {
 			return OutcomeCloseFailed
 		}
@@ -388,7 +403,7 @@ func (r *Runtime) reconcilePortal(
 				return OutcomeStartFailed
 			}
 			node := r.factory(filepath.Join(r.stateRoot, config.ID), config.Name)
-			events, err := portal.start(ctx, config, node, emit)
+			events, err := portal.start(ctx, r.lifetime, config, node, emit)
 			if err != nil {
 				_ = r.closeAndRemoveHeld(ctx, portalID, portal)
 				for _, event := range events {
@@ -399,6 +414,10 @@ func (r *Runtime) reconcilePortal(
 			portal.release()
 			portal.emitStartupEvents(events)
 			return OutcomeConverged
+		}
+		// No new node starts for this UUID until its earlier close is proven.
+		if portal.isCloseUnproven() {
+			return OutcomeStartFailed
 		}
 		if err := portal.acquire(ctx); err != nil {
 			return OutcomeStartFailed
@@ -646,6 +665,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 		}()
 	}
 	group.Wait()
+	r.cancelLifetime()
 	return errors.Join(errs...)
 }
 
@@ -677,7 +697,7 @@ func (r *portalRuntime) snapshot() (portalPhase, Config, Destination) {
 	return r.phase, *r.config, r.config.Destination
 }
 
-func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emit func(Event)) ([]Event, error) {
+func (r *portalRuntime) start(ctx, lifetime context.Context, config Config, node Node, emit func(Event)) ([]Event, error) {
 	r.mu.Lock()
 	r.config = &config
 	r.node = node
@@ -692,7 +712,7 @@ func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emi
 	if err := ctx.Err(); err != nil {
 		return r.startupFailure(err)
 	}
-	watchContext, cancel := context.WithCancel(ctx)
+	watchContext, cancel := context.WithCancel(lifetime)
 	watcher, err := node.Watch(watchContext)
 	if err != nil {
 		cancel()
@@ -707,13 +727,17 @@ func (r *portalRuntime) start(ctx context.Context, config Config, node Node, emi
 	r.mu.Unlock()
 	r.watchDone.Add(1)
 	go r.watch(watchContext, watcher, startupDelivery)
-	status, err := node.Status(watchContext)
+	// Startup waits end with the operation or with the run.
+	waitContext, stopWait := context.WithCancel(ctx)
+	defer stopWait()
+	defer context.AfterFunc(watchContext, stopWait)()
+	status, err := node.Status(waitContext)
 	if err != nil {
 		return r.startupFailure(errors.New("read portal status"))
 	}
 	mapped := mapStatus(status)
 	if mapped.State == StateOnline && mapped.PortalURL != "" {
-		if err := r.ensureProxyLocked(watchContext); err != nil {
+		if err := r.ensureProxyLocked(waitContext, watchContext); err != nil {
 			return r.startupFailure(err)
 		}
 	}
@@ -820,10 +844,12 @@ func (r *portalRuntime) closeHeld(ctx context.Context, releaseWhenDone bool, onC
 			clearWatcher()
 		case <-ctx.Done():
 			releaseGate = false
+			r.setCloseUnproven(true)
 			go func() {
 				<-watcherDone
 				clearWatcher()
 				r.markFailed()
+				r.setCloseUnproven(false)
 				r.release()
 			}()
 			return ctx.Err(), true
@@ -855,9 +881,11 @@ func (r *portalRuntime) closeHeld(ctx context.Context, releaseWhenDone bool, onC
 			}
 		case <-ctx.Done():
 			releaseGate = false
+			r.setCloseUnproven(true)
 			go func() {
 				<-nodeDone
 				r.markFailed()
+				r.setCloseUnproven(false)
 				r.release()
 			}()
 			return ctx.Err(), true
@@ -884,6 +912,18 @@ func (r *portalRuntime) closeHeld(ctx context.Context, releaseWhenDone bool, onC
 		onClose()
 	}
 	return nil, false
+}
+
+func (r *portalRuntime) setCloseUnproven(unproven bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closeUnproven = unproven
+}
+
+func (r *portalRuntime) isCloseUnproven() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closeUnproven
 }
 
 func (r *portalRuntime) requestStop() {
@@ -977,7 +1017,7 @@ func (r *portalRuntime) statusEvents(ctx context.Context) []Event {
 	}
 	mapped := mapStatus(status)
 	if mapped.State == StateOnline && mapped.PortalURL != "" {
-		if err := r.ensureProxyLocked(ctx); err != nil {
+		if err := r.ensureProxyLocked(ctx, ctx); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -994,7 +1034,8 @@ func (r *portalRuntime) statusEvents(ctx context.Context) []Event {
 	return []Event{{PortalID: config.ID, Status: &mapped}}
 }
 
-func (r *portalRuntime) ensureProxyLocked(ctx context.Context) error {
+// ensureProxyLocked waits on ctx; the proxy it starts serves until run ends.
+func (r *portalRuntime) ensureProxyLocked(ctx, run context.Context) error {
 	if r.proxy != nil {
 		return nil
 	}
@@ -1019,7 +1060,7 @@ func (r *portalRuntime) ensureProxyLocked(ctx context.Context) error {
 	if tlsConfig := r.node.TLSConfig(); tlsConfig != nil {
 		listener = tls.NewListener(listener, tlsConfig)
 	}
-	r.proxy = startProxyServer(ctx, listener, handler, func(err error) {
+	r.proxy = startProxyServer(run, listener, handler, func(err error) {
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			r.fail()
 		}

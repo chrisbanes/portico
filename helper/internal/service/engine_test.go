@@ -38,9 +38,9 @@ func (c *fakeClock) set(t time.Time) {
 // fakeRuntime records every call together with the on-disk state at call
 // time, so tests can prove intent was durable before any side effect. It
 // models the portal.Runtime lifetime rules the engine depends on: Portals
-// live on the context of the Reconcile that started them, so their events
-// stop when it ends; and Close marks the runtime closing for good, even when
-// it fails, after which Reconcile is refused.
+// outlive the Reconcile that started them and report until Close, which
+// stops their watchers and marks the runtime closing for good, even when it
+// fails, after which Reconcile is refused.
 type fakeRuntime struct {
 	f       *fakeFactory
 	logging installation.Logging
@@ -48,7 +48,6 @@ type fakeRuntime struct {
 	mu         sync.Mutex
 	reconciles [][]portal.Config
 	emit       func(portal.Event)
-	portalCtx  context.Context
 	pending    map[string]string // Portal ID -> pending login attempt
 	closing    bool
 	closed     bool
@@ -69,7 +68,6 @@ func (r *fakeRuntime) Reconcile(ctx context.Context, configs []portal.Config, em
 	}
 	r.reconciles = append(r.reconciles, slices.Clone(configs))
 	r.emit = emit
-	r.portalCtx = ctx
 	r.mu.Unlock()
 	r.f.mu.Lock()
 	defer r.f.mu.Unlock()
@@ -131,11 +129,11 @@ func (r *fakeRuntime) AuthenticateAttempt(_ context.Context, id, attempt string)
 // while a login is pending, once, labelled with the pending attempt.
 func (r *fakeRuntime) emitURL(id, rawURL string) {
 	r.mu.Lock()
-	emit, ctx := r.emit, r.portalCtx
+	emit, closing := r.emit, r.closing
 	attempt, pending := r.pending[id]
 	delete(r.pending, id)
 	r.mu.Unlock()
-	if ctx == nil || ctx.Err() != nil || !pending {
+	if emit == nil || closing || !pending {
 		return
 	}
 	emit(portal.Event{PortalID: id, AuthenticationURL: rawURL, AuthenticationAttempt: attempt})
@@ -204,13 +202,13 @@ func (r *fakeRuntime) reconcileCount() int {
 }
 
 // emitStatus sends a status event through the emitter the runtime was given,
-// as a running Portal's watcher would. A Portal whose context ended has no
-// watcher, so it sends nothing.
+// as a running Portal's watcher would. A closing runtime has stopped its
+// watchers, so it sends nothing.
 func (r *fakeRuntime) emitStatus(id string, status portal.StatusEvent) {
 	r.mu.Lock()
-	emit, ctx := r.emit, r.portalCtx
+	emit, closing := r.emit, r.closing
 	r.mu.Unlock()
-	if ctx == nil || ctx.Err() != nil {
+	if emit == nil || closing {
 		return
 	}
 	emit(portal.Event{PortalID: id, Status: &status})
