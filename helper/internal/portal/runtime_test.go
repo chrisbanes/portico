@@ -1463,6 +1463,51 @@ func TestAuthenticateEmitsTransientURLFromFreshNotification(t *testing.T) {
 	}
 }
 
+// TestAuthenticateAttemptLabelsItsURL: a URL answers the latest attempt, and
+// plain Authenticate (the v7 helper path) still emits URLs with no attempt.
+func TestAuthenticateAttemptLabelsItsURL(t *testing.T) {
+	factory := newFakeFactory()
+	events := make(chan Event, 8)
+	runtime := NewRuntime(t.TempDir(), factory.New)
+	if err := reconcileOne(runtime, Config{PublicAccess: PublicAccessModePrivate, ID: testPortalID, Name: "hermes", Destination: localAppDestination(8787)}, func(event Event) {
+		events <- event
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer runtime.Close(context.Background())
+	<-events
+	nextURL := func() Event {
+		t.Helper()
+		for event := range events {
+			if event.AuthenticationURL != "" {
+				return event
+			}
+		}
+		t.Fatal("events closed")
+		return Event{}
+	}
+
+	// A second attempt before the URL arrives takes over the pending login.
+	if err := runtime.AuthenticateAttempt(context.Background(), testPortalID, "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.AuthenticateAttempt(context.Background(), testPortalID, "second"); err != nil {
+		t.Fatal(err)
+	}
+	factory.node.watcher.send(Notification{AuthURL: "https://login.tailscale.com/a/secret"})
+	if event := nextURL(); event.AuthenticationAttempt != "second" {
+		t.Fatalf("attempt = %q, want the latest attempt", event.AuthenticationAttempt)
+	}
+
+	if err := runtime.Authenticate(context.Background(), testPortalID); err != nil {
+		t.Fatal(err)
+	}
+	factory.node.watcher.send(Notification{AuthURL: "https://login.tailscale.com/a/secret"})
+	if event := nextURL(); event.AuthenticationAttempt != "" {
+		t.Fatalf("plain Authenticate produced attempt %q", event.AuthenticationAttempt)
+	}
+}
+
 func TestAuthenticationCanBringANeedsLoginPortalOnlineAndStartListener(t *testing.T) {
 	node := &fakeNode{watcher: newFakeWatcher(), status: Status{BackendState: "NeedsLogin"}}
 	runtime := NewRuntime(t.TempDir(), func(_, _ string) Node { return node })

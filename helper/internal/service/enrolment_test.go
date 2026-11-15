@@ -223,15 +223,23 @@ func TestEnrolmentRejectsUnsafeURLs(t *testing.T) {
 	id := h.create("hermes", localApp(1))
 	h.authenticating(id)
 	s, events, _ := h.connect()
-	if _, err := s.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: id}); err != nil {
-		t.Fatal(err)
+	resume := func() {
+		t.Helper()
+		calls := len(h.factory.callsNamed("auth:" + id))
+		if _, err := s.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: id}); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "Authenticate", func() bool { return len(h.factory.callsNamed("auth:"+id)) == calls+1 })
 	}
+	// The runtime emits one URL per login, so each unsafe URL gets its own attempt.
 	for _, bad := range []string{"http://login.tailscale.com/a/1", "https:///a/1", "https://user@login.tailscale.com/a/1", "javascript:alert(1)", "not a url"} {
+		resume()
 		h.factory.runtime().emitURL(id, bad)
 	}
-	if len(events.all()) != 0 {
-		t.Fatalf("unsafe URLs were delivered: %+v", events.all())
+	if len(events.of(EnrolmentAuthenticationURL)) != 0 {
+		t.Fatalf("unsafe URLs were delivered: %v", events.all())
 	}
+	resume()
 	h.factory.runtime().emitURL(id, enrolmentURL)
 	if len(events.of(EnrolmentAuthenticationURL)) != 1 {
 		t.Fatal("a valid URL after rejected ones was not delivered")
@@ -366,16 +374,23 @@ func TestEnrolmentRejectsCallbacksFromAReplacedRuntime(t *testing.T) {
 	h.chooseLogging(installation.LoggingEnabled)
 	id := h.create("hermes", localApp(1))
 	old := h.factory.runtime()
+	h.authenticating(id)
+	s, events, _ := h.connect()
+	// An attempt on the old runtime is still pending when it is replaced.
+	if _, err := s.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: id}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "Authenticate on the old runtime", func() bool { return len(h.factory.callsNamed("auth:"+id)) == 1 })
 	h.chooseLogging(installation.LoggingDisabled)
 	current := h.factory.runtime()
 	if current == old {
 		t.Fatal("the runtime was not replaced")
 	}
 	h.authenticating(id)
-	s, events, _ := h.connect()
 	if _, err := s.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: id}); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, "Authenticate on the new runtime", func() bool { return len(h.factory.callsNamed("auth:"+id)) == 2 })
 	old.emitURL(id, enrolmentURL)
 	if len(events.of(EnrolmentAuthenticationURL)) != 0 {
 		t.Fatal("a replaced runtime's URL was delivered")
@@ -383,6 +398,42 @@ func TestEnrolmentRejectsCallbacksFromAReplacedRuntime(t *testing.T) {
 	current.emitURL(id, enrolmentURL)
 	if len(events.of(EnrolmentAuthenticationURL)) != 1 {
 		t.Fatal("the current runtime's URL was not delivered")
+	}
+}
+
+// TestEnrolmentDropsASupersededAttemptsLateURL: A's login is pending when B
+// resumes. A's URL, arriving before B's login starts, must not reach B or use
+// up B's delivery; B then gets the URL answering its own attempt.
+func TestEnrolmentDropsASupersededAttemptsLateURL(t *testing.T) {
+	h := newHarness(t)
+	h.chooseLogging(installation.LoggingEnabled)
+	id := h.create("hermes", localApp(1))
+	h.authenticating(id)
+	a, aEvents, _ := h.connect()
+	if _, err := a.ResumeEnrolment(h.req(), ResumeEnrolmentParams{PortalID: id}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "A's Authenticate", func() bool { return len(h.factory.callsNamed("auth:"+id)) == 1 })
+
+	// Hold B's login so A's URL arrives first.
+	gate := make(chan struct{})
+	h.factory.set(func(f *fakeFactory) { f.authGate = gate })
+	b, bEvents, _ := h.connect()
+	bReq := h.req()
+	if _, err := b.ResumeEnrolment(bReq, ResumeEnrolmentParams{PortalID: id}); err != nil {
+		t.Fatal(err)
+	}
+	h.factory.runtime().emitURL(id, enrolmentURL)
+	if len(bEvents.of(EnrolmentAuthenticationURL)) != 0 || len(aEvents.of(EnrolmentAuthenticationURL)) != 0 {
+		t.Fatalf("A's late URL was delivered: A %v, B %v", aEvents.all(), bEvents.all())
+	}
+
+	h.factory.set(func(f *fakeFactory) { f.authGate = nil })
+	close(gate)
+	waitFor(t, "B's Authenticate", func() bool { return len(h.factory.callsNamed("auth:"+id)) == 2 })
+	h.factory.runtime().emitURL(id, enrolmentURL)
+	if urls := bEvents.of(EnrolmentAuthenticationURL); len(urls) != 1 || urls[0].RequestID != bReq.ID {
+		t.Fatalf("B's events = %v, want its own URL once", bEvents.all())
 	}
 }
 

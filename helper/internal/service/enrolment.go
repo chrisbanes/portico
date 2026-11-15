@@ -144,7 +144,7 @@ func (e *Engine) startLeaseLocked(s *Session, requestID, portalID string) {
 			// Superseded or disconnected before the login started.
 			return
 		}
-		err := callRuntime(func(ctx context.Context) error { return rt.Authenticate(ctx, portalID) })
+		err := callRuntime(func(ctx context.Context) error { return rt.AuthenticateAttempt(ctx, portalID, l.nonce) })
 		if err == nil {
 			return
 		}
@@ -180,11 +180,13 @@ func (l *lease) send(kind EnrolmentEventKind, rawURL string) {
 }
 
 // deliverURLLocked routes a runtime URL to the Portal's current lease only.
-// URLs with no lease, from another runtime generation, after delivery, or
-// that are not https with a host are dropped. Nothing keeps the URL.
-func (e *Engine) deliverURLLocked(gen uint64, portalID, rawURL string) {
+// The runtime labels each URL with the attempt it answers, so a late URL for
+// a superseded attempt is dropped even after the new lease exists. URLs with
+// no lease, from another runtime generation, after delivery, or that are not
+// https with a host are dropped too. Nothing keeps the URL.
+func (e *Engine) deliverURLLocked(gen uint64, portalID, attempt, rawURL string) {
 	l, ok := e.leases[portalID]
-	if !ok || l.gen != gen || l.delivered {
+	if !ok || l.gen != gen || l.nonce != attempt || l.delivered {
 		return
 	}
 	u, err := url.Parse(rawURL)

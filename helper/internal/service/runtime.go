@@ -15,7 +15,9 @@ import (
 // tests use a fake.
 type Runtime interface {
 	Reconcile(ctx context.Context, configs []portal.Config, emit func(portal.Event)) ([]portal.ReconcileEntry, error)
-	Authenticate(ctx context.Context, portalID string) error
+	// AuthenticateAttempt starts an interactive login; the AuthenticationURL
+	// event that answers it carries attempt.
+	AuthenticateAttempt(ctx context.Context, portalID, attempt string) error
 	CleanupRejectedPortal(ctx context.Context, portalID string) error
 	RemovePortal(ctx context.Context, portalID string) error
 	Close(ctx context.Context) error
@@ -335,7 +337,7 @@ func (e *Engine) emitter(gen uint64) func(portal.Event) {
 		}
 		id := strings.ToLower(event.PortalID)
 		if event.AuthenticationURL != "" {
-			e.deliverURLLocked(gen, id, event.AuthenticationURL)
+			e.deliverURLLocked(gen, id, event.AuthenticationAttempt, event.AuthenticationURL)
 		}
 		if event.Status == nil {
 			return
