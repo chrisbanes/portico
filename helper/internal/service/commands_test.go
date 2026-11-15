@@ -153,9 +153,10 @@ func TestAuthoritativeOperationMatrix(t *testing.T) {
 	rt := h.factory.runtime()
 	rt.emitStatus(enabled, online("enabled", "one.ts.net", "tailnet-a"))
 	h.factory.set(func(f *fakeFactory) { f.cleanupErr = errors.New("cleanup failed") })
-	rt.emitStatus(stopped, online("stopped", "two.ts.net", "tailnet-b"))
+	rejectedID := h.create("rejected", localApp(5))
+	rt.emitStatus(rejectedID, online("rejected", "two.ts.net", "tailnet-b"))
 	h.settle()
-	rejected := h.portal(stopped)
+	rejected := h.portal(rejectedID)
 	if rejected.Lifecycle != installation.LifecyclePendingTailnetRejection {
 		t.Fatalf("Portal = %+v, want pending rejection", rejected)
 	}

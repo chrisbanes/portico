@@ -108,12 +108,13 @@ func (e *Engine) converge() {
 		err := rt.Close(ctx)
 		cancel()
 		e.mu.Lock()
+		// Either way the old runtime has stopped reporting.
+		e.markLastKnownLocked()
 		if err != nil {
 			e.failure = runtimeFailureClose
 			e.closePending = true
 		} else {
 			e.runtime, rt, e.closePending = nil, nil, false
-			e.markLastKnownLocked()
 		}
 		e.publishLocked()
 		e.mu.Unlock()
@@ -162,8 +163,11 @@ func (e *Engine) converge() {
 			e.removalFailed[p.ID] = true
 		case outcomes[p.ID] == portal.OutcomeStartFailed:
 			e.problems[p.ID] = ProblemStartFailed
+			e.ageFactsLocked(p.ID)
 		case outcomes[p.ID] == portal.OutcomeCloseFailed:
+			// The runtime stopped watching before the close failed.
 			e.problems[p.ID] = ProblemCloseFailed
+			e.ageFactsLocked(p.ID)
 		default:
 			delete(e.problems, p.ID)
 			if p.Lifecycle == installation.LifecycleActive && p.DesiredState == portal.DesiredStateStopped {
@@ -325,7 +329,9 @@ func (e *Engine) emitter(gen uint64) func(portal.Event) {
 		id := strings.ToLower(event.PortalID)
 		state := e.store.state
 		i := portalIndex(&state, id)
-		if i < 0 || state.Installation.Portals[i].Lifecycle != installation.LifecycleActive {
+		// A Stopped Portal's facts belong to markStoppedLocked; a late event
+		// from its closing node must not make them current again.
+		if i < 0 || state.Installation.Portals[i].Lifecycle != installation.LifecycleActive || state.Installation.Portals[i].DesiredState != portal.DesiredStateEnabled {
 			return
 		}
 		connection := sanitizeStatus(*event.Status)
@@ -379,6 +385,14 @@ func (e *Engine) observeTailnet(id string, c Connection, tailnetName string) {
 func (e *Engine) markStoppedLocked(id string) {
 	if c, ok := e.live[id]; ok {
 		c.State = portal.StateStopped
+		e.live[id] = c
+		e.ageFactsLocked(id)
+	}
+}
+
+// ageFactsLocked marks one Portal's facts last-known: nothing reports them now.
+func (e *Engine) ageFactsLocked(id string) {
+	if c, ok := e.live[id]; ok {
 		c.Freshness = freshnessLastKnown
 		e.live[id] = c
 	}
@@ -386,9 +400,8 @@ func (e *Engine) markStoppedLocked(id string) {
 
 // markLastKnownLocked marks facts from a runtime that has gone.
 func (e *Engine) markLastKnownLocked() {
-	for id, c := range e.live {
-		c.Freshness = freshnessLastKnown
-		e.live[id] = c
+	for id := range e.live {
+		e.ageFactsLocked(id)
 	}
 }
 

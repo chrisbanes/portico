@@ -7,8 +7,8 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/chrisbanes/portico/helper/internal/installation"
 	"github.com/chrisbanes/portico/helper/internal/portal"
@@ -113,10 +113,10 @@ func TestRealRuntimeStopLeavesNoCurrentOnlineFacts(t *testing.T) {
 	})
 	h.chooseLogging(installation.LoggingEnabled)
 	id := h.create("hermes", localApp(8787))
-	waitUntil(t, "the Portal to report Online", func() bool {
-		p := h.portal(id)
-		return p.Connection != nil && p.Connection.State == portal.StateOnline && p.Availability[OpOpenPortalURL].Available
-	})
+	// Startup facts arrive within the reconcile that create waits for.
+	if p := h.portal(id); p.Connection == nil || p.Connection.State != portal.StateOnline || !p.Availability[OpOpenPortalURL].Available {
+		t.Fatalf("Portal before the stop = %+v", p)
+	}
 	if _, err := h.session.SetDesiredState(h.req(), SetDesiredStateParams{PortalID: id, State: portal.DesiredStateStopped}); err != nil {
 		t.Fatal(err)
 	}
@@ -137,13 +137,41 @@ func TestRealRuntimeStopLeavesNoCurrentOnlineFacts(t *testing.T) {
 	}
 }
 
-func waitUntil(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(time.Millisecond)
+// failingCloseNode is Online but cannot close until allowClose.
+type failingCloseNode struct {
+	onlineNode
+	closable atomic.Bool
+}
+
+func (n *failingCloseNode) Close() error {
+	if !n.closable.Load() {
+		return errors.New("node still running")
 	}
+	return nil
+}
+
+// TestRealRuntimeFailedCloseLeavesNoCurrentOnlineFacts: when the real runtime
+// stops watching a Portal but cannot close its node, the facts are no longer
+// current, so the snapshot must not offer to open the Portal URL.
+func TestRealRuntimeFailedCloseLeavesNoCurrentOnlineFacts(t *testing.T) {
+	node := &failingCloseNode{}
+	h := newHarness(t, func(h *harness) {
+		h.opts.RuntimeFactory = func(stateRoot string, _ installation.Logging) (Runtime, error) {
+			return portal.NewRuntime(stateRoot, func(string, string) portal.Node { return node }), nil
+		}
+	})
+	h.chooseLogging(installation.LoggingEnabled)
+	id := h.create("hermes", localApp(8787))
+	if p := h.portal(id); !p.Availability[OpOpenPortalURL].Available {
+		t.Fatalf("Portal before the stop = %+v", p)
+	}
+	if _, err := h.session.SetDesiredState(h.req(), SetDesiredStateParams{PortalID: id, State: portal.DesiredStateStopped}); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	p := h.portal(id)
+	if p.Problem != ProblemCloseFailed || p.Connection == nil || p.Connection.Freshness != freshnessLastKnown || p.Availability[OpOpenPortalURL].Available {
+		t.Fatalf("Portal after a failed close = problem %q, connection %+v, open %+v", p.Problem, p.Connection, p.Availability[OpOpenPortalURL])
+	}
+	node.closable.Store(true)
 }
