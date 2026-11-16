@@ -198,8 +198,12 @@ func TestLegacyGuardCrashBoundaries(t *testing.T) {
 			data, _ := os.ReadFile(name)
 			write(t, name, append(data, ' '), 0o600)
 		}},
-		{"checkpoint copy corrupt", func(t *testing.T, dir string) {
-			write(t, filepath.Join(dir, guardCopiesDir, "installation-v5.json"), []byte(`{"version":5}`), 0o600)
+		{"source copy corrupt", func(t *testing.T, dir string) {
+			write(t, filepath.Join(dir, guardCopiesDir, "installation-v5.json"), []byte(`{"version":5,"portals":[],"alerts":[]}`), 0o600)
+		}},
+		// Not imported, but restored on a terminal failure.
+		{"other copy corrupt", func(t *testing.T, dir string) {
+			write(t, filepath.Join(dir, guardCopiesDir, "installation-v4.json"), []byte(`{"version":4}`), 0o600)
 		}},
 		{"checkpoint copy missing", func(t *testing.T, dir string) {
 			os.Remove(filepath.Join(dir, guardCopiesDir, "installation-v4.json"))
