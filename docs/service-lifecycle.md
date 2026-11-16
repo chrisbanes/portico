@@ -26,13 +26,14 @@ registering the macOS LaunchAgent belongs to #105.
   that is a symlink, that another user owns, or that its group or others can
   write, since they may have planted entries in it.
 
-**macOS production and Dev are refused for now.** An older Portico app may
-still write those roots, and nothing yet stops it. Until #104's T5 slice
-installs the MIG-1 legacy-writer guard, `portico-service` exits with status 1
-for these two variants before it touches any state. On macOS the test variant
-also refuses a `--state-root` that is, contains or is inside either root,
-after resolving symlinks and ignoring case. The test variant and both Linux
-variants otherwise run normally, because no older app runs on Linux.
+**macOS production and Dev run behind the legacy-writer guard.** An older
+Portico app may still read and write those roots, so on macOS both variants
+always import through the MIG-1 guard described below, and require it on
+every later start. A test variant asks for the guard with `--legacy-guard`,
+which only macOS accepts. On macOS a test variant without it refuses a
+`--state-root` that is, contains or is inside either root, after resolving
+symlinks and ignoring case. Linux has no older app, so neither Linux
+variant has a guard.
 
 ## Startup and shutdown
 
@@ -68,7 +69,9 @@ install and starts no runtime. Instead it keeps the lock and serves:
 - that same code as the error for every other call.
 
 It also logs `startup failure: <code>` to standard error. Logs carry codes
-only, never paths.
+only, never paths. A guard failure is `unsupportedState` to clients, and the
+log adds the specific reason: `startup failure: unsupportedState
+(migrationFailed)` or `(migrationGuardMissing)`.
 
 - `unsupportedState` needs a person: the service serves it until it is
   stopped. Recovery is manual: fix or restore the state root, then restart
@@ -87,6 +90,88 @@ Either way the service exits 1 when it stops, so the manager records a
 failed run. An explicit `launchctl bootout` or `systemctl --user stop` does
 not restart it; only an unexpected exit, such as a signal from elsewhere or
 the `persistenceUnavailable` exit, does.
+
+## Legacy-writer guard (macOS)
+
+Portico v0.0.1 and v0.0.2 read `installation-v4.json` first, and the current
+app reads `installation-v5.json` first. Neither takes the service's lock. On
+macOS the service's first import therefore replaces both files with the
+guard: the bytes `{"version":2147483647,"porticoServiceGuard":1}`, mode 0600,
+with the owner's immutable flag (`uchg`). No reader accepts that version,
+and none can save over an immutable file, so an old app fails to load and
+to save, and so starts no Portal. The flag needs no root to set or clear.
+
+The import runs in this order under the lifetime lock:
+
+1. Read and validate the authoritative record, writing nothing.
+2. Checkpoint each guarded record and the source in `service/guard/`:
+   copies in `originals/`, and their presence, mode and SHA-256 in
+   `checkpoint.json`. Fsync.
+3. Write `service/guard/intent.json`, naming the checkpoint's hash. Fsync.
+4. Install the guard at each record: temporary file, fsync, rename, root
+   fsync, then the flag, then verify.
+5. Stage the generation from the checkpointed source, and commit the
+   manifest. Only then can the runtime start.
+
+An interruption before step 3 leaves the originals untouched, and the next
+start imports again. After step 3 the next start rolls forward: it verifies
+the checkpoint against the intent, imports from the checkpoint copies, and
+never removes the guard. A guard without a verified checkpoint fails closed
+with `unsupportedState`, touching nothing. A failure no retry can fix, such
+as an identity that became unsafe, first writes `service/migration-failed.json`
+and then restores the original bytes and modes, or removes a guard whose
+record did not exist. Every later start reports `migrationFailed`, and nothing
+guards the root again until the manual recovery below.
+
+After the commit, every start verifies that both guards are present,
+regular, 0600, immutable and unchanged before the runtime starts. Otherwise
+the start fails with `migrationGuardMissing`, and nothing re-guards the root
+automatically.
+
+`Scripts/verify-legacy-guard.sh` compiles the reader from every `v*` tag and
+from HEAD, and runs `TestLegacyReadersExcludedAtEveryPhase` against them. CI
+runs it in the `Legacy guard` job. `Scripts/test-legacy-exclusion-in-vm.sh`
+repeats the proof with the real released apps in a Tart VM.
+
+**Uninstalling.** The guards keep the immutable flag after the service is
+removed. Deleting the Portico folder in `~/Library/Application Support`
+fails with "Operation not permitted" until the flag is cleared:
+`chflags -R nouchg ~/Library/Application\ Support/Portico`. An uninstaller
+(#85) must do the same.
+
+## Recovery and downgrade (macOS)
+
+There is no automatic downgrade. To return a root to an older app:
+
+1. Stop the service and prevent its restart: `launchctl bootout
+   gui/$(id -u)/dev.chrisbanes.Portico.Service`, or `...Debug.Service` for Dev,
+   until #105 provides unregistration. Check that `launchctl print` no longer
+   finds the job, and that `lsof` shows nothing holding
+   `service-owner.lock`.
+2. Preserve the service state outside the root:
+   `ditto ~/Library/Application\ Support/Portico/service ~/Library/Application\ Support/Portico\ Service\ Backup`.
+3. Restore only when nothing happened after the checkpoint. In the
+   committed generation named by `service/manifest.json`, `state.json` must
+   have no `migration.firstMutationRequestID`, and every `tsnet/...` hash in
+   the manifest's `sources` must still match the generation's file. If either
+   check fails, stop: there is no supported reverse import, so keep the
+   generation and never start the old app against the stale originals.
+4. For each record in `service/guard/checkpoint.json`, clear the flag with
+   `chflags nouchg`. If the checkpoint marks it present, copy
+   `service/guard/originals/<name>` back with the recorded mode and check its
+   SHA-256. If it was absent, delete the guard.
+5. Remove `service/` and `service-owner.lock` from the root. Only then open
+   the older app.
+
+After `migrationFailed`, the originals are already restored. Check them
+against the checkpoint as in step 4, then move `service/` aside as in steps
+2 and 5. The next start imports and guards again. After
+`migrationGuardMissing`, an older app may have written the records: compare
+them with the checkpoint before doing anything else. If they changed, keep
+both and do not merge identities by hand.
+
+`Scripts/test-legacy-exclusion-in-vm.sh` follows these steps in its
+recovery phase.
 
 ## macOS: launchd
 
@@ -173,4 +258,54 @@ directory that it removes on exit. It prints a PASS line for each step:
 7. no TCP listener, and private modes;
 8. a clean stop.
 
+On macOS the service runs with `--legacy-guard`, so the seeded v5 fixture is
+imported through the guard, and the check also asserts the guard after the
+import, after the `kill -9` restart and after the stop. This is the fake
+first milestone.
+
 CI runs it on macOS and Linux in the `Service lifecycle` job.
+
+## Milestone M (manual)
+
+M proves that a real Portal keeps its Tailscale identity when the service
+takes over. It needs an enrolled Portico app, a running Local App, and a
+second device on the same tailnet. Record only redacted outcomes: a short
+hash of the stable node ID, "unchanged" or "changed", and HTTP status codes.
+Never record node IDs, names, URLs, keys or paths.
+
+1. With the old app running and its Portal Enabled, record:
+   - the stable node ID of the Portal's node, from `tailscale status --json`
+     on the second device, as `printf %s "$id" | shasum -a 256 | cut -c1-12`;
+   - that the Assigned Name shown in Portico is present;
+   - the status of `curl -sS -o /dev/null -w '%{http_code}\n'
+     https://<assigned-name>.<tailnet>.ts.net/` from the second device;
+   - that the Local App answers on its port on this Mac.
+2. Turn off Launch at Login in the old app, quit it, and check that
+   `pgrep -x portico-helper` prints nothing. Do not reopen it until step 5.
+3. Build the real service and the test client, then copy the root and run
+   the test variant against the copy, through the guarded import:
+
+   ```sh
+   m=$(mktemp -d /tmp/portico-m.XXXXXX)
+   (cd helper && go build -o "$m/portico-service" ./cmd/portico-service &&
+     go build -o "$m/lifecycleclient" ./internal/servicehost/internal/lifecycleclient)
+   ditto ~/Library/Application\ Support/Portico "$m/state"
+   mkdir -m 700 "$m/run"
+   "$m/portico-service" --variant test --state-root "$m/state" --runtime-dir "$m/run" --legacy-guard
+   ```
+
+   In another terminal, `"$m/lifecycleclient" -runtime-dir "$m/run" state`
+   must show `startupFailure=` empty and the Portal `enabled`.
+4. Repeat the step 1 checks:
+   - with no client connected: run `"$m/lifecycleclient" -runtime-dir "$m/run" subscribe`,
+     and press Ctrl-C;
+   - after a restart: press Ctrl-C on the service, wait for it to exit 0,
+     and run the same command again.
+
+   The node-ID hash and the HTTPS status must be unchanged each time.
+5. Stop the service with Ctrl-C and delete the copy:
+   `chflags -R nouchg "$m" && rm -rf "$m"`. Then reopen the old app, turn
+   Launch at Login back on if it was on, and check its Portal again.
+
+If M cannot be run, report it as the remaining human-required evidence for
+#104.

@@ -474,6 +474,51 @@ persistent legacy exclusion before production cutover, including a legacy launch
 record its dependency and replan those deliveries instead of pretending a lock
 retroactively protects older versions.
 
+**MIG-1 evidence and mechanism (#104).** The persistent admission mechanism is
+a verified legacy fail-closed guard; no bridge release is needed while this
+evidence holds:
+
+- **Readers.** The released readers are v0.0.1 and v0.0.2; the current
+  reader is HEAD's. v0.0.x reads `installation-v4.json` first, then v3, v2
+  and `portal-v1`; HEAD reads `installation-v5.json` first. After a failed
+  load, v0.0.2's controller still lets saves through, so an
+  unsupported-version file alone is not fail-closed: a legacy save replaces it.
+- **Guard.** Both `installation-v5.json` and `installation-v4.json` become
+  `{"version":2147483647,"porticoServiceGuard":1}`, mode 0600, with the
+  owner-settable immutable flag (`UF_IMMUTABLE`, `uchg`). It is installed
+  inside the exclusive migration transaction, after a durable checkpoint of
+  each record's bytes, mode and presence and a durable intent. An
+  interruption after the intent rolls forward and never removes the guard;
+  only a terminal in-process failure writes `service/migration-failed.json`
+  and then restores the originals. Every start after the commit verifies the
+  guard before any runtime starts.
+- **Proof.** `TestLegacyReadersExcludedAtEveryPhase`, through
+  `Scripts/verify-legacy-guard.sh` and the CI `Legacy guard` job, compiles
+  `PortalStore.swift` and `PortalConfiguration.swift` from every `v*` tag
+  and HEAD. Each reader's `prepareForStartup` and `loadInstallation` fail
+  (`NSCocoaErrorDomain` 4865), and its `save` fails (`NSCocoaErrorDomain`
+  513), during the transfer, during a reopen, after the commit with the
+  engine running, and while the service is stopped. The guard bytes and
+  flags, the identity tree and the root's entries stay unchanged. Without
+  the flag, every reader's `save` succeeds, so the check is sensitive.
+  `Scripts/test-legacy-exclusion-in-vm.sh` repeats this with the real
+  v0.0.1 and v0.0.2 apps. Every v0.0.2 node start follows a successful save,
+  so a reader that can neither load nor save starts no Portal.
+- **Failure reasons.** A failed or missing guard is reported as
+  `unsupportedState`, in `service.startupFailure` and as the reply error, as
+  above. The service log names the specific reason, `migrationFailed` or
+  `migrationGuardMissing`. Neither is a new management code.
+- **#105 ordering requirement.** The guard excludes every legacy launch
+  after it is installed, not a legacy UI and helper already running. Before
+  registering the service, #105's upgrade orchestration must ask the old UI
+  to quit and await its helper's termination.
+- **Uninstall.** The guards keep `uchg` after the service is removed, so
+  removing the state root needs `chflags -R nouchg` first. The uninstaller
+  (#85) must clear it.
+
+The step-by-step manual recovery and downgrade procedure, which the VM proof
+follows, is in [the service lifecycle guide](service-lifecycle.md#recovery-and-downgrade-macos).
+
 Manual downgrade: stop and unregister the service, prevent its restart, verify
 all nodes closed and preserve the complete service generation for recovery. With
 no service/runtime writes after checkpoint, a verified original checkpoint can
