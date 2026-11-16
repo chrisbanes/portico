@@ -31,7 +31,10 @@ def verify(root):
     # would be lost by restoring, so it stops recovery as a change would.
     expected = {rel: want for rel, want in m["sources"].items() if rel.startswith("tsnet/")}
     actual = {}
-    for dirpath, dirnames, filenames in os.walk(os.path.join(gen, "tsnet")):
+    def unreadable(err):
+        raise err  # an unreadable entry must stop recovery, not pass it
+
+    for dirpath, dirnames, filenames in os.walk(os.path.join(gen, "tsnet"), onerror=unreadable):
         for name in dirnames + filenames:
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, gen)

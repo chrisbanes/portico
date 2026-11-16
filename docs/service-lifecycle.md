@@ -162,7 +162,9 @@ There is no automatic downgrade. To return a root to an older app:
    exactly: each file's hash, each directory marked `"dir"`, and nothing
    added, removed or changed. The runtime can create identity state after
    cutover without any mutation, for example a node for a Portal imported
-   without an identity, and the older app would lose it. If either check
+   without an identity, and the older app would lose it. Any node that ran
+   after cutover rewrites its state and logs, so in practice this passes only
+   if no Portal started. If either check
    fails, stop: there is no supported reverse import, so keep the generation
    and never start the old app against the stale originals.
 4. For each record in `service/guard/checkpoint.json`, clear the flag with
@@ -179,7 +181,8 @@ move `service/` aside as in steps 2 and 5. The next start imports and
 guards again. After
 `migrationGuardMissing`, an older app may have written the records: compare
 them with the checkpoint before doing anything else. If they changed, keep
-both and do not merge identities by hand.
+both and do not merge identities by hand. If they did not, follow the
+downgrade steps above; step 3 decides whether the originals can be restored.
 
 `Scripts/test-legacy-exclusion-in-vm.sh` follows these steps in its
 recovery phase.
