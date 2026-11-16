@@ -17,10 +17,10 @@ import (
 )
 
 var (
-	// ErrUnguardedVariant refuses the macOS production and Dev roots, which
-	// an older app may still write, until the MIG-1 legacy-writer guard can
-	// exclude it, whichever variant asks for them.
-	ErrUnguardedVariant = errors.New("servicehost: this variant waits for the legacy-writer guard")
+	// ErrUnguardedRoot refuses the macOS production and Dev roots to a test
+	// variant without the MIG-1 legacy-writer guard: an older app may still
+	// write them, and only the guard excludes it.
+	ErrUnguardedRoot = errors.New("servicehost: the production and Dev roots need the legacy-writer guard")
 	// ErrInvalidRoots means the variant, state root or runtime directory is
 	// missing, misplaced or unsafe. It never names the path.
 	ErrInvalidRoots = errors.New("servicehost: invalid state root or runtime directory")
@@ -43,6 +43,8 @@ func ParseVariant(name string) (ipc.Variant, error) {
 type Roots struct {
 	StateRoot string
 	Endpoint  ipc.Endpoint
+	// LegacyGuard requires the MIG-1 guard on the state root.
+	LegacyGuard bool
 }
 
 // Seams for tests: the effective UID and the user's home directory.
@@ -60,14 +62,18 @@ var (
 // Resolve locates and validates the variant's roots, creating a missing
 // state root 0700. Only the test variant takes paths, and it requires both
 // as absolute paths; production and Dev use the platform's own lookups.
-func Resolve(variant ipc.Variant, stateRoot, runtimeDir string) (Roots, error) {
+// The macOS production and Dev variants always have the legacy-writer
+// guard, which only macOS has readers for; legacyGuard asks for it on a
+// test variant.
+func Resolve(variant ipc.Variant, stateRoot, runtimeDir string, legacyGuard bool) (Roots, error) {
 	// Refused before anything touches the filesystem.
 	if geteuid() == 0 {
 		return Roots{}, ipc.ErrRoot
 	}
-	if err := refuseUnguarded(runtime.GOOS, variant); err != nil {
-		return Roots{}, err
+	if legacyGuard && (variant != ipc.Test || runtime.GOOS != "darwin") {
+		return Roots{}, ErrInvalidRoots
 	}
+	legacyGuard = legacyGuard || (runtime.GOOS == "darwin" && (variant == ipc.Production || variant == ipc.Dev))
 	var endpoint ipc.Endpoint
 	var err error
 	switch variant {
@@ -75,7 +81,7 @@ func Resolve(variant ipc.Variant, stateRoot, runtimeDir string) (Roots, error) {
 		if !filepath.IsAbs(stateRoot) || !filepath.IsAbs(runtimeDir) {
 			return Roots{}, ErrInvalidRoots
 		}
-		if runtime.GOOS == "darwin" {
+		if runtime.GOOS == "darwin" && !legacyGuard {
 			home, err := userHome()
 			if err != nil {
 				return Roots{}, ErrInvalidRoots
@@ -106,23 +112,13 @@ func Resolve(variant ipc.Variant, stateRoot, runtimeDir string) (Roots, error) {
 	if stateRoot, err = prepareRoot(stateRoot); err != nil {
 		return Roots{}, err
 	}
-	return Roots{StateRoot: stateRoot, Endpoint: endpoint}, nil
+	return Roots{StateRoot: stateRoot, Endpoint: endpoint, LegacyGuard: legacyGuard}, nil
 }
 
-// refuseUnguarded fails closed for the macOS production and Dev variants.
-// Owner: issue #104 slice T5, the MIG-1 guard, removes this refusal once its
-// guard keeps older app versions from writing those roots.
-func refuseUnguarded(goos string, variant ipc.Variant) error {
-	if goos == "darwin" && (variant == ipc.Production || variant == ipc.Dev) {
-		return ErrUnguardedVariant
-	}
-	return nil
-}
-
-// refuseGuardedRoot keeps the macOS test variant out of the production and
-// Dev roots that refuseUnguarded protects: a state root equal to, inside or
-// containing either is refused, by resolved path and by file identity. APFS
-// is usually case-insensitive, so the comparison ignores case.
+// refuseGuardedRoot keeps an unguarded macOS test variant out of the
+// production and Dev roots: a state root equal to, inside or containing
+// either is refused, by resolved path and by file identity. APFS is usually
+// case-insensitive, so the comparison ignores case.
 func refuseGuardedRoot(stateRoot, home string) error {
 	root := strings.ToLower(resolveExisting(stateRoot))
 	for _, variant := range []ipc.Variant{ipc.Production, ipc.Dev} {
@@ -131,11 +127,11 @@ func refuseGuardedRoot(stateRoot, home string) error {
 			return ErrInvalidRoots
 		}
 		if sameTree(guarded, stateRoot) || sameTree(stateRoot, guarded) {
-			return ErrUnguardedVariant
+			return ErrUnguardedRoot
 		}
 		guarded = strings.ToLower(resolveExisting(guarded))
 		if within(guarded, root) || within(root, guarded) {
-			return ErrUnguardedVariant
+			return ErrUnguardedRoot
 		}
 	}
 	return nil

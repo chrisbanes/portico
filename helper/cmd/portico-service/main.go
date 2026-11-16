@@ -27,7 +27,9 @@ func run(args []string) int {
 	variantName := flags.String("variant", "production", "production, dev or test")
 	stateRoot := flags.String("state-root", "", "test variant only: absolute state root")
 	runtimeDir := flags.String("runtime-dir", "", "test variant only: absolute directory for the management endpoint")
+	legacyGuard := flags.Bool("legacy-guard", false, "test variant on macOS only: require the legacy-writer guard, as production and dev do")
 	selectRuntime := runtimeFlags(flags)
+	selectHook := hookFlags(flags)
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -45,7 +47,16 @@ func run(args []string) int {
 		log.Print(err)
 		return 2
 	}
-	roots, err := servicehost.Resolve(variant, *stateRoot, *runtimeDir)
+	if *legacyGuard && (variant != ipc.Test || runtime.GOOS != "darwin") {
+		log.Print("--legacy-guard needs --variant test on macOS")
+		return 2
+	}
+	hook, err := selectHook(variant)
+	if err != nil {
+		log.Print(err)
+		return 2
+	}
+	roots, err := servicehost.Resolve(variant, *stateRoot, *runtimeDir, *legacyGuard)
 	if err != nil {
 		log.Print(servicehost.Reason(err))
 		return 1
@@ -60,6 +71,7 @@ func run(args []string) int {
 			LaunchAtLoginOfferCapable: runtime.GOOS == "darwin" && variant == ipc.Production,
 		},
 		Limits: ipc.DefaultLimits,
+		Hook:   hook,
 	})
 	if err != nil {
 		log.Print(servicehost.Reason(err))

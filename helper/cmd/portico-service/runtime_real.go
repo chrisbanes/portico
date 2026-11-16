@@ -13,3 +13,8 @@ import (
 func runtimeFlags(*flag.FlagSet) func(ipc.Variant) (service.RuntimeFactory, error) {
 	return func(ipc.Variant) (service.RuntimeFactory, error) { return service.RealRuntimeFactory, nil }
 }
+
+// hookFlags adds no flags: a production build has no store hook.
+func hookFlags(*flag.FlagSet) func(ipc.Variant) (func(service.Phase) error, error) {
+	return func(ipc.Variant) (func(service.Phase) error, error) { return nil, nil }
+}

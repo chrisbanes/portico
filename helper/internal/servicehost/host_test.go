@@ -87,7 +87,7 @@ func testRootsIn(t *testing.T, seed []byte) (Roots, string) {
 		}
 	}
 	base := shortTemp(t)
-	roots, err := Resolve(ipc.Test, root, base)
+	roots, err := Resolve(ipc.Test, root, base, false)
 	if err != nil {
 		t.Fatal(err)
 	}

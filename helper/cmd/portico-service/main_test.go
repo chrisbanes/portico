@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -40,9 +41,27 @@ func exitCode(t *testing.T, bin string, args ...string) (int, string) {
 }
 
 func TestProductionBuildRejectsFakeRuntime(t *testing.T) {
-	code, stderr := exitCode(t, build(t, ""), "--variant", "test", "--fake-runtime", t.TempDir())
-	if code != 2 || !strings.Contains(stderr, "flag provided but not defined: -fake-runtime") {
-		t.Fatalf("exit %d, stderr %q; want the flag unknown", code, stderr)
+	bin := build(t, "")
+	for _, flag := range []string{"fake-runtime", "pause-after-guard"} {
+		code, stderr := exitCode(t, bin, "--variant", "test", "--"+flag, t.TempDir())
+		if code != 2 || !strings.Contains(stderr, "flag provided but not defined: -"+flag) {
+			t.Errorf("--%s: exit %d, stderr %q; want the flag unknown", flag, code, stderr)
+		}
+	}
+}
+
+// Production and Dev always have the guard on macOS, and no other OS has it.
+func TestLegacyGuardFlagIsTestVariantOnMacOSOnly(t *testing.T) {
+	bin := build(t, "")
+	cases := [][]string{{"--variant", "production", "--legacy-guard"}, {"--variant", "dev", "--legacy-guard"}}
+	if runtime.GOOS != "darwin" {
+		cases = append(cases, []string{"--variant", "test", "--legacy-guard", "--state-root", t.TempDir(), "--runtime-dir", t.TempDir()})
+	}
+	for _, args := range cases {
+		code, stderr := exitCode(t, bin, args...)
+		if code != 2 || !strings.Contains(stderr, "--legacy-guard needs --variant test on macOS") {
+			t.Errorf("%v: exit %d, stderr %q", args, code, stderr)
+		}
 	}
 }
 
@@ -55,6 +74,15 @@ func TestFakeRuntimeIsTestVariantOnly(t *testing.T) {
 	} {
 		code, stderr := exitCode(t, bin, args...)
 		if code != 2 || !strings.Contains(stderr, "--fake-runtime needs --variant test") {
+			t.Errorf("%v: exit %d, stderr %q", args, code, stderr)
+		}
+	}
+	for _, args := range [][]string{
+		{"--variant", "production", "--pause-after-guard", t.TempDir()},
+		{"--variant", "test", "--pause-after-guard", "relative"},
+	} {
+		code, stderr := exitCode(t, bin, args...)
+		if code != 2 || !strings.Contains(stderr, "--pause-after-guard needs --variant test") {
 			t.Errorf("%v: exit %d, stderr %q", args, code, stderr)
 		}
 	}
