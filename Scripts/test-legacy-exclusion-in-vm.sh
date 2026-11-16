@@ -35,6 +35,7 @@ dmg_url() { echo "https://github.com/chrisbanes/portico/releases/download/v$1/Po
 
 fixture="$repo_root/helper/internal/installation/testdata/v3.json"
 plist="$repo_root/helper/packaging/macos/dev.chrisbanes.Portico.ServiceTest.plist"
+recovery="$repo_root/Scripts/legacy-guard-probe/recovery.py"
 
 dry_run=0
 case "${1:-}" in
@@ -56,6 +57,13 @@ validate() {
       fail "no tag v${versions[$i]} for a pinned release"
   done
   [[ -f "$fixture" ]] || fail "missing fixture $fixture"
+  # The guest's seed edits the fixture with sed; fail loudly if it drifts.
+  local pattern
+  for pattern in '"desiredState":"stopped","lifecycle":"pendingTailnetRejection"' \
+    '"alerts":\[.*\],"operationalLogging"' '"id":"9F55CA93-D7B3-4EAB-A871-310EA576005A"'; do
+    grep -qE "$pattern" "$fixture" || fail "the seed no longer matches $fixture: $pattern"
+  done
+  /usr/bin/python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$recovery" || fail "the recovery steps do not parse"
   grep -q '<string>@FAKE_RUNTIME@</string>' "$plist" || fail "the test LaunchAgent template changed"
   [[ -f "$repo_root/helper/internal/servicehost/internal/lifecycleclient/main.go" ]] || fail "missing lifecycleclient"
   if ((dry_run)); then
@@ -242,40 +250,10 @@ grep -q '"call":"start"' "$fake/runtime.log" || fail "the fake runtime never sta
 pid=$(service_pid)
 launchctl bootout "$domain/$label"
 wait_for "the service to stop" '! kill -0 "$pid" 2>/dev/null'
-/usr/bin/python3 - "$root" <<'PY'
-import hashlib, json, os, sys
-root = sys.argv[1]
-def sha(p): return hashlib.sha256(open(p, "rb").read()).hexdigest()
-m = json.load(open(os.path.join(root, "service/manifest.json")))
-gen = os.path.join(root, "service/generations", m["generation"])
-state = json.load(open(os.path.join(gen, "state.json")))
-assert not state["migration"].get("firstMutationRequestID"), "a post-cutover mutation was accepted"
-for rel, want in m["sources"].items():
-    if rel.startswith("tsnet/"):
-        assert sha(os.path.join(gen, rel)) == want, "the runtime changed " + rel
-print("PASS recovery: no post-cutover mutation, identities unchanged since the checkpoint")
-PY
+/usr/bin/python3 "$w/recovery.py" verify "$root"
 backup="$HOME/Library/Application Support/Portico Service Backup"
 ditto "$root/service" "$backup"
-/usr/bin/python3 - "$root" <<'PY'
-import hashlib, json, os, sys
-root = sys.argv[1]
-cp = json.load(open(os.path.join(root, "service/guard/checkpoint.json")))
-for name in ("installation-v5.json", "installation-v4.json"):
-    target = os.path.join(root, name)
-    os.chflags(target, 0)
-    original = cp["files"][name]
-    if not original["present"]:
-        os.remove(target)
-        continue
-    data = open(os.path.join(root, "service/guard/originals", name), "rb").read()
-    assert hashlib.sha256(data).hexdigest() == original["sha256"], name
-    with open(target + ".restore", "wb") as f:
-        f.write(data)
-        os.fchmod(f.fileno(), original["mode"])
-        os.fsync(f.fileno())
-    os.rename(target + ".restore", target)
-PY
+/usr/bin/python3 "$w/recovery.py" restore "$root"
 chflags -R nouchg "$root/service"
 rm -rf "$root/service" "$root/service-owner.lock"
 [[ $(records) == "$original_records" ]] || fail "recovery did not restore the original records: $(records)"
@@ -346,6 +324,7 @@ done
   GOOS=darwin GOARCH=arm64 go build -o "$products/bin/lifecycleclient" ./internal/servicehost/internal/lifecycleclient)
 cp "$fixture" "$products/v3.json"
 cp "$plist" "$products/ServiceTest.plist"
+cp "$recovery" "$products/recovery.py"
 
 "$tart" clone "$image" "$vm"
 "$tart" run --no-graphics \
