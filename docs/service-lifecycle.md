@@ -157,8 +157,9 @@ There is no automatic downgrade. To return a root to an older app:
    `ditto ~/Library/Application\ Support/Portico/service ~/Library/Application\ Support/Portico\ Service\ Backup`.
 3. Restore only when nothing happened after the checkpoint. In the
    committed generation named by `service/manifest.json`, `state.json` must
-   have no `migration.firstMutationRequestID`, and every `tsnet/...` hash in
-   the manifest's `sources` must still match the generation's file. If either
+   have no `migration.firstMutationRequestID`, and every `tsnet/...` entry in
+   the manifest's `sources` must still match the generation: a hash its
+   file, and `"dir"` a directory. If either
    check fails, stop: there is no supported reverse import, so keep the
    generation and never start the old app against the stale originals.
 4. For each record in `service/guard/checkpoint.json`, clear the flag with

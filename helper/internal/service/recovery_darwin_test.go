@@ -41,7 +41,8 @@ func TestRecoveryScriptAgainstAGuardedCommit(t *testing.T) {
 			}
 			run("verify")
 			run("restore")
-			// Then, as the script does, move service/ and the lock aside.
+			// Then, as the script does after copying them out, remove service/
+			// and the lock.
 			clearFlags(t, filepath.Join(dir, "service"))
 			for _, name := range []string{"service", lockFile} {
 				if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
