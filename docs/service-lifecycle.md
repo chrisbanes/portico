@@ -157,11 +157,14 @@ There is no automatic downgrade. To return a root to an older app:
    `ditto ~/Library/Application\ Support/Portico/service ~/Library/Application\ Support/Portico\ Service\ Backup`.
 3. Restore only when nothing happened after the checkpoint. In the
    committed generation named by `service/manifest.json`, `state.json` must
-   have no `migration.firstMutationRequestID`, and every `tsnet/...` entry in
-   the manifest's `sources` must still match the generation: a hash its
-   file, and `"dir"` a directory. If either
-   check fails, stop: there is no supported reverse import, so keep the
-   generation and never start the old app against the stale originals.
+   have no `migration.firstMutationRequestID`, and the generation's `tsnet/`
+   tree must match the `tsnet/...` entries in the manifest's `sources`
+   exactly: each file's hash, each directory marked `"dir"`, and nothing
+   added, removed or changed. The runtime can create identity state after
+   cutover without any mutation, for example a node for a Portal imported
+   without an identity, and the older app would lose it. If either check
+   fails, stop: there is no supported reverse import, so keep the generation
+   and never start the old app against the stale originals.
 4. For each record in `service/guard/checkpoint.json`, clear the flag with
    `chflags nouchg`. If the checkpoint marks it present, copy
    `service/guard/originals/<name>` back with the recorded mode and check its

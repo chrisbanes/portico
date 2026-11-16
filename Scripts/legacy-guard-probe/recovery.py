@@ -26,14 +26,26 @@ def verify(root):
     gen = os.path.join(root, "service/generations", m["generation"])
     state = load(gen, "state.json")
     assert not state["migration"].get("firstMutationRequestID"), "a post-cutover mutation was accepted"
-    for rel, want in m["sources"].items():
-        if not rel.startswith("tsnet/"):
-            continue
-        # The manifest marks directories "dir"; only files have a hash.
-        if want == "dir":
-            assert os.path.isdir(os.path.join(gen, rel)), "the runtime removed " + rel
-            continue
-        assert sha(os.path.join(gen, rel)) == want, "the runtime changed " + rel
+    # The generation's identity tree must be exactly what was checkpointed:
+    # an entry the runtime added after cutover, such as a new node's state,
+    # would be lost by restoring, so it stops recovery as a change would.
+    expected = {rel: want for rel, want in m["sources"].items() if rel.startswith("tsnet/")}
+    actual = {}
+    for dirpath, dirnames, filenames in os.walk(os.path.join(gen, "tsnet")):
+        for name in dirnames + filenames:
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, gen)
+            if os.path.islink(full):
+                actual[rel] = "link"
+            elif os.path.isdir(full):
+                actual[rel] = "dir"
+            else:
+                actual[rel] = sha(full)
+    added = sorted(set(actual) - set(expected))
+    removed = sorted(set(expected) - set(actual))
+    changed = sorted(r for r in set(actual) & set(expected) if actual[r] != expected[r])
+    assert not (added or removed or changed), (
+        "the identities changed since the checkpoint: added %s, removed %s, changed %s" % (added, removed, changed))
     print("PASS recovery: no post-cutover mutation, identities unchanged since the checkpoint")
 
 

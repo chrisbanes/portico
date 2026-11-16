@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -51,6 +52,52 @@ func TestRecoveryScriptAgainstAGuardedCommit(t *testing.T) {
 			}
 			if after := snapshot(t, dir, nil); !maps.Equal(before, after) {
 				t.Fatalf("after recovery:\n%v\nwant:\n%v", after, before)
+			}
+		})
+	}
+}
+
+// TestRecoveryScriptRefusesIdentityStateAddedAfterCutover: restoring the
+// originals would discard identity state the runtime created after the
+// commit, so verify refuses any added, removed or changed entry.
+func TestRecoveryScriptRefusesIdentityStateAddedAfterCutover(t *testing.T) {
+	script, err := filepath.Abs("../../../Scripts/legacy-guard-probe/recovery.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.LookPath("/usr/bin/python3"); err != nil {
+		t.Skip("no /usr/bin/python3")
+	}
+	for name, after := range map[string]func(t *testing.T, identities string){
+		"a file under an empty checkpointed directory": func(t *testing.T, identities string) {
+			write(t, filepath.Join(identities, hermesID, "empty", "tailscaled.state"), []byte("new"), 0o600)
+		},
+		"a new Portal directory": func(t *testing.T, identities string) {
+			write(t, filepath.Join(identities, unknownID, "tailscaled.state"), []byte("new node"), 0o600)
+		},
+		"a removed file": func(t *testing.T, identities string) {
+			if err := os.Remove(filepath.Join(identities, hermesID, "tailscaled.state")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a changed file": func(t *testing.T, identities string) {
+			write(t, filepath.Join(identities, hermesID, "tailscaled.state"), []byte("rotated"), 0o600)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := guardTemp(t)
+			write(t, filepath.Join(dir, "installation-v3.json"), fixture(t, "v3.json"), 0o600)
+			writeIdentities(t, dir)
+			if err := os.Mkdir(filepath.Join(dir, "tsnet", hermesOriginal, "empty"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			s := mustOpenGuarded(t, dir)
+			identities := s.IdentityRoot()
+			s.Close()
+			after(t, identities)
+			out, err := exec.Command("/usr/bin/python3", script, "verify", dir).CombinedOutput()
+			if err == nil || !strings.Contains(string(out), "the identities changed since the checkpoint") {
+				t.Fatalf("verify with %s = %v:\n%s", name, err, out)
 			}
 		})
 	}
