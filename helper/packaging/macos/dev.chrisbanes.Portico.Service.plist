@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The production LaunchAgent, for SMAppService.agent registration (#105).
+     portico-service refuses this variant until #104 T5's legacy-writer guard. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.chrisbanes.Portico.Service</string>
+	<key>BundleProgram</key>
+	<string>Contents/Helpers/portico-service</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>portico-service</string>
+		<string>--variant</string>
+		<string>production</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Restart after a crash or failed exit, not after a clean exit or a
+	     launchctl bootout. -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<!-- 077: plists have no octal integers. -->
+	<key>Umask</key>
+	<integer>63</integer>
+</dict>
+</plist>

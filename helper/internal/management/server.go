@@ -12,6 +12,7 @@ import (
 	"github.com/go-json-experiment/json/jsontext"
 
 	"github.com/chrisbanes/portico/helper/internal/discovery"
+	"github.com/chrisbanes/portico/helper/internal/installation"
 	"github.com/chrisbanes/portico/helper/internal/ipc"
 	"github.com/chrisbanes/portico/helper/internal/service"
 )
@@ -34,13 +35,35 @@ var afterSubscribe func()
 // Serve answers management v1 on listener until listener.Close, which waits
 // for every connection's in-flight engine work.
 func Serve(listener *ipc.Listener, engine *service.Engine) error {
-	return listener.Serve(func(c *ipc.Conn) { serveConn(c, engine) })
+	return listener.Serve(func(c *ipc.Conn) { serveConn(c, engine, nil) })
+}
+
+// ServeStartupFailure answers management v1 while the host holds the
+// lifetime lock but its state could not load, so there is no engine. It
+// answers hello and getSnapshot, whose service.startupFailure is reason
+// (unsupportedState or persistenceUnavailable); every other valid call gets
+// reason as its error.
+func ServeStartupFailure(listener *ipc.Listener, reason service.Code) error {
+	failure := &service.Snapshot{
+		Version: Version,
+		Epoch:   newUUID(),
+		Service: service.ServiceState{Runtime: "unavailable", StartupFailure: reason},
+		// Nothing loaded, so the enums take their neutral values.
+		Logging:            installation.LoggingUndecided,
+		LaunchAtLoginOffer: installation.OfferNotOffered,
+		Alerts:             []installation.Alert{},
+		Portals:            []service.PortalSnapshot{},
+		Availability:       map[service.Operation]service.Availability{},
+	}
+	return listener.Serve(func(c *ipc.Conn) { serveConn(c, nil, failure) })
 }
 
 // conn is one client connection with its own engine session.
 type conn struct {
 	ic      *ipc.Conn
 	session *service.Session
+	// failure, set only without an engine, is the startup-failure snapshot.
+	failure *service.Snapshot
 	wg      sync.WaitGroup
 
 	// sendMu keeps every frame set contiguous. Send never blocks, so it is
@@ -72,9 +95,10 @@ type heldEvents struct {
 // waiting to be encoded for one connection.
 const queueSize = 128
 
-func serveConn(ic *ipc.Conn, engine *service.Engine) {
+func serveConn(ic *ipc.Conn, engine *service.Engine, failure *service.Snapshot) {
 	c := &conn{
 		ic:        ic,
+		failure:   failure,
 		held:      map[string]*heldEvents{},
 		ready:     make(chan struct{}),
 		snapshots: make(chan service.Snapshot, queueSize),
@@ -99,15 +123,21 @@ func serveConn(ic *ipc.Conn, engine *service.Engine) {
 		<-ic.Done()
 		return
 	}
-	c.session = engine.Connect()
-	snapshot := c.session.GetSnapshot()
+	snapshot := failure
+	if engine != nil {
+		c.session = engine.Connect()
+		s := c.session.GetSnapshot()
+		snapshot = &s
+	}
 	automatic := "unavailable"
 	if snapshot.Service.AutomaticDiscovery {
 		automatic = "available"
 	}
 	c.sendJSON(helloFrame{Type: "hello", Version: Version, Epoch: snapshot.Epoch, Capabilities: Capabilities{automatic}})
-	c.session.ReceiveEnrolmentEvents(c.enqueueEvent)
-	c.wg.Go(c.pump)
+	if c.session != nil {
+		c.session.ReceiveEnrolmentEvents(c.enqueueEvent)
+		c.wg.Go(c.pump)
+	}
 	for {
 		frame, err := ic.Read()
 		if err != nil {
@@ -120,7 +150,9 @@ func serveConn(ic *ipc.Conn, engine *service.Engine) {
 	}
 	// Closing the session first ends this connection's enrolment lease at
 	// once; admitted engine work still finishes before the handler returns.
-	c.session.Close()
+	if c.session != nil {
+		c.session.Close()
+	}
 	c.wg.Wait()
 	<-ic.Done()
 }
@@ -276,6 +308,17 @@ func (c *conn) handle(frame []byte) bool {
 	req, err := request(m, in)
 	if err != nil {
 		c.replyError(id, err)
+		return true
+	}
+	if c.failure != nil {
+		switch {
+		case deref(in.Method) != "getSnapshot":
+			c.replyError(id, &service.Error{Code: c.failure.Service.StartupFailure})
+		case decodeParams(in.Params, &empty{}) != nil:
+			c.replyError(id, invalid("params"))
+		default:
+			c.send(c.replyFrames(id, *c.failure, nil)...)
+		}
 		return true
 	}
 	release, err := c.ic.Admit()

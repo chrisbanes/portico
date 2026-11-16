@@ -537,3 +537,29 @@ func TestStateDocumentFormat(t *testing.T) {
 		t.Fatalf("state document = %s", data)
 	}
 }
+
+// A host serving a startup failure keeps ownership, so no second service can
+// start against the root meanwhile; Open alone releases it.
+func TestOwnerKeepsTheLockWhenLoadingFails(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "installation-v5.json"), []byte(`{"version":6}`), 0o600)
+	owner, err := Acquire(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Open(Options{}); !errors.Is(err, ErrUnsupportedState) {
+		t.Fatalf("Owner.Open() error = %v, want unsupportedState", err)
+	}
+	if _, err := Acquire(dir); !errors.Is(err, ErrOwnershipBusy) {
+		t.Fatalf("Acquire() after a failed load = %v, want ownershipBusy", err)
+	}
+	owner.Close()
+	if _, err := Open(dir, Options{}); !errors.Is(err, ErrUnsupportedState) {
+		t.Fatalf("Open() error = %v, want unsupportedState", err)
+	}
+	other, err := Acquire(dir)
+	if err != nil {
+		t.Fatalf("Acquire() after a failed Open = %v, want the lock released", err)
+	}
+	other.Close()
+}

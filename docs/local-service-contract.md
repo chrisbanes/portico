@@ -242,6 +242,14 @@ timed-out mutation's reply may carry `uncertain` instead of `result` or
   that cannot fit a page, is `capacityExceeded` with nothing partial sent: a
   reply error for `getSnapshot`, or the connection-level error for a
   subscription.
+- **Startup failure.** While the service holds the lifetime lock but its
+  state cannot load, it still answers hello and an authenticated
+  `getSnapshot`. That snapshot's `service.startupFailure` is the reason code,
+  `unsupportedState` or `persistenceUnavailable`, never text; its `runtime`
+  is `unavailable`, it has no Portals and its `availability` is empty: no
+  operation is available. Every other well-formed call gets
+  that code as its reply error, so no mutation can create an empty install.
+  The field is absent from a loaded service's snapshots.
 - **Enrolment events** go only to the connection that called `resumeEnrolment`:
   `{"type":"enrolment","event":"authenticationURL"|"cancelled"|"failed","requestID","portalID","nonce","url"?}`,
   with `url` only for `authenticationURL`. An event never precedes the reply

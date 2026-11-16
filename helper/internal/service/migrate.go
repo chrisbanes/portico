@@ -78,13 +78,18 @@ type manifest struct {
 	Sources    map[string]string `json:"sources"`
 }
 
-// Open takes exclusive ownership of the state root and returns its store. A
-// committed generation is loaded as is; otherwise the historical installation
-// is imported into a new generation, which commits only when its manifest does.
-//
-// MIG-1, excluding older app and helper writers, is not implemented here; it
-// is owned by #104/#105, so callers must pass an isolated root until then.
-func Open(rootPath string, opts Options) (*Store, error) {
+// Owner is exclusive lifetime ownership of a state root. A host keeps it even
+// when the state cannot load, so no second service starts against a root it
+// is reporting as failed.
+type Owner struct {
+	root *os.Root
+	lock *os.File
+	path string
+}
+
+// Acquire takes the lifetime lock on the state root, failing with
+// ErrOwnershipBusy while another service holds it.
+func Acquire(rootPath string) (*Owner, error) {
 	rootPath, err := filepath.Abs(rootPath)
 	if err != nil {
 		return nil, persistenceErr(err)
@@ -102,12 +107,45 @@ func Open(rootPath string, opts Options) (*Store, error) {
 		root.Close()
 		return nil, err
 	}
-	s := &Store{root: root, lock: lock, opts: opts}
+	return &Owner{root: root, lock: lock, path: rootPath}, nil
+}
+
+// LockFile is the held lifetime lock, for ipc.Listen.
+func (o *Owner) LockFile() *os.File { return o.lock }
+
+// Close releases ownership.
+func (o *Owner) Close() error {
+	return errors.Join(o.lock.Close(), o.root.Close())
+}
+
+// Open loads the root's committed generation, or imports the historical
+// installation into a new one, which commits only when its manifest does.
+// Call it once. On success the Store takes over ownership and Store.Close
+// releases it; on failure ownership stays with o.
+//
+// MIG-1, excluding older app and helper writers, is not implemented here; it
+// is owned by #104/#105, so callers must pass an isolated root until then.
+func (o *Owner) Open(opts Options) (*Store, error) {
+	s := &Store{root: o.root, lock: o.lock, opts: opts}
 	if err := s.open(); err != nil {
-		s.Close()
 		return nil, err
 	}
-	s.identityRoot = filepath.Join(rootPath, filepath.FromSlash(s.generation), identitiesDir)
+	s.identityRoot = filepath.Join(o.path, filepath.FromSlash(s.generation), identitiesDir)
+	return s, nil
+}
+
+// Open takes ownership of the state root and opens its store, releasing
+// ownership again if that fails.
+func Open(rootPath string, opts Options) (*Store, error) {
+	owner, err := Acquire(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	s, err := owner.Open(opts)
+	if err != nil {
+		owner.Close()
+		return nil, err
+	}
 	return s, nil
 }
 

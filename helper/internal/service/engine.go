@@ -431,6 +431,10 @@ type ServiceState struct {
 	PersistenceHealthy bool   `json:"persistenceHealthy"`
 	AutomaticDiscovery bool   `json:"automaticDiscovery"`
 	LaunchAtLoginOffer bool   `json:"launchAtLoginOfferCapable"`
+	// StartupFailure is the error code (unsupportedState or
+	// persistenceUnavailable) of state the host could not load; only its
+	// failure snapshot sets it.
+	StartupFailure Code `json:"startupFailure,omitempty"`
 }
 
 type PortalSnapshot struct {
