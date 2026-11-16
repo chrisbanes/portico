@@ -283,17 +283,28 @@ func TestLegacyGuardCrashBoundaries(t *testing.T) {
 		})
 	}
 
+	unflag := func(t *testing.T, dir, name string) {
+		if err := unix.Chflags(filepath.Join(dir, name), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Each case alters one target and leaves the other guarded.
 	for _, tc := range []struct {
 		name  string
 		alter func(t *testing.T, dir string)
 	}{
-		{"guard flag cleared", func(t *testing.T, dir string) {}},
-		{"guard removed", func(t *testing.T, dir string) { os.Remove(filepath.Join(dir, "installation-v4.json")) }},
+		{"guard flag cleared", func(t *testing.T, dir string) { unflag(t, dir, "installation-v5.json") }},
+		{"guard removed", func(t *testing.T, dir string) {
+			unflag(t, dir, "installation-v4.json")
+			os.Remove(filepath.Join(dir, "installation-v4.json"))
+		}},
 		{"guard overwritten", func(t *testing.T, dir string) {
+			unflag(t, dir, "installation-v5.json")
 			write(t, filepath.Join(dir, "installation-v5.json"), fixture(t, "v5-public-local-app.json"), 0o600)
 		}},
-		{"guard replaced by a symlink", func(t *testing.T, dir string) {
+		{"guard replaced by a symlink to an immutable guard", func(t *testing.T, dir string) {
 			name := filepath.Join(dir, "installation-v4.json")
+			unflag(t, dir, "installation-v4.json")
 			write(t, filepath.Join(dir, "elsewhere"), guardBytes, 0o600)
 			os.Remove(name)
 			if err := os.Symlink("elsewhere", name); err != nil {
@@ -308,13 +319,15 @@ func TestLegacyGuardCrashBoundaries(t *testing.T) {
 			dir := guardTemp(t)
 			guardedSource(t, dir)
 			mustOpenGuarded(t, dir).Close()
-			for _, name := range guardTargets {
-				if err := unix.Chflags(filepath.Join(dir, name), 0); err != nil {
-					t.Fatal(err)
-				}
-			}
 			tc.alter(t, dir)
-			before := snapshot(t, dir, nil)
+			flags := func() map[string]bool {
+				got := map[string]bool{}
+				for _, name := range guardTargets {
+					got[name] = immutable(t, filepath.Join(dir, name))
+				}
+				return got
+			}
+			before, beforeFlags := snapshot(t, dir, nil), flags()
 			if _, err := Open(dir, guarded); !errors.Is(err, ErrMigrationGuardMissing) {
 				t.Fatalf("Open() error = %v, want migrationGuardMissing", err)
 			}
@@ -322,7 +335,9 @@ func TestLegacyGuardCrashBoundaries(t *testing.T) {
 			if after := snapshot(t, dir, nil); !reflect.DeepEqual(after, before) {
 				t.Fatalf("root changed: %v -> %v", before, after)
 			}
-			assertNotFlagged(t, dir)
+			if after := flags(); !reflect.DeepEqual(after, beforeFlags) {
+				t.Fatalf("flags changed: %v -> %v", beforeFlags, after)
+			}
 		})
 	}
 
