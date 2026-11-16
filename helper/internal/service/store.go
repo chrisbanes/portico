@@ -22,6 +22,12 @@ var (
 	ErrPersistenceUnavailable = errors.New("persistenceUnavailable")
 	ErrUnsupportedState       = errors.New("unsupportedState")
 	ErrCapacityExceeded       = errors.New("capacityExceeded")
+
+	// ErrMigrationFailed and ErrMigrationGuardMissing are unsupportedState
+	// to clients; the specific reason is for logs. A guarded import failed
+	// and restored the originals, or a committed root's guard is gone.
+	ErrMigrationFailed       = fmt.Errorf("%w: migrationFailed", ErrUnsupportedState)
+	ErrMigrationGuardMissing = fmt.Errorf("%w: migrationGuardMissing", ErrUnsupportedState)
 )
 
 func persistenceErr(err error) error { return fmt.Errorf("%w: %w", ErrPersistenceUnavailable, err) }

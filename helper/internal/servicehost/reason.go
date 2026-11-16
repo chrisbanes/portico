@@ -19,6 +19,10 @@ func Reason(err error) string {
 		return ""
 	case errors.As(err, &failure):
 		return failure.Error()
+	case errors.Is(err, service.ErrMigrationFailed):
+		return "migrationFailed"
+	case errors.Is(err, service.ErrMigrationGuardMissing):
+		return "migrationGuardMissing"
 	case errors.Is(err, service.ErrOwnershipBusy):
 		return "ownershipBusy"
 	case errors.Is(err, service.ErrUnsupportedState):
@@ -32,7 +36,7 @@ func Reason(err error) string {
 	case errors.Is(err, context.DeadlineExceeded):
 		return "the runtime did not close in time"
 	}
-	for _, known := range []error{ErrUnguardedVariant, ErrInvalidRoots, ipc.ErrUnsafeEndpoint, ipc.ErrRoot} {
+	for _, known := range []error{ErrUnguardedRoot, ErrInvalidRoots, ipc.ErrUnsafeEndpoint, ipc.ErrRoot} {
 		if errors.Is(err, known) {
 			return known.Error()
 		}

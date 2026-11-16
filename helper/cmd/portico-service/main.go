@@ -27,7 +27,9 @@ func run(args []string) int {
 	variantName := flags.String("variant", "production", "production, dev or test")
 	stateRoot := flags.String("state-root", "", "test variant only: absolute state root")
 	runtimeDir := flags.String("runtime-dir", "", "test variant only: absolute directory for the management endpoint")
+	legacyGuard := flags.Bool("legacy-guard", false, "test variant on macOS only: require the legacy-writer guard, as production and dev do")
 	selectRuntime := runtimeFlags(flags)
+	selectHook := hookFlags(flags)
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -45,13 +47,18 @@ func run(args []string) int {
 		log.Print(err)
 		return 2
 	}
-	roots, err := servicehost.Resolve(variant, *stateRoot, *runtimeDir)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	hook, err := selectHook(ctx, variant)
+	if err != nil {
+		log.Print(err)
+		return 2
+	}
+	roots, err := servicehost.Resolve(variant, *stateRoot, *runtimeDir, *legacyGuard)
 	if err != nil {
 		log.Print(servicehost.Reason(err))
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 	err = servicehost.Run(ctx, servicehost.Config{
 		Roots: roots,
 		Engine: service.EngineOptions{
@@ -60,6 +67,7 @@ func run(args []string) int {
 			LaunchAtLoginOfferCapable: runtime.GOOS == "darwin" && variant == ipc.Production,
 		},
 		Limits: ipc.DefaultLimits,
+		Hook:   hook,
 	})
 	if err != nil {
 		log.Print(servicehost.Reason(err))

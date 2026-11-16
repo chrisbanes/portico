@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/chrisbanes/portico/helper/internal/installation"
@@ -30,6 +31,17 @@ const (
 	stagingDir     = "service/staging"
 	identitiesDir  = "tsnet"
 
+	// The MIG-1 guard's transaction record: a checkpoint of each guarded
+	// path and the source (copies plus checkpoint.json), then the intent
+	// naming the checkpoint's hash. They are kept after the commit for
+	// manual recovery.
+	guardDir            = "service/guard"
+	guardCopiesDir      = "service/guard/originals"
+	guardCheckpointFile = "service/guard/checkpoint.json"
+	guardIntentFile     = "service/guard/intent.json"
+	migrationFailedFile = "service/migration-failed.json"
+	guardSchema         = 1
+
 	manifestSchema = 1
 	phaseCommitted = "committed"
 	stateFileName  = "state.json"
@@ -41,24 +53,40 @@ const (
 
 var generationIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
+// guardTargets are the records every released reader loads first: v0.0.x
+// reads installation-v4.json and main reads installation-v5.json.
+var guardTargets = [...]string{"installation-v5.json", "installation-v4.json"}
+
+// guardBytes is an unsupported-version record no reader accepts. Readers
+// still save over a plain file, so it is also made immutable (uchg).
+var guardBytes = []byte(`{"version":2147483647,"porticoServiceGuard":1}`)
+
 // Phase names a migration boundary passed to Options.Hook.
 type Phase string
 
 const (
-	PhaseCopy           Phase = "copy"
-	PhaseWrite          Phase = "write"
-	PhaseFsync          Phase = "fsync"
-	PhaseBeforeManifest Phase = "beforeManifest"
-	PhaseAfterManifest  Phase = "afterManifest"
-	PhaseCommitWrite    Phase = "commitWrite"
-	PhaseCommitRename   Phase = "commitRename"
-	PhaseCommitFsync    Phase = "commitFsync"
+	PhaseGuardCheckpoint Phase = "guardCheckpoint"
+	PhaseGuardIntent     Phase = "guardIntent"
+	PhaseGuardInstall    Phase = "guardInstall"
+	PhaseGuardFlag       Phase = "guardFlag"
+	PhaseCopy            Phase = "copy"
+	PhaseWrite           Phase = "write"
+	PhaseFsync           Phase = "fsync"
+	PhaseBeforeManifest  Phase = "beforeManifest"
+	PhaseAfterManifest   Phase = "afterManifest"
+	PhaseCommitWrite     Phase = "commitWrite"
+	PhaseCommitRename    Phase = "commitRename"
+	PhaseCommitFsync     Phase = "commitFsync"
 )
 
 type Options struct {
 	// Hook, when set, runs before each phase; an error aborts there as if
 	// that filesystem operation had failed. Tests use it to inject faults.
 	Hook func(Phase) error
+	// LegacyGuard installs and then requires the MIG-1 guard, which keeps
+	// older Portico apps from loading or saving this root. Only macOS has
+	// such readers; elsewhere Open refuses it.
+	LegacyGuard bool
 }
 
 func (o Options) hook(p Phase) error {
@@ -69,6 +97,25 @@ func (o Options) hook(p Phase) error {
 		return persistenceErr(err)
 	}
 	return nil
+}
+
+type guardCheckpoint struct {
+	Schema int `json:"schema"`
+	// Source is the authoritative record imported; empty for a fresh root.
+	Source string `json:"source"`
+	// Files holds each guard target and the source as they were.
+	Files map[string]guardOriginal `json:"files"`
+}
+
+type guardOriginal struct {
+	Present bool   `json:"present"`
+	Mode    uint32 `json:"mode,omitempty"`
+	SHA256  string `json:"sha256,omitempty"`
+}
+
+type guardIntent struct {
+	Schema     int    `json:"schema"`
+	Checkpoint string `json:"checkpoint"`
 }
 
 type manifest struct {
@@ -123,8 +170,8 @@ func (o *Owner) Close() error {
 // Call it once. On success the Store takes over ownership and Store.Close
 // releases it; on failure ownership stays with o.
 //
-// MIG-1, excluding older app and helper writers, is not implemented here; it
-// is owned by #104/#105, so callers must pass an isolated root until then.
+// With Options.LegacyGuard the import first guards the records older apps
+// read (MIG-1), and every Open verifies that guard before returning.
 func (o *Owner) Open(opts Options) (*Store, error) {
 	s := &Store{root: o.root, lock: o.lock, opts: opts}
 	if err := s.open(); err != nil {
@@ -152,37 +199,85 @@ func Open(rootPath string, opts Options) (*Store, error) {
 func (s *Store) open() error {
 	// os.Root follows symlinks that stay inside the root, so a service
 	// directory linked into the originals would redirect every write there.
-	for _, dir := range []string{serviceDir, generationsDir, checkpointsDir, stagingDir} {
+	for _, dir := range []string{serviceDir, generationsDir, checkpointsDir, stagingDir, guardDir, guardCopiesDir} {
 		if info, err := s.root.Lstat(dir); err == nil && (!info.IsDir() || checkOwned(info) != nil) {
 			return unsafeErr(dir)
 		} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return persistenceErr(err)
 		}
 	}
-	if _, err := s.root.Lstat(manifestFile); err == nil {
-		return s.load()
+	if s.opts.LegacyGuard {
+		if err := guardSupported(); err != nil {
+			return err
+		}
+	}
+	// After a terminal guarded-import failure only manual recovery may
+	// guard the root again.
+	if _, err := s.root.Lstat(migrationFailedFile); err == nil {
+		return ErrMigrationFailed
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return persistenceErr(err)
 	}
-	// The manifest is the commit point, and generations appear only after it,
-	// so committed data without a manifest is damage, not an interrupted import.
-	for _, dir := range []string{generationsDir, checkpointsDir} {
-		entries, err := readDir(s.root, dir)
-		if err != nil {
+	if _, err := s.root.Lstat(manifestFile); errors.Is(err, fs.ErrNotExist) {
+		// The manifest is the commit point, and generations appear only after
+		// it, so committed data without a manifest is damage, not an
+		// interrupted import.
+		for _, dir := range []string{generationsDir, checkpointsDir} {
+			entries, err := readDir(s.root, dir)
+			if err != nil {
+				return persistenceErr(err)
+			}
+			if len(entries) > 0 {
+				return unsupportedErr(fmt.Errorf("%s without a manifest", dir))
+			}
+		}
+		if err := s.root.RemoveAll(stagingDir); err != nil {
 			return persistenceErr(err)
 		}
-		if len(entries) > 0 {
-			return unsupportedErr(fmt.Errorf("%s without a manifest", dir))
+		if err := s.migrate(); err != nil {
+			return err
 		}
-	}
-	if err := s.root.RemoveAll(stagingDir); err != nil {
+	} else if err != nil {
 		return persistenceErr(err)
 	}
-	return s.migrate()
+	// Checked on every start, before the runtime can: nothing re-guards
+	// automatically after the commit.
+	if s.opts.LegacyGuard {
+		if err := verifyGuard(s.root); err != nil {
+			return err
+		}
+	}
+	return s.load()
 }
 
 func (s *Store) migrate() (err error) {
-	imported, source, err := installation.Import(s.root)
+	// A recorded guard intent means an earlier attempt may have guarded the
+	// originals, so it rolls forward from the verified checkpoint copies.
+	var recorded *guardCheckpoint
+	importRoot := s.root
+	if s.opts.LegacyGuard {
+		if recorded, err = s.resumeGuard(); err != nil {
+			return err
+		}
+		if recorded != nil {
+			if importRoot, err = s.root.OpenRoot(guardCopiesDir); err != nil {
+				return persistenceErr(err)
+			}
+			defer importRoot.Close()
+		}
+		// From the intent on, an interruption rolls forward and keeps the
+		// guard; only a failure no retry can fix restores the originals.
+		// recorded is set here on a resume, or by the checkpoint below.
+		defer func() {
+			if recorded == nil || err == nil || errors.Is(err, ErrPersistenceUnavailable) {
+				return
+			}
+			if _, statErr := s.root.Lstat(manifestFile); errors.Is(statErr, fs.ErrNotExist) {
+				err = s.failMigration(recorded, err)
+			}
+		}()
+	}
+	imported, source, err := installation.Import(importRoot)
 	if err != nil {
 		var importErr *installation.Error
 		if errors.As(err, &importErr) && importErr.Kind == installation.ErrUnreadable {
@@ -191,7 +286,7 @@ func (s *Store) migrate() (err error) {
 		return unsupportedErr(err)
 	}
 	if source.File != "" {
-		if info, err := s.root.Lstat(source.File); err != nil || checkOwned(info) != nil {
+		if info, err := importRoot.Lstat(source.File); err != nil || checkOwned(info) != nil {
 			return unsafeErr(source.File)
 		}
 	}
@@ -222,6 +317,17 @@ func (s *Store) migrate() (err error) {
 	}
 	if err := checkFreeSpace(s.lock, need); err != nil {
 		return err
+	}
+
+	if s.opts.LegacyGuard {
+		if recorded == nil {
+			if recorded, err = s.checkpointGuard(source); err != nil {
+				return err
+			}
+		}
+		if err := s.installGuard(recorded); err != nil {
+			return err
+		}
 	}
 
 	id, err := newGenerationID()
@@ -309,10 +415,307 @@ func (s *Store) migrate() (err error) {
 	if err := replaceFile(s.root, manifestFile, m); err != nil {
 		return err
 	}
-	if err := s.opts.hook(PhaseAfterManifest); err != nil {
+	return s.opts.hook(PhaseAfterManifest)
+}
+
+// resumeGuard returns the verified checkpoint of an earlier guarded import
+// that recorded its intent, or nil when there is none. A guard without a
+// verified checkpoint fails closed, touching nothing: the checkpoint holds
+// the only copy of the originals it replaced.
+func (s *Store) resumeGuard() (*guardCheckpoint, error) {
+	if _, err := s.root.Lstat(guardIntentFile); errors.Is(err, fs.ErrNotExist) {
+		for _, name := range guardTargets {
+			if guarded, err := isGuard(s.root, name); err != nil {
+				return nil, err
+			} else if guarded {
+				return nil, unsupportedErr(errors.New("legacy guard without a checkpoint"))
+			}
+		}
+		// Only an incomplete checkpoint from before the intent can be here.
+		if err := s.root.RemoveAll(guardDir); err != nil {
+			return nil, persistenceErr(err)
+		}
+		return nil, nil
+	} else if err != nil {
+		return nil, persistenceErr(err)
+	}
+	data, err := readRegular(s.root, guardIntentFile)
+	if err != nil {
+		return nil, err
+	}
+	var intent guardIntent
+	if err := decodeStrict(data, &intent); err != nil || intent.Schema != guardSchema {
+		return nil, unsupportedErr(errors.New("unsupported guard intent"))
+	}
+	data, err = readRegular(s.root, guardCheckpointFile)
+	if err != nil {
+		return nil, err
+	}
+	var checkpoint guardCheckpoint
+	if hash(data) != intent.Checkpoint || decodeStrict(data, &checkpoint) != nil || checkpoint.Schema != guardSchema {
+		return nil, unsupportedErr(errors.New("guard checkpoint does not match its intent"))
+	}
+	names := guardNames(checkpoint.Source)
+	if len(checkpoint.Files) != len(names) || (checkpoint.Source != "" && !checkpoint.Files[checkpoint.Source].Present) {
+		return nil, unsupportedErr(errors.New("unsupported guard checkpoint"))
+	}
+	for _, name := range names {
+		original, ok := checkpoint.Files[name]
+		if !ok {
+			return nil, unsupportedErr(errors.New("unsupported guard checkpoint"))
+		}
+		copied := path.Join(guardCopiesDir, name)
+		if !original.Present {
+			if _, err := s.root.Lstat(copied); !errors.Is(err, fs.ErrNotExist) {
+				return nil, unsupportedErr(errors.New("unsupported guard checkpoint"))
+			}
+			continue
+		}
+		data, err := readRegular(s.root, copied)
+		if err != nil {
+			return nil, err
+		}
+		if hash(data) != original.SHA256 {
+			return nil, unsupportedErr(fmt.Errorf("guard checkpoint copy of %s changed", name))
+		}
+	}
+	return &checkpoint, nil
+}
+
+// guardNames are the paths a guard checkpoint records: both targets, and
+// the source when it is an older record.
+func guardNames(source string) []string {
+	names := guardTargets[:]
+	if source != "" && !slices.Contains(names, source) {
+		names = append(slices.Clone(names), source)
+	}
+	return names
+}
+
+// checkpointGuard durably records each guarded path's presence, mode and
+// bytes, and the source's, then the intent naming that checkpoint's hash.
+// It writes nothing outside service/guard.
+func (s *Store) checkpointGuard(source installation.Source) (*guardCheckpoint, error) {
+	if err := s.opts.hook(PhaseGuardCheckpoint); err != nil {
+		return nil, err
+	}
+	// Clearing a flag the user set, or one only root can clear, is not ours.
+	for _, name := range guardTargets {
+		if info, err := s.root.Lstat(name); err == nil {
+			if err := refuseFlags(info); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, dir := range []string{serviceDir, guardDir, guardCopiesDir} {
+		if err := mkdir(s.root, dir); err != nil {
+			return nil, err
+		}
+	}
+	checkpoint := guardCheckpoint{Schema: guardSchema, Source: source.File, Files: map[string]guardOriginal{}}
+	for _, name := range guardNames(source.File) {
+		info, err := s.root.Lstat(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			checkpoint.Files[name] = guardOriginal{}
+			continue
+		}
+		if err != nil {
+			return nil, persistenceErr(err)
+		}
+		data, err := readRegular(s.root, name)
+		if err != nil {
+			return nil, err
+		}
+		if name == source.File && !bytes.Equal(data, source.Data) {
+			return nil, persistenceErr(fmt.Errorf("%s changed while importing", name))
+		}
+		if err := writeFileSync(s.root, path.Join(guardCopiesDir, name), data); err != nil {
+			return nil, err
+		}
+		checkpoint.Files[name] = guardOriginal{Present: true, Mode: uint32(info.Mode().Perm()), SHA256: hash(data)}
+	}
+	data, err := json.Marshal(checkpoint)
+	if err != nil {
+		return nil, persistenceErr(err)
+	}
+	if err := writeFileSync(s.root, guardCheckpointFile, data); err != nil {
+		return nil, err
+	}
+	for _, dir := range []string{guardCopiesDir, guardDir, serviceDir, "."} {
+		if err := syncDir(s.root, dir); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.opts.hook(PhaseGuardIntent); err != nil {
+		return nil, err
+	}
+	intent, err := json.Marshal(guardIntent{Schema: guardSchema, Checkpoint: hash(data)})
+	if err != nil {
+		return nil, persistenceErr(err)
+	}
+	if err := replaceFile(s.root, guardIntentFile, intent); err != nil {
+		return nil, err
+	}
+	return &checkpoint, nil
+}
+
+// installGuard puts the guard at each target that does not hold it yet,
+// replacing only the checkpointed original, makes it immutable and
+// verifies the result.
+func (s *Store) installGuard(checkpoint *guardCheckpoint) error {
+	for _, name := range guardTargets {
+		if err := s.opts.hook(PhaseGuardInstall); err != nil {
+			return err
+		}
+		guarded, err := isGuard(s.root, name)
+		if err != nil {
+			return err
+		}
+		if !guarded {
+			if err := matchesOriginal(s.root, name, checkpoint.Files[name]); err != nil {
+				return err
+			}
+			if err := replaceFileVia(s.root, path.Join(guardDir, name+".tmp"), name, guardBytes, 0o600); err != nil {
+				return err
+			}
+		}
+		if err := s.opts.hook(PhaseGuardFlag); err != nil {
+			return err
+		}
+		if err := setImmutable(s.root, name, true); err != nil {
+			return err
+		}
+	}
+	return verifyGuard(s.root)
+}
+
+// failMigration ends a guarded import that failed with cause, which no
+// retry can fix: it durably marks the root failed first, so no later Open
+// guards it again, then restores each guarded target's original bytes and
+// mode, or its absence. Until the marker is durable nothing is restored and
+// the error is not ErrMigrationFailed, so the next Open resumes instead.
+func (s *Store) failMigration(checkpoint *guardCheckpoint, cause error) error {
+	if err := replaceFile(s.root, migrationFailedFile, []byte(`{"schema":1}`)); err != nil {
+		return errors.Join(err, cause)
+	}
+	var errs []error
+	for _, name := range guardTargets {
+		guarded, err := isGuard(s.root, name)
+		if err != nil || !guarded {
+			// Anything else there is not ours to replace.
+			errs = append(errs, err)
+			continue
+		}
+		if err := setImmutable(s.root, name, false); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		original := checkpoint.Files[name]
+		if !original.Present {
+			if err := s.root.Remove(name); err != nil {
+				errs = append(errs, persistenceErr(err))
+			}
+			errs = append(errs, syncDir(s.root, "."))
+			continue
+		}
+		data, err := readRegular(s.root, path.Join(guardCopiesDir, name))
+		if err == nil && hash(data) != original.SHA256 {
+			err = unsupportedErr(fmt.Errorf("guard checkpoint copy of %s changed", name))
+		}
+		if err == nil {
+			err = replaceFileVia(s.root, path.Join(guardDir, name+".restore"), name, data, fs.FileMode(original.Mode))
+		}
+		errs = append(errs, err)
+	}
+	return errors.Join(append([]error{ErrMigrationFailed, cause}, errs...)...)
+}
+
+// isGuard reports whether name is a regular file holding the guard bytes.
+func isGuard(root *os.Root, name string) (bool, error) {
+	info, err := root.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, persistenceErr(err)
+	}
+	if !info.Mode().IsRegular() || info.Size() != int64(len(guardBytes)) {
+		return false, nil
+	}
+	data, err := root.ReadFile(name)
+	if err != nil {
+		return false, persistenceErr(err)
+	}
+	return bytes.Equal(data, guardBytes), nil
+}
+
+// matchesOriginal fails unless name is still as its checkpoint recorded it.
+func matchesOriginal(root *os.Root, name string, original guardOriginal) error {
+	info, err := root.Lstat(name)
+	switch {
+	case errors.Is(err, fs.ErrNotExist) && !original.Present:
+		return nil
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return persistenceErr(err)
+	case err == nil && original.Present && info.Mode().IsRegular():
+		data, err := root.ReadFile(name)
+		if err != nil {
+			return persistenceErr(err)
+		}
+		if hash(data) == original.SHA256 {
+			return nil
+		}
+	}
+	return unsupportedErr(fmt.Errorf("%s changed since its guard checkpoint", name))
+}
+
+// verifyGuard fails with ErrMigrationGuardMissing unless every target is a
+// regular, private, immutable file holding exactly the guard bytes.
+func verifyGuard(root *os.Root) error {
+	for _, name := range guardTargets {
+		info, err := root.Lstat(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			return ErrMigrationGuardMissing
+		} else if err != nil {
+			return persistenceErr(err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || checkOwned(info) != nil {
+			return ErrMigrationGuardMissing
+		}
+		if err := verifyGuardFile(root, name, info); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// verifyGuardFile checks the opened target against info: an I/O error is
+// persistenceUnavailable, and only a missing or altered guard is
+// ErrMigrationGuardMissing.
+func verifyGuardFile(root *os.Root, name string, info fs.FileInfo) error {
+	file, err := root.Open(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return ErrMigrationGuardMissing
+	} else if err != nil {
+		return persistenceErr(err)
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return persistenceErr(err)
+	}
+	immutable, err := isImmutable(file)
+	if err != nil {
 		return err
 	}
-	return s.load()
+	data, err := io.ReadAll(io.LimitReader(file, int64(len(guardBytes))+1))
+	if err != nil {
+		return persistenceErr(err)
+	}
+	if !os.SameFile(info, opened) || !immutable || !bytes.Equal(data, guardBytes) {
+		return ErrMigrationGuardMissing
+	}
+	return nil
 }
 
 // load opens the committed generation, first finishing the move out of
@@ -576,15 +979,34 @@ func writeFileSync(root *os.Root, name string, data []byte) error {
 
 // replaceFile atomically replaces name: temp file, fsync, rename, fsync dir.
 func replaceFile(root *os.Root, name string, data []byte) error {
-	temp := name + ".tmp"
+	return replaceFileVia(root, name+".tmp", name, data, 0o600)
+}
+
+// replaceFileVia replaces name through temp, with mode: write, fsync,
+// rename, then fsync both directories.
+func replaceFileVia(root *os.Root, temp, name string, data []byte, mode fs.FileMode) error {
 	if err := root.Remove(temp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return persistenceErr(err)
 	}
-	if err := writeFileSync(root, temp, data); err != nil {
-		return err
+	file, err := root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return persistenceErr(err)
+	}
+	// The umask applies at creation, so set the exact mode before the fsync.
+	err = file.Chmod(mode)
+	if err == nil {
+		_, err = file.Write(data)
+	}
+	if err := errors.Join(err, file.Sync(), file.Close()); err != nil {
+		return persistenceErr(err)
 	}
 	if err := root.Rename(temp, name); err != nil {
 		return persistenceErr(err)
+	}
+	if path.Dir(temp) != path.Dir(name) {
+		if err := syncDir(root, path.Dir(temp)); err != nil {
+			return err
+		}
 	}
 	return syncDir(root, path.Dir(name))
 }

@@ -22,7 +22,7 @@ func TestReasonNamesNoPath(t *testing.T) {
 		{fmt.Errorf("%w: open %s: denied", service.ErrPersistenceUnavailable, secret), "persistenceUnavailable"},
 		{fmt.Errorf("%w: unsafe %s", service.ErrUnsupportedState, secret), "unsupportedState"},
 		{context.DeadlineExceeded, "the runtime did not close in time"},
-		{ErrUnguardedVariant, ErrUnguardedVariant.Error()},
+		{ErrUnguardedRoot, ErrUnguardedRoot.Error()},
 		{errors.Join(ipc.ErrUnsafeEndpoint, errors.New(secret)), ipc.ErrUnsafeEndpoint.Error()},
 		{errors.New(secret), "service failed"},
 	} {

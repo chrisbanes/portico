@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/chrisbanes/portico/helper/internal/ipc"
@@ -51,34 +52,45 @@ func TestDefaultStateRoots(t *testing.T) {
 	}
 }
 
-// The macOS production and Dev roots may still have an older app writing
-// them, so until T5's guard the host must refuse them before touching
-// anything.
-func TestMacOSProductionAndDevAreRefused(t *testing.T) {
-	for _, tc := range []struct {
-		goos    string
-		variant ipc.Variant
-		want    error
-	}{
-		{"darwin", ipc.Production, ErrUnguardedVariant},
-		{"darwin", ipc.Dev, ErrUnguardedVariant},
-		{"darwin", ipc.Test, nil},
-		{"linux", ipc.Production, nil},
-		{"linux", ipc.Dev, nil},
-	} {
-		if err := refuseUnguarded(tc.goos, tc.variant); !errors.Is(err, tc.want) {
-			t.Errorf("refuseUnguarded(%s, %s) = %v, want %v", tc.goos, tc.variant, err, tc.want)
+// On macOS production and Dev always require the legacy-writer guard, and
+// a test variant only when asked; no other OS has legacy readers to guard.
+func TestLegacyGuardIsRequiredForTheMacOSRoots(t *testing.T) {
+	base := shortTemp(t)
+	for _, guard := range []bool{false, true} {
+		roots, err := Resolve(ipc.Test, t.TempDir(), base, guard)
+		if runtime.GOOS != "darwin" && guard {
+			if !errors.Is(err, ErrInvalidRoots) {
+				t.Errorf("Resolve(test, guard) off macOS = %v, want ErrInvalidRoots", err)
+			}
+			continue
+		}
+		if err != nil || roots.LegacyGuard != guard {
+			t.Errorf("Resolve(test, %v) = %+v, %v", guard, roots, err)
 		}
 	}
-	// Resolve refuses first. The path flags also make production invalid, so
-	// even without the refusal this never looks up the real roots.
-	want := ErrInvalidRoots
-	if runtime.GOOS == "darwin" {
-		want = ErrUnguardedVariant
-	}
+	// Path flags make production invalid, and so does asking for the guard.
 	for _, variant := range []ipc.Variant{ipc.Production, ipc.Dev} {
-		if _, err := Resolve(variant, t.TempDir(), shortTemp(t)); !errors.Is(err, want) {
-			t.Errorf("Resolve(%s) = %v, want %v", variant, err, want)
+		if _, err := Resolve(variant, t.TempDir(), base, false); !errors.Is(err, ErrInvalidRoots) {
+			t.Errorf("Resolve(%s) with paths = %v, want ErrInvalidRoots", variant, err)
+		}
+		if _, err := Resolve(variant, "", "", true); !errors.Is(err, ErrInvalidRoots) {
+			t.Errorf("Resolve(%s, guard) = %v, want ErrInvalidRoots", variant, err)
+		}
+	}
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	// With a fake home only, so the real roots are never created.
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func(f func() (string, error)) { userHome = f }(userHome)
+	userHome = func() (string, error) { return home, nil }
+	for _, variant := range []ipc.Variant{ipc.Production, ipc.Dev} {
+		roots, err := Resolve(variant, "", "", false)
+		if err != nil || !roots.LegacyGuard || !strings.HasPrefix(roots.StateRoot, home) {
+			t.Errorf("Resolve(%s) = %+v, %v; want the guard on the fake home's root", variant, roots, err)
 		}
 	}
 }
@@ -86,7 +98,7 @@ func TestMacOSProductionAndDevAreRefused(t *testing.T) {
 func TestResolveTestVariant(t *testing.T) {
 	base := shortTemp(t)
 	root := filepath.Join(t.TempDir(), "missing", "state")
-	roots, err := Resolve(ipc.Test, root, base)
+	roots, err := Resolve(ipc.Test, root, base, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +113,7 @@ func TestResolveTestVariant(t *testing.T) {
 	// A looser root this user owns is tightened, as the app does.
 	loose := t.TempDir()
 	os.Chmod(loose, 0o755)
-	if _, err := Resolve(ipc.Test, loose, base); err != nil {
+	if _, err := Resolve(ipc.Test, loose, base, false); err != nil {
 		t.Fatal(err)
 	}
 	if info, _ := os.Lstat(loose); info.Mode().Perm() != 0o700 {
@@ -114,11 +126,11 @@ func TestResolveTestVariant(t *testing.T) {
 		{"relative state root", "state", base},
 		{"relative runtime dir", t.TempDir(), "run"},
 	} {
-		if _, err := Resolve(ipc.Test, tc.root, tc.runtimeDir); !errors.Is(err, ErrInvalidRoots) {
+		if _, err := Resolve(ipc.Test, tc.root, tc.runtimeDir, false); !errors.Is(err, ErrInvalidRoots) {
 			t.Errorf("%s: error = %v", tc.name, err)
 		}
 	}
-	if _, err := Resolve("staging", t.TempDir(), base); !errors.Is(err, ErrInvalidRoots) {
+	if _, err := Resolve("staging", t.TempDir(), base, false); !errors.Is(err, ErrInvalidRoots) {
 		t.Errorf("unknown variant: error = %v", err)
 	}
 }
@@ -134,7 +146,7 @@ func TestResolveRefusesRootFirst(t *testing.T) {
 		if variant != ipc.Test {
 			stateRoot, runtimeDir = "", ""
 		}
-		if _, err := Resolve(variant, stateRoot, runtimeDir); !errors.Is(err, ipc.ErrRoot) {
+		if _, err := Resolve(variant, stateRoot, runtimeDir, false); !errors.Is(err, ipc.ErrRoot) {
 			t.Errorf("Resolve(%s) as root = %v, want ErrRoot", variant, err)
 		}
 	}
@@ -177,8 +189,8 @@ func TestTestVariantRefusesTheGuardedRoots(t *testing.T) {
 		"another directory": t.TempDir(),
 	}
 	for name, root := range refused {
-		if err := refuseGuardedRoot(root, home); !errors.Is(err, ErrUnguardedVariant) {
-			t.Errorf("%s: refuseGuardedRoot = %v, want ErrUnguardedVariant", name, err)
+		if err := refuseGuardedRoot(root, home); !errors.Is(err, ErrUnguardedRoot) {
+			t.Errorf("%s: refuseGuardedRoot = %v, want ErrUnguardedRoot", name, err)
 		}
 	}
 	for name, root := range allowed {
@@ -195,8 +207,8 @@ func TestTestVariantRefusesTheGuardedRoots(t *testing.T) {
 	userHome = func() (string, error) { return home, nil }
 	base := shortTemp(t)
 	for name, root := range refused {
-		if _, err := Resolve(ipc.Test, root, base); !errors.Is(err, ErrUnguardedVariant) {
-			t.Errorf("%s: Resolve = %v, want ErrUnguardedVariant", name, err)
+		if _, err := Resolve(ipc.Test, root, base, false); !errors.Is(err, ErrUnguardedRoot) {
+			t.Errorf("%s: Resolve = %v, want ErrUnguardedRoot", name, err)
 		}
 	}
 	if info, err := os.Stat(production); err != nil || info.Mode().Perm() != 0o755 {
@@ -205,7 +217,7 @@ func TestTestVariantRefusesTheGuardedRoots(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(support, "Portico Dev")); !os.IsNotExist(err) {
 		t.Errorf("the Dev root was created: %v", err)
 	}
-	if _, err := Resolve(ipc.Test, allowed["a sibling"], base); err != nil {
+	if _, err := Resolve(ipc.Test, allowed["a sibling"], base, false); err != nil {
 		t.Errorf("a sibling: Resolve = %v", err)
 	}
 }
@@ -222,7 +234,7 @@ func TestResolveRejectsUnsafeRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, root := range map[string]string{"symlinked root": link, "file root": file, "root under a file": filepath.Join(file, "state")} {
-		if _, err := Resolve(ipc.Test, root, base); !errors.Is(err, ErrInvalidRoots) {
+		if _, err := Resolve(ipc.Test, root, base, false); !errors.Is(err, ErrInvalidRoots) {
 			t.Errorf("%s: error = %v", name, err)
 		}
 	}
@@ -233,7 +245,7 @@ func TestResolveRejectsUnsafeRoots(t *testing.T) {
 		if err := os.Chmod(root, mode); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Resolve(ipc.Test, root, base); !errors.Is(err, ErrInvalidRoots) {
+		if _, err := Resolve(ipc.Test, root, base, false); !errors.Is(err, ErrInvalidRoots) {
 			t.Errorf("root mode %v: error = %v", mode, err)
 		}
 		if info, _ := os.Lstat(root); info.Mode().Perm() != mode {
@@ -248,7 +260,7 @@ func TestResolveRejectsUnsafeRoots(t *testing.T) {
 			if _, err := os.Lstat(root); err != nil {
 				continue
 			}
-			if _, err := Resolve(ipc.Test, root, base); !errors.Is(err, ErrInvalidRoots) {
+			if _, err := Resolve(ipc.Test, root, base, false); !errors.Is(err, ErrInvalidRoots) {
 				t.Errorf("root-owned %s: error = %v", root, err)
 			}
 		}
@@ -261,7 +273,7 @@ func TestResolveRejectsUnsafeRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := filepath.Join(t.TempDir(), "state")
-	if _, err := Resolve(ipc.Test, root, shared); !errors.Is(err, ErrInvalidRoots) {
+	if _, err := Resolve(ipc.Test, root, shared, false); !errors.Is(err, ErrInvalidRoots) {
 		t.Errorf("shared runtime dir: error = %v", err)
 	}
 	if _, err := os.Lstat(root); !os.IsNotExist(err) {
@@ -277,7 +289,7 @@ func TestResolveRejectsUnsafeRoots(t *testing.T) {
 		if err := prepare(filepath.Join(base, string(ipc.Test))); err != nil {
 			t.Fatal(err)
 		}
-		roots, err := Resolve(ipc.Test, t.TempDir(), base)
+		roots, err := Resolve(ipc.Test, t.TempDir(), base, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -301,7 +313,7 @@ func TestResolveRejectsUnsafeXDGRuntimeDir(t *testing.T) {
 		state := t.TempDir()
 		t.Setenv("XDG_STATE_HOME", state)
 		t.Setenv("XDG_RUNTIME_DIR", value)
-		if _, err := Resolve(ipc.Production, "", ""); !errors.Is(err, ErrInvalidRoots) {
+		if _, err := Resolve(ipc.Production, "", "", false); !errors.Is(err, ErrInvalidRoots) {
 			t.Errorf("%s XDG_RUNTIME_DIR: error = %v", name, err)
 		}
 		if _, err := os.Lstat(filepath.Join(state, "portico")); !os.IsNotExist(err) {
@@ -346,8 +358,8 @@ func TestGuardedRootsAreRefusedHoweverTheyAreSpelled(t *testing.T) {
 			t.Logf("%s: skipped, this filesystem has no such spelling", name)
 			continue
 		}
-		if err := refuseGuardedRoot(root, home); !errors.Is(err, ErrUnguardedVariant) {
-			t.Errorf("%s: refuseGuardedRoot = %v, want ErrUnguardedVariant", name, err)
+		if err := refuseGuardedRoot(root, home); !errors.Is(err, ErrUnguardedRoot) {
+			t.Errorf("%s: refuseGuardedRoot = %v, want ErrUnguardedRoot", name, err)
 		}
 	}
 }

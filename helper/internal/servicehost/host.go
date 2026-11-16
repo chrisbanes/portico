@@ -25,6 +25,8 @@ type Config struct {
 	Roots  Roots
 	Engine service.EngineOptions
 	Limits ipc.Limits
+	// Hook is the store's test hook; only porticofake builds set it.
+	Hook func(service.Phase) error
 }
 
 // StartupFailure is Run's result once a host that could not load its state
@@ -47,7 +49,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	store, err := owner.Open(service.Options{})
+	store, err := owner.Open(service.Options{LegacyGuard: cfg.Roots.LegacyGuard, Hook: cfg.Hook})
 	if err != nil {
 		return serveFailure(ctx, cfg, owner, err)
 	}
@@ -79,7 +81,12 @@ func serveFailure(ctx context.Context, cfg Config, owner *service.Owner, openErr
 	if err != nil {
 		return errors.Join(err, owner.Close())
 	}
-	log.Print(failure)
+	// The specific migration reason is for the log only; clients see the code.
+	if reason := Reason(openErr); reason != string(failure.Reason) {
+		log.Printf("%v (%s)", failure, reason)
+	} else {
+		log.Print(failure)
+	}
 	served := make(chan error, 1)
 	go func() { served <- management.ServeStartupFailure(listener, failure.Reason) }()
 	serveErr := stopServing(ctx, listener, served, retry)

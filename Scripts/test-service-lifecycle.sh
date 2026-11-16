@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Runs a porticofake portico-service under this user's service manager
 # (launchd on macOS, systemd --user on Linux) with the test label and
-# isolated temporary roots, and checks its lifecycle over real IPC. It never
-# touches the production or Dev roots, labels or units, and it boots out or
-# stops its own job and removes its roots on exit.
+# isolated temporary roots, and checks its lifecycle over real IPC. On macOS
+# the service imports through the MIG-1 legacy-writer guard (--legacy-guard).
+# It never touches the production or Dev roots, labels or units, and it boots
+# out or stops its own job and removes its roots on exit.
 set -euo pipefail
 
 readonly LABEL=dev.chrisbanes.Portico.ServiceTest
@@ -74,8 +75,12 @@ cleanup() {
     systemctl --user daemon-reload 2>/dev/null
   fi
   job_loaded && echo "WARNING: $LABEL is still loaded" >&2
-  # The work directory holds only this run's binaries and fixture copy.
-  [[ "$work" == "$tmp_base"/portico-lc.* ]] && rm -rf "$work"
+  # The work directory holds only this run's binaries and fixture copy; the
+  # guard's uchg flag must be cleared before it can be removed.
+  if [[ "$work" == "$tmp_base"/portico-lc.* ]]; then
+    [[ "$os" == Darwin ]] && chflags -R nouchg "$work"
+    rm -rf "$work"
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -154,6 +159,17 @@ file_mode() {
   if [[ "$os" == Darwin ]]; then stat -f '%Lp' "$1"; else stat -c '%a' "$1"; fi
 }
 
+readonly GUARD='{"version":2147483647,"porticoServiceGuard":1}'
+
+# assert_guarded fails unless both legacy records are the immutable guard.
+assert_guarded() {
+  local name
+  for name in installation-v5.json installation-v4.json; do
+    [[ $(cat "$state/$name") == "$GUARD" && $(file_mode "$state/$name") == 600 ]] || fail "$name is not the guard ($1)"
+    [[ $(stat -f '%Sf' "$state/$name") == *uchg* ]] || fail "$name is not immutable ($1)"
+  done
+}
+
 # Build the porticofake service and the test client.
 mkdir -m 700 "$state" "$run_dir" "$fake" "$bin" "$requests"
 (cd "$repo/helper" &&
@@ -172,8 +188,10 @@ chmod 600 "$state/tsnet/$HERMES/tailscaled.state" "$state/tsnet/$HERMES/certs/no
 original_hash=$(hash_tree "$state/tsnet")
 
 if [[ "$os" == Darwin ]]; then
+  # Only macOS has legacy readers, so only there is the guard required.
+  seed_hash=$(shasum -a 256 <"$state/installation-v5.json")
   sed -e "s|@PROGRAM@|$bin/portico-service|" -e "s|@STATE_ROOT@|$state|" -e "s|@RUNTIME_DIR@|$run_dir|" \
-    -e "s|@FAKE_RUNTIME@|$fake|" -e "s|@STDERR@|$stderr_log|" \
+    -e "s|<string>@FAKE_RUNTIME@</string>|<string>$fake</string><string>--legacy-guard</string>|" -e "s|@STDERR@|$stderr_log|" \
     "$repo/helper/packaging/macos/$LABEL.plist" >"$work/$LABEL.plist"
   plutil -lint "$work/$LABEL.plist" >/dev/null
 else
@@ -191,6 +209,12 @@ pid1=$(service_pid)
 [[ -n "$pid1" ]] || fail "no service pid"
 wait_for "the first reconcile" '[[ $(log_count "$pid1" reconcile) -ge 1 ]]'
 step 1 "started under $( [[ "$os" == Darwin ]] && echo "launchd ($domain/$LABEL)" || echo "systemd --user ($UNIT)"), pid $pid1"
+if [[ "$os" == Darwin ]]; then
+  assert_guarded "after the import"
+  [[ $(shasum -a 256 <"$state/service/guard/originals/installation-v5.json") == "$seed_hash" ]] ||
+    fail "the guard checkpoint does not hold the seeded record"
+  echo "PASS guard: imported through the legacy-writer guard; installation-v5.json and installation-v4.json immutable, checkpoint holds the seed"
+fi
 
 # 2. Create a Portal, enable the seeded one, and prepare a Stopped Portal and
 # a pending removal for step 4.
@@ -249,6 +273,7 @@ ids_after=$(client state | awk '$1 == "portal" { print $2 }' | LC_ALL=C sort)
 [[ "$ids_after" == "$ids_before" ]] || fail "Portal UUIDs changed: $ids_before -> $ids_after"
 [[ $(hash_tree "$state/tsnet") == "$original_hash" ]] || fail "the original identity tree changed"
 [[ $(hash_tree "$generation/tsnet") == "$generation_hash" ]] || fail "the working identity tree changed"
+[[ "$os" == Darwin ]] && assert_guarded "after kill -9"
 step 4 "kill -9 pid $pid1; restarted as pid $pid2; hermes and alpha reconciled, bravo Stopped, charlie's removal retried and finished; UUIDs and identity hashes unchanged"
 
 # 5. A same-ID retry across the restart returns the original receipt.
@@ -312,5 +337,9 @@ if [[ "$os" == Linux && $(systemctl --user show -p Result --value "$UNIT") != su
   fail "the unit did not stop cleanly"
 fi
 step 8 "clean stop: runtime closed, socket removed, process $pid exited"
+if [[ "$os" == Darwin ]]; then
+  assert_guarded "after the clean stop"
+  echo "PASS guard: still immutable and unchanged after the restart, the startup failure and the stop"
+fi
 
 echo "PASS: all 8 lifecycle steps"
