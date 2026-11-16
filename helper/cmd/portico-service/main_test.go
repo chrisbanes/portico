@@ -108,7 +108,8 @@ func TestTestVariantRequiresBothRoots(t *testing.T) {
 	}
 }
 
-// An import paused after the guard still stops on SIGTERM.
+// The porticofake pause hook, here at the import's copy phase without a
+// guard, still stops on SIGTERM.
 func TestPauseAfterGuardStopsOnSIGTERM(t *testing.T) {
 	bin := build(t, "porticofake")
 	// Short enough for a socket path.

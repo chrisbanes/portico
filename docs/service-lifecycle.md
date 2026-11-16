@@ -121,8 +121,9 @@ with `unsupportedState`, touching nothing. A failure no retry can fix, such
 as an identity that became unsafe, whether in the first attempt or a roll
 forward, first writes `service/migration-failed.json` and then restores the
 original bytes and modes, or removes a guard whose record did not exist. If
-the marker cannot be written, nothing is restored and the next start rolls
-forward again. Every later start reports `migrationFailed`, and nothing
+the marker is not written, nothing is restored and the next start rolls
+forward again; a marker that persists despite a reported error leaves the
+guard in place for the manual recovery below. Every later start reports `migrationFailed`, and nothing
 guards the root again until the manual recovery below. A record that
 already has a file flag such as `uchg` is refused with `unsupportedState`
 before anything is guarded.
@@ -170,7 +171,8 @@ There is no automatic downgrade. To return a root to an older app:
 After `migrationFailed`, stop the service first, as in step 1. The
 originals should already be restored: check each record against the
 checkpoint, and apply step 4 to any target that still holds the guard. Then
-move `service/` aside as in steps 2 and 5. The next start imports and guards again. After
+move `service/` aside as in steps 2 and 5. The next start imports and
+guards again. After
 `migrationGuardMissing`, an older app may have written the records: compare
 them with the checkpoint before doing anything else. If they changed, keep
 both and do not merge identities by hand.

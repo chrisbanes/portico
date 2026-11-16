@@ -50,7 +50,8 @@ func isImmutable(file *os.File) (bool, error) {
 }
 
 // refuseFlags refuses a target that already has a flag the guard would
-// clear or that would stop it: uchg, uappnd, or any flag only root sets.
+// clear or that would stop it: uchg, uappnd, or any system (SF_*) flag.
+// Other user flags, such as hidden, are not preserved by the guard.
 func refuseFlags(info fs.FileInfo) error {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
