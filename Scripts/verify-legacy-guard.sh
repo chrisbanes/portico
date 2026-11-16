@@ -16,6 +16,11 @@ command -v swiftc >/dev/null || { echo "FAIL: swiftc is required" >&2; exit 1; }
 # macOS ships bash 3.2, which has no mapfile.
 versions=()
 while IFS= read -r tag; do versions+=("$tag"); done < <(git -C "$repo" tag -l 'v*')
+# The releases pinned in test-legacy-exclusion-in-vm.sh must be among them, so
+# a clone without tags cannot pass on HEAD alone.
+for required in v0.0.1 v0.0.2; do
+  [[ " ${versions[*]} " == *" $required "* ]] || { echo "FAIL: no tag $required; fetch the tags" >&2; exit 1; }
+done
 versions+=(HEAD)
 for version in "${versions[@]}"; do
   dir="$work/$version"

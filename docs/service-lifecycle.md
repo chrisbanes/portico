@@ -118,10 +118,14 @@ start imports again. After step 3 the next start rolls forward: it verifies
 the checkpoint against the intent, imports from the checkpoint copies, and
 never removes the guard. A guard without a verified checkpoint fails closed
 with `unsupportedState`, touching nothing. A failure no retry can fix, such
-as an identity that became unsafe, first writes `service/migration-failed.json`
-and then restores the original bytes and modes, or removes a guard whose
-record did not exist. Every later start reports `migrationFailed`, and nothing
-guards the root again until the manual recovery below.
+as an identity that became unsafe, whether in the first attempt or a roll
+forward, first writes `service/migration-failed.json` and then restores the
+original bytes and modes, or removes a guard whose record did not exist. If
+the marker cannot be written, nothing is restored and the next start rolls
+forward again. Every later start reports `migrationFailed`, and nothing
+guards the root again until the manual recovery below. A record that
+already has a file flag such as `uchg` is refused with `unsupportedState`
+before anything is guarded.
 
 After the commit, every start verifies that both guards are present,
 regular, 0600, immutable and unchanged before the runtime starts. Otherwise
@@ -163,9 +167,10 @@ There is no automatic downgrade. To return a root to an older app:
 5. Remove `service/` and `service-owner.lock` from the root. Only then open
    the older app.
 
-After `migrationFailed`, the originals are already restored. Check them
-against the checkpoint as in step 4, then move `service/` aside as in steps
-2 and 5. The next start imports and guards again. After
+After `migrationFailed`, stop the service first, as in step 1. The
+originals should already be restored: check each record against the
+checkpoint, and apply step 4 to any target that still holds the guard. Then
+move `service/` aside as in steps 2 and 5. The next start imports and guards again. After
 `migrationGuardMissing`, an older app may have written the records: compare
 them with the checkpoint before doing anything else. If they changed, keep
 both and do not merge identities by hand.
@@ -300,7 +305,7 @@ Never record node IDs, names, URLs, keys or paths.
    - with no client connected: run `"$m/lifecycleclient" -runtime-dir "$m/run" subscribe`,
      and press Ctrl-C;
    - after a restart: press Ctrl-C on the service, wait for it to exit 0,
-     and run the same command again.
+     and restart the service with the `"$m/portico-service"` command from step 3.
 
    The node-ID hash and the HTTPS status must be unchanged each time.
 5. Stop the service with Ctrl-C and delete the copy:

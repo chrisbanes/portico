@@ -47,11 +47,9 @@ func run(args []string) int {
 		log.Print(err)
 		return 2
 	}
-	if *legacyGuard && (variant != ipc.Test || runtime.GOOS != "darwin") {
-		log.Print("--legacy-guard needs --variant test on macOS")
-		return 2
-	}
-	hook, err := selectHook(variant)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	hook, err := selectHook(ctx, variant)
 	if err != nil {
 		log.Print(err)
 		return 2
@@ -61,8 +59,6 @@ func run(args []string) int {
 		log.Print(servicehost.Reason(err))
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 	err = servicehost.Run(ctx, servicehost.Config{
 		Roots: roots,
 		Engine: service.EngineOptions{

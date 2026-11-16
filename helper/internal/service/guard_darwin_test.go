@@ -15,7 +15,7 @@ import (
 
 var guarded = Options{LegacyGuard: true}
 
-// guardTemp is a temporary root whose uchg flags are cleared before the
+// guardTemp is a temporary root whose file flags are cleared before the
 // directory is removed.
 func guardTemp(t *testing.T) string {
 	t.Helper()
@@ -26,7 +26,8 @@ func guardTemp(t *testing.T) string {
 
 func clearFlags(t *testing.T, dir string) {
 	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && d.Type().IsRegular() && immutable(t, p) {
+		var st unix.Stat_t
+		if err == nil && !d.IsDir() && d.Type().IsRegular() && unix.Lstat(p, &st) == nil && st.Flags != 0 {
 			if err := unix.Chflags(p, 0); err != nil {
 				t.Errorf("clear flags: %v", err)
 			}
@@ -342,6 +343,112 @@ func TestLegacyGuardCrashBoundaries(t *testing.T) {
 			if after := flags(); !reflect.DeepEqual(after, beforeFlags) {
 				t.Fatalf("flags changed: %v -> %v", beforeFlags, after)
 			}
+		})
+	}
+
+	t.Run("the failure marker is durable before any restore", func(t *testing.T) {
+		dir := guardTemp(t)
+		guardedSource(t, dir)
+		unsafe := filepath.Join(dir, "tsnet", hermesOriginal, "tailscaled.state")
+		blocker := filepath.Join(dir, migrationFailedFile+".tmp")
+		// A terminal failure whose marker cannot be written.
+		_, err := Open(dir, Options{LegacyGuard: true, Hook: func(p Phase) error {
+			if p == PhaseCopy {
+				if err := os.Chmod(unsafe, 0o666); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Join(blocker, "x"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return nil
+		}})
+		if err == nil || errors.Is(err, ErrMigrationFailed) {
+			t.Fatalf("Open() error = %v, want a failure that is not migrationFailed", err)
+		}
+		assertGone(t, dir, migrationFailedFile)
+		assertGuarded(t, dir)
+		// Nothing was restored, so the next start rolls forward.
+		if err := os.Chmod(unsafe, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(blocker); err != nil {
+			t.Fatal(err)
+		}
+		mustOpenGuarded(t, dir).Close()
+		assertGuarded(t, dir)
+	})
+
+	t.Run("a terminal failure on resume restores the originals", func(t *testing.T) {
+		dir := guardTemp(t)
+		guardedSource(t, dir)
+		before := originals(t, dir)
+		if _, err := Open(dir, failAtNth(PhaseCopy, 1)); !errors.Is(err, errInjected) {
+			t.Fatalf("Open() error = %v", err)
+		}
+		// Found unsafe while resuming, before any guard is reinstalled.
+		unsafe := filepath.Join(dir, "tsnet", hermesOriginal, "tailscaled.state")
+		if err := os.Chmod(unsafe, 0o666); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Open(dir, guarded); !errors.Is(err, ErrMigrationFailed) {
+			t.Fatalf("Open() error = %v, want migrationFailed", err)
+		}
+		if err := os.Chmod(unsafe, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if after := originals(t, dir); !reflect.DeepEqual(after, before) {
+			t.Fatalf("originals not restored exactly: %v -> %v", before, after)
+		}
+		assertNotFlagged(t, dir)
+		if _, err := os.Stat(filepath.Join(dir, migrationFailedFile)); err != nil {
+			t.Fatalf("no failure marker: %v", err)
+		}
+	})
+
+	t.Run("a source changed before its checkpoint is not guarded", func(t *testing.T) {
+		dir := guardTemp(t)
+		guardedSource(t, dir)
+		changed := []byte(`{"version":5,"portals":[],"alerts":[]}`)
+		_, err := Open(dir, Options{LegacyGuard: true, Hook: func(p Phase) error {
+			if p == PhaseGuardCheckpoint {
+				write(t, filepath.Join(dir, "installation-v5.json"), changed, 0o600)
+			}
+			return nil
+		}})
+		if !errors.Is(err, ErrPersistenceUnavailable) {
+			t.Fatalf("Open() error = %v, want persistenceUnavailable", err)
+		}
+		if data, _ := os.ReadFile(filepath.Join(dir, "installation-v5.json")); string(data) != string(changed) {
+			t.Fatalf("the changed source was replaced: %q", data)
+		}
+		assertNotFlagged(t, dir)
+		assertGone(t, dir, guardIntentFile)
+		assertGone(t, dir, manifestFile)
+	})
+
+	for name, flag := range map[string]int{"uchg": unix.UF_IMMUTABLE, "uappnd": unix.UF_APPEND} {
+		t.Run("a target that already has "+name+" is refused before the intent", func(t *testing.T) {
+			dir := guardTemp(t)
+			guardedSource(t, dir)
+			before := originals(t, dir)
+			if err := unix.Chflags(filepath.Join(dir, "installation-v4.json"), flag); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				_, err := Open(dir, guarded)
+				if !errors.Is(err, ErrUnsupportedState) || errors.Is(err, ErrMigrationFailed) {
+					t.Fatalf("Open() error = %v, want unsupportedState", err)
+				}
+			}
+			if after := originals(t, dir); !reflect.DeepEqual(after, before) {
+				t.Fatalf("originals changed: %v -> %v", before, after)
+			}
+			if immutable(t, filepath.Join(dir, "installation-v5.json")) {
+				t.Fatal("installation-v5.json was flagged")
+			}
+			assertGone(t, dir, guardIntentFile)
+			assertGone(t, dir, manifestFile)
 		})
 	}
 

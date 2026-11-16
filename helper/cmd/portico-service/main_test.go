@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // build compiles portico-service with tags into a temporary directory.
@@ -59,7 +62,7 @@ func TestLegacyGuardFlagIsTestVariantOnMacOSOnly(t *testing.T) {
 	}
 	for _, args := range cases {
 		code, stderr := exitCode(t, bin, args...)
-		if code != 2 || !strings.Contains(stderr, "--legacy-guard needs --variant test on macOS") {
+		if code != 1 || !strings.Contains(stderr, "invalid state root") {
 			t.Errorf("%v: exit %d, stderr %q", args, code, stderr)
 		}
 	}
@@ -102,5 +105,40 @@ func TestTestVariantRequiresBothRoots(t *testing.T) {
 	}
 	if code, _ := exitCode(t, bin, "--variant", "staging"); code != 2 {
 		t.Errorf("unknown variant: exit %d", code)
+	}
+}
+
+// An import paused after the guard still stops on SIGTERM.
+func TestPauseAfterGuardStopsOnSIGTERM(t *testing.T) {
+	bin := build(t, "porticofake")
+	// Short enough for a socket path.
+	run, err := os.MkdirTemp("/tmp", "pas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(run)
+	pause := t.TempDir()
+	cmd := exec.Command(bin, "--variant", "test", "--state-root", t.TempDir(), "--runtime-dir", run,
+		"--fake-runtime", t.TempDir(), "--pause-after-guard", pause)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(pause, "paused")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cmd.Process.Kill()
+			t.Fatal("never paused")
+		}
+	}
+	cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("the paused import ignored SIGTERM")
 	}
 }

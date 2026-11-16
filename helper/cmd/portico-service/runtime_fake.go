@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"os"
@@ -30,10 +31,10 @@ func runtimeFlags(flags *flag.FlagSet) func(ipc.Variant) (service.RuntimeFactory
 
 // hookFlags adds --pause-after-guard, for the legacy-exclusion VM proof: once
 // the guard is installed and flagged, the import writes DIR/paused and waits
-// for DIR/resume before staging.
-func hookFlags(flags *flag.FlagSet) func(ipc.Variant) (func(service.Phase) error, error) {
+// for DIR/resume before staging, or until ctx ends.
+func hookFlags(flags *flag.FlagSet) func(context.Context, ipc.Variant) (func(service.Phase) error, error) {
 	dir := flags.String("pause-after-guard", "", "test variant only: pause the import after the legacy guard until this absolute directory holds resume")
-	return func(variant ipc.Variant) (func(service.Phase) error, error) {
+	return func(ctx context.Context, variant ipc.Variant) (func(service.Phase) error, error) {
 		if *dir == "" {
 			return nil, nil
 		}
@@ -51,7 +52,11 @@ func hookFlags(flags *flag.FlagSet) func(ipc.Variant) (func(service.Phase) error
 				if _, err := os.Stat(filepath.Join(*dir, "resume")); err == nil {
 					return nil
 				}
-				time.Sleep(100 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(100 * time.Millisecond):
+				}
 			}
 		}, nil
 	}

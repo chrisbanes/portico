@@ -265,6 +265,17 @@ func (s *Store) migrate() (err error) {
 			}
 			defer importRoot.Close()
 		}
+		// From the intent on, an interruption rolls forward and keeps the
+		// guard; only a failure no retry can fix restores the originals.
+		// recorded is set here on a resume, or by the checkpoint below.
+		defer func() {
+			if recorded == nil || err == nil || errors.Is(err, ErrPersistenceUnavailable) {
+				return
+			}
+			if _, statErr := s.root.Lstat(manifestFile); errors.Is(statErr, fs.ErrNotExist) {
+				err = s.failMigration(recorded, err)
+			}
+		}()
 	}
 	imported, source, err := installation.Import(importRoot)
 	if err != nil {
@@ -278,9 +289,6 @@ func (s *Store) migrate() (err error) {
 		if info, err := importRoot.Lstat(source.File); err != nil || checkOwned(info) != nil {
 			return unsafeErr(source.File)
 		}
-	}
-	if recorded != nil && (source.File != recorded.Source || (source.File != "" && hash(source.Data) != recorded.Files[source.File].SHA256)) {
-		return unsupportedErr(errors.New("guard checkpoint does not match its source"))
 	}
 	identities, err := mapIdentities(s.root, imported)
 	if err != nil {
@@ -317,16 +325,6 @@ func (s *Store) migrate() (err error) {
 				return err
 			}
 		}
-		// From the intent on, an interruption rolls forward and keeps the
-		// guard; only a failure no retry can fix restores the originals.
-		defer func() {
-			if err == nil || errors.Is(err, ErrPersistenceUnavailable) {
-				return
-			}
-			if _, statErr := s.root.Lstat(manifestFile); errors.Is(statErr, fs.ErrNotExist) {
-				err = errors.Join(ErrMigrationFailed, s.failMigration(recorded), err)
-			}
-		}()
 		if err := s.installGuard(recorded); err != nil {
 			return err
 		}
@@ -501,6 +499,14 @@ func (s *Store) checkpointGuard(source installation.Source) (*guardCheckpoint, e
 	if err := s.opts.hook(PhaseGuardCheckpoint); err != nil {
 		return nil, err
 	}
+	// Clearing a flag the user set, or one only root can clear, is not ours.
+	for _, name := range guardTargets {
+		if info, err := s.root.Lstat(name); err == nil {
+			if err := refuseFlags(info); err != nil {
+				return nil, err
+			}
+		}
+	}
 	for _, dir := range []string{serviceDir, guardDir, guardCopiesDir} {
 		if err := mkdir(s.root, dir); err != nil {
 			return nil, err
@@ -583,12 +589,14 @@ func (s *Store) installGuard(checkpoint *guardCheckpoint) error {
 	return verifyGuard(s.root)
 }
 
-// failMigration ends a guarded import that cannot succeed: it durably marks
-// the root failed first, so no later Open guards it again, then restores
-// each guarded target's original bytes and mode, or its absence.
-func (s *Store) failMigration(checkpoint *guardCheckpoint) error {
+// failMigration ends a guarded import that failed with cause, which no
+// retry can fix: it durably marks the root failed first, so no later Open
+// guards it again, then restores each guarded target's original bytes and
+// mode, or its absence. Until the marker is durable nothing is restored and
+// the error is not ErrMigrationFailed, so the next Open resumes instead.
+func (s *Store) failMigration(checkpoint *guardCheckpoint, cause error) error {
 	if err := replaceFile(s.root, migrationFailedFile, []byte(`{"schema":1}`)); err != nil {
-		return err
+		return errors.Join(err, cause)
 	}
 	var errs []error
 	for _, name := range guardTargets {
@@ -619,7 +627,7 @@ func (s *Store) failMigration(checkpoint *guardCheckpoint) error {
 		}
 		errs = append(errs, err)
 	}
-	return errors.Join(errs...)
+	return errors.Join(append([]error{ErrMigrationFailed, cause}, errs...)...)
 }
 
 // isGuard reports whether name is a regular file holding the guard bytes.
@@ -666,20 +674,46 @@ func matchesOriginal(root *os.Root, name string, original guardOriginal) error {
 func verifyGuard(root *os.Root) error {
 	for _, name := range guardTargets {
 		info, err := root.Lstat(name)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || checkOwned(info) != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ErrMigrationGuardMissing
+		} else if err != nil {
+			return persistenceErr(err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || checkOwned(info) != nil {
 			return ErrMigrationGuardMissing
 		}
-		file, err := root.Open(name)
-		if err != nil {
-			return ErrMigrationGuardMissing
+		if err := verifyGuardFile(root, name, info); err != nil {
+			return err
 		}
-		opened, statErr := file.Stat()
-		immutable, flagErr := isImmutable(file)
-		data, readErr := io.ReadAll(io.LimitReader(file, int64(len(guardBytes))+1))
-		file.Close()
-		if statErr != nil || flagErr != nil || readErr != nil || !os.SameFile(info, opened) || !immutable || !bytes.Equal(data, guardBytes) {
-			return ErrMigrationGuardMissing
-		}
+	}
+	return nil
+}
+
+// verifyGuardFile checks the opened target against info: an I/O error is
+// persistenceUnavailable, and only a missing or altered guard is
+// ErrMigrationGuardMissing.
+func verifyGuardFile(root *os.Root, name string, info fs.FileInfo) error {
+	file, err := root.Open(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return ErrMigrationGuardMissing
+	} else if err != nil {
+		return persistenceErr(err)
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return persistenceErr(err)
+	}
+	immutable, err := isImmutable(file)
+	if err != nil {
+		return err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, int64(len(guardBytes))+1))
+	if err != nil {
+		return persistenceErr(err)
+	}
+	if !os.SameFile(info, opened) || !immutable || !bytes.Equal(data, guardBytes) {
+		return ErrMigrationGuardMissing
 	}
 	return nil
 }

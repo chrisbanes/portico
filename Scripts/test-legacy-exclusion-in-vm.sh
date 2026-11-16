@@ -8,8 +8,8 @@
 # --legacy-guard, and launches each old app during the transfer, after the
 # commit, with the service stopped and in a kill -9 restart loop, asserting
 # the guard, the records, the identities and that no helper started. Last,
-# it follows the documented manual recovery and shows that, unguarded,
-# v0.0.2 rewrites the records: the positive control.
+# it follows the documented manual recovery and shows that, unguarded on a
+# fresh seed, each version rewrites the records: the positive controls.
 #
 #   Scripts/test-legacy-exclusion-in-vm.sh            run it (downloads, Tart)
 #   Scripts/test-legacy-exclusion-in-vm.sh --dry-run  validate and print the plan only
@@ -87,9 +87,11 @@ guest (the VM's own ~/Library/Application Support/Portico, fresh):
      each, then wait for launchd's restart
  10. recovery: bootout, check no post-cutover mutation and unchanged identities, preserve
      service/, clear uchg and restore the checkpointed records
- 11. positive control: launch v0.0.2 unguarded; expect it to rewrite the records
-assert at every launch: both guards hold the guard bytes with uchg; no installation
-record created or changed; tsnet identity hashes unchanged; no helper child process.
+ 11. positive controls: for each version, re-seed unguarded, launch it, and expect it
+     to rewrite the records
+assert at every launch: the app is still running after 20 seconds; both guards hold the
+guard bytes with uchg; no installation record created or changed; tsnet identity hashes
+unchanged; no helper child process at any poll in those 20 seconds.
 results: $results/summary.log
 EOF
 }
@@ -136,15 +138,19 @@ records() {
 service_pid() { launchctl print "$domain/$label" 2>/dev/null | awk '$1 == "pid" && $2 == "=" { print $3 }'; }
 ready() { client state 2>/dev/null | head -n 1 | grep -q 'startupFailure=$'; }
 
+# seed writes a fresh unguarded root and records its baseline.
+seed() {
+  mkdir -m 700 "$root" "$root/tsnet" "$root/tsnet/$hermes"
+  sed -e 's/"desiredState":"stopped","lifecycle":"pendingTailnetRejection"/"desiredState":"enabled","lifecycle":"active"/' \
+    -e 's/"alerts":\[.*\],"operationalLogging"/"alerts":[],"operationalLogging"/' "$w/v3.json" >"$root/installation-v3.json"
+  head -c 256 /dev/urandom >"$root/tsnet/$hermes/tailscaled.state"
+  chmod 600 "$root/installation-v3.json" "$root/tsnet/$hermes/tailscaled.state"
+  original_records=$(records)
+  original_identity=$(identity_hash)
+  pass "seed: installation-v3.json with hermes Enabled, fake identity tree"
+}
 [[ ! -e "$root" ]] || fail "this VM already has a production root"
-mkdir -m 700 "$root" "$root/tsnet" "$root/tsnet/$hermes"
-sed -e 's/"desiredState":"stopped","lifecycle":"pendingTailnetRejection"/"desiredState":"enabled","lifecycle":"active"/' \
-  -e 's/"alerts":\[.*\],"operationalLogging"/"alerts":[],"operationalLogging"/' "$w/v3.json" >"$root/installation-v3.json"
-head -c 256 /dev/urandom >"$root/tsnet/$hermes/tailscaled.state"
-chmod 600 "$root/installation-v3.json" "$root/tsnet/$hermes/tailscaled.state"
-original_records=$(records)
-original_identity=$(identity_hash)
-pass "seed: installation-v3.json with hermes Enabled, fake identity tree"
+seed
 
 guarded_records=""
 assert_guarded() {
@@ -157,17 +163,32 @@ assert_guarded() {
   [[ $(identity_hash) == "$original_identity" ]] || fail "$1: the identity tree changed"
 }
 
-# launch VERSION PHASE runs the old app for 20 seconds and asserts it took nothing.
-launch() {
-  local app="$w/apps/Portico-$1.app" exe pid children
+# run_app VERSION PHASE runs the old app for 20 seconds, polling for child
+# processes throughout, and fails the phase if the app exits early. It sets
+# children to every child seen ("pid command" lines), and stops them too.
+run_app() {
+  local app="$w/apps/Portico-$1.app" exe pid seen
   exe=$(defaults read "$app/Contents/Info" CFBundleExecutable)
   "$app/Contents/MacOS/$exe" >/dev/null 2>&1 &
   pid=$!
-  sleep 20
-  kill -0 "$pid" 2>/dev/null || echo "    v$1 exited by itself"
-  children=$(ps -axo ppid=,comm= | awk -v p="$pid" '$1 == p { $1 = ""; print }')
+  children=""
+  for _ in {1..40}; do
+    seen=$(ps -axo ppid=,pid=,comm= | awk -v p="$pid" '$1 == p { $1 = ""; print }')
+    [[ -z "$seen" ]] || children+="$seen"$'\n'
+    # A zombie has exited too.
+    ps -o stat= -p "$pid" 2>/dev/null | grep -qv '^Z' || fail "v$1 $2: the app exited by itself"
+    sleep 0.5
+  done
+  children=$(printf '%s' "$children" | sort -u)
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  local child
+  for child in $(awk '{ print $1 }' <<<"$children"); do kill "$child" 2>/dev/null || true; done
+}
+
+# launch VERSION PHASE runs the old app and asserts it took nothing.
+launch() {
+  run_app "$1" "$2"
   [[ -z "$children" ]] || fail "v$1 $2: started $children"
   assert_guarded "v$1 $2"
   pass "v$1 $2: guard bytes and uchg intact, no record created or changed, identities unchanged, no helper"
@@ -261,16 +282,16 @@ rm -rf "$root/service" "$root/service-owner.lock"
 [[ $(identity_hash) == "$original_identity" ]] || fail "recovery changed the identity tree"
 pass "recovery: guard cleared, original records restored byte- and mode-exact, service/ preserved outside the root"
 
-# 11. Positive control: unguarded, v0.0.2 takes the root.
-app="$w/apps/Portico-0.0.2.app"
-"$app/Contents/MacOS/$(defaults read "$app/Contents/Info" CFBundleExecutable)" >/dev/null 2>&1 &
-pid=$!
-sleep 20
-kill "$pid" 2>/dev/null || true
-wait "$pid" 2>/dev/null || true
-[[ $(records) != "$original_records" || $(identity_hash) != "$original_identity" ]] ||
-  fail "positive control: unguarded v0.0.2 changed nothing, so the checks cannot see a writer"
-echo "FAIL-as-expected positive control: unguarded v0.0.2 rewrote the records ($(records | tr '\n' ' '))"
+# 11. Positive controls: unguarded, each version takes a fresh root.
+for v in 0.0.1 0.0.2; do
+  chflags -R nouchg "$root"
+  rm -rf "$root"
+  seed
+  run_app "$v" "positive control"
+  [[ $(records) != "$original_records" || $(identity_hash) != "$original_identity" ]] ||
+    fail "positive control: unguarded v$v changed nothing, so the checks cannot see a writer"
+  echo "FAIL-as-expected positive control: unguarded v$v rewrote the records ($(records | tr '\n' ' '))"
+done
 echo "PASS: legacy exclusion proven for v0.0.1 and v0.0.2"
 GUEST
 }

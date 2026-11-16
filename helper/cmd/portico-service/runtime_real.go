@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 
 	"github.com/chrisbanes/portico/helper/internal/ipc"
@@ -15,6 +16,6 @@ func runtimeFlags(*flag.FlagSet) func(ipc.Variant) (service.RuntimeFactory, erro
 }
 
 // hookFlags adds no flags: a production build has no store hook.
-func hookFlags(*flag.FlagSet) func(ipc.Variant) (func(service.Phase) error, error) {
-	return func(ipc.Variant) (func(service.Phase) error, error) { return nil, nil }
+func hookFlags(*flag.FlagSet) func(context.Context, ipc.Variant) (func(service.Phase) error, error) {
+	return func(context.Context, ipc.Variant) (func(service.Phase) error, error) { return nil, nil }
 }
