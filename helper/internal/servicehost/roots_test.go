@@ -319,3 +319,35 @@ func lockFile(t *testing.T) *os.File {
 	t.Cleanup(func() { f.Close() })
 	return f
 }
+
+// TestGuardedRootsAreRefusedHoweverTheyAreSpelled: spellings symlink
+// resolution misses still reach the same directory: macOS firmlinks into
+// the data volume, and another Unicode normalisation of the home.
+func TestGuardedRootsAreRefusedHoweverTheyAreSpelled(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(base, "caf\u00e9") // NFC
+	production := filepath.Join(home, "Library", "Application Support", "Portico")
+	if err := os.MkdirAll(production, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	firmlink, nfd := filepath.Join("/System/Volumes/Data", base), filepath.Join(base, "cafe\u0301")
+	spellings := map[string]struct{ root, via string }{
+		"firmlink":           {filepath.Join("/System/Volumes/Data", production, "state"), firmlink},
+		"firmlink, contains": {filepath.Join("/System/Volumes/Data", home, "Library"), firmlink},
+		"NFD home":           {filepath.Join(nfd, "Library", "Application Support", "Portico"), nfd},
+		"NFD home, Dev":      {filepath.Join(nfd, "Library", "Application Support", "Portico Dev", "x"), nfd},
+	}
+	for name, spelling := range spellings {
+		root := spelling.root
+		if _, err := os.Stat(spelling.via); err != nil {
+			t.Logf("%s: skipped, this filesystem has no such spelling", name)
+			continue
+		}
+		if err := refuseGuardedRoot(root, home); !errors.Is(err, ErrUnguardedVariant) {
+			t.Errorf("%s: refuseGuardedRoot = %v, want ErrUnguardedVariant", name, err)
+		}
+	}
+}

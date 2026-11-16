@@ -53,7 +53,7 @@ func TestStartupFailureServesItsSnapshotAndRefusesTheRest(t *testing.T) {
 
 			s := snapshot(t, c)
 			if s.Service.StartupFailure != reason || s.Service.Runtime != "unavailable" || s.Service.PersistenceHealthy ||
-				s.Epoch != c.Epoch || len(s.Portals) != 0 || s.Revision != 0 {
+				s.Epoch != c.Epoch || len(s.Portals) != 0 || len(s.Availability) != 0 || s.Revision != 0 {
 				t.Fatalf("snapshot = %+v", s)
 			}
 

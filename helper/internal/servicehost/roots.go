@@ -121,8 +121,8 @@ func refuseUnguarded(goos string, variant ipc.Variant) error {
 
 // refuseGuardedRoot keeps the macOS test variant out of the production and
 // Dev roots that refuseUnguarded protects: a state root equal to, inside or
-// containing either is refused, after resolving symlinks. APFS is usually
-// case-insensitive, so the comparison ignores case.
+// containing either is refused, by resolved path and by file identity. APFS
+// is usually case-insensitive, so the comparison ignores case.
 func refuseGuardedRoot(stateRoot, home string) error {
 	root := strings.ToLower(resolveExisting(stateRoot))
 	for _, variant := range []ipc.Variant{ipc.Production, ipc.Dev} {
@@ -130,12 +130,55 @@ func refuseGuardedRoot(stateRoot, home string) error {
 		if err != nil {
 			return ErrInvalidRoots
 		}
+		if sameTree(guarded, stateRoot) || sameTree(stateRoot, guarded) {
+			return ErrUnguardedVariant
+		}
 		guarded = strings.ToLower(resolveExisting(guarded))
 		if within(guarded, root) || within(root, guarded) {
 			return ErrUnguardedVariant
 		}
 	}
 	return nil
+}
+
+// sameTree reports whether path is dir or inside it by file identity, which
+// also sees through spellings symlink resolution misses: firmlinks such as
+// /System/Volumes/Data/Users, and Unicode normalisation. Where dir does not
+// exist yet, its deepest existing ancestor stands in, and the names below it
+// are compared without case.
+func sameTree(dir, path string) bool {
+	dirBase, dirRest := existingAncestor(dir)
+	if dirBase == nil {
+		return false
+	}
+	for p, rest := filepath.Clean(path), ""; ; {
+		if info, err := os.Stat(p); err == nil && os.SameFile(info, dirBase) {
+			return rest == dirRest || dirRest == "" || strings.HasPrefix(rest, dirRest+"/")
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return false
+		}
+		rest = strings.ToLower(filepath.Join(filepath.Base(p), rest))
+		p = parent
+	}
+}
+
+// existingAncestor is path's deepest existing ancestor-or-self and the
+// lower-cased names below it.
+func existingAncestor(path string) (os.FileInfo, string) {
+	rest := ""
+	for p := filepath.Clean(path); ; {
+		if info, err := os.Stat(p); err == nil {
+			return info, rest
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return nil, ""
+		}
+		rest = strings.ToLower(filepath.Join(filepath.Base(p), rest))
+		p = parent
+	}
 }
 
 // resolveExisting resolves the symlinks in path's longest existing prefix

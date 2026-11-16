@@ -78,7 +78,10 @@ only, never paths.
   service manager's back-off loads the state again. The failure stays
   visible: in the snapshot while it is served, and in the manager's status
   and log between runs. Under systemd the start limit below ends the retries
-  after five failed starts.
+  after five failed starts: each cycle takes about 35 seconds (30 served plus
+  `RestartSec=5`), so after about 3 minutes the unit stays failed and
+  clients see the service as not running rather than `persistenceUnavailable`,
+  until `systemctl --user reset-failed portico-service` and a start.
 
 Either way the service exits 1 when it stops, so the manager records a
 failed run. An explicit `launchctl bootout` or `systemctl --user stop` does
