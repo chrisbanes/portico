@@ -163,6 +163,91 @@ not proof of rejection. `retryable` never instructs a client to allocate a new
 request ID for an uncertain mutation.
 Unauthenticated peers are closed without state/error detail.
 
+### Message shapes
+
+These fill in shapes the contract leaves open; the only extension is that a
+timed-out mutation's reply may carry `uncertain` instead of `result` or
+`error`, as the transport section's "uncertain outcome" requires.
+`helper/internal/management` implements them.
+
+- **Hello.** The reply's `epoch` is the snapshot epoch. A first frame that is
+  not exactly `{"type":"hello","version":<integer>}` is malformed (below).
+  Mismatch sends
+  `{"type":"error","error":{"code":"incompatibleVersion","retryable":false},"supportedVersions":[1]}`.
+- **Connection-level errors** are `{"type":"error","error":{code,retryable}}`
+  and are followed by close. Frames that fail strict decoding, an unknown
+  `type`, a second hello, or a call whose `callID` is not a canonical
+  lower-case UUID get `invalidRequest` (not retryable). The transport sends
+  `slowConsumer` and its client-limit `capacityExceeded` (both retryable). A
+  snapshot set over the paging limits on a subscription gets `capacityExceeded`
+  (not retryable). A `subscribe` already answered `runtimeUnavailable` at its
+  deadline whose registration then completes gets `runtimeUnavailable`
+  (retryable), so no stream follows that reply.
+- **Calls.** `params` is always an object, `{}` when empty, decoded strictly
+  per method. `requestID` is a canonical lower-case UUID, `issuedAt` is RFC 3339
+  ending in `Z`, and `expectedRevision` is an integer ≥ 0. Non-mutating methods
+  must not carry any of the three. Envelope faults in a parsed call (unknown
+  `method`, missing or unexpected envelope member, bad `params`) are reply
+  errors `invalidRequest` with `field` set to that member's name. A `portalID`
+  or `alertID` param that is not a canonical lower-case UUID is
+  `invalidRequest` with `field` `portalID` or `alertID`.
+- **Replies** are `{"type":"reply","callID",...}` with `"result":{...}`, or
+  `"error":{code,field?,portalID?,retryable}`, or `"uncertain":true` for
+  timed-out mutations only. Each call has a 10-second deadline. A mutation
+  past it gets `uncertain`: its outcome is unknown, its engine work continues,
+  and the client recovers it by `getRequestResult` with the same request ID.
+  A read past it gets `runtimeUnavailable` (retryable). A call over the
+  in-flight limits gets `capacityExceeded` (retryable). An internal failure
+  without a contract code is `runtimeUnavailable` (retryable) with no detail.
+- **Mutation params:**
+
+  | Method | Params |
+  | --- | --- |
+  | `createPortal` | `name`, `destination`, `publicAccess` |
+  | `setDesiredState` | `portalID`, `state` |
+  | `setDestination` | `portalID`, `destination` |
+  | `setLaunchAtLoginOffer` | `state` |
+  | `setOperationalLogging` | `logging` |
+  | `removePortal` | `portalID`, `confirmed` |
+  | `retryRemoval`, `resumeEnrolment` | `portalID` |
+  | `dismissAlert` | `alertID` |
+  | `resetTailnet` | `confirmed` |
+  | `retryRuntime` | none |
+
+  A destination is `{"kind":"localApp","port"}` or
+  `{"kind":"remoteApp","scheme","host","port"}`.
+- **Results.**
+  - A mutation's result is its receipt: `requestID`, `acceptedAt`,
+    `recoverUntil`, `acceptedRevision`, `operation`, optional `portalID`, and
+    `outcome`.
+  - `getRequestResult` takes `{requestID, issuedAt}` and returns
+    `{"receipt":{...}}` or `{"notAccepted":true}`. `resultExpired` and the
+    other refusals are reply errors.
+  - `discoverLocalApps` returns
+    `{"candidates":[{localAppPort, processLabel, suggestedPortalName?}]}`.
+  - `getDiagnostics` takes `{portalID?}` and returns `{"report":"..."}`.
+  - `getSnapshot` returns the snapshot as its result.
+  - `subscribe` returns `{}`, then streams `{"type":"snapshot","snapshot":{...}}`
+    frames. A connection has at most one subscription; a second `subscribe`
+    is `notAvailable`.
+- **Paging.** A snapshot frame or `getSnapshot` reply that exceeds the frame
+  limit is sent as one contiguous set:
+  - `{"type":"snapshotBegin","callID"?,"epoch","sequence","revision","pageCount"}`;
+  - then `{"type":"snapshotPage","callID"?,"pageIndex","snapshot"?,"portals":[...]}`
+    with `pageIndex` from 0, where only page 0 has `snapshot`, the
+    installation fields with `portals` empty;
+  - then `{"type":"snapshotEnd","callID"?,"sequence"}`.
+
+  `callID` appears only on a `getSnapshot` reply. Over 64 pages, or a Portal
+  that cannot fit a page, is `capacityExceeded` with nothing partial sent: a
+  reply error for `getSnapshot`, or the connection-level error for a
+  subscription.
+- **Enrolment events** go only to the connection that called `resumeEnrolment`:
+  `{"type":"enrolment","event":"authenticationURL"|"cancelled"|"failed","requestID","portalID","nonce","url"?}`,
+  with `url` only for `authenticationURL`. An event never precedes the reply
+  to the `resumeEnrolment` call that requested it, whether that reply is the
+  receipt, an error or `uncertain`.
+
 ## Durable acceptance, retry and observation
 
 Serialize mutations and runtime state projection through one service authority.
