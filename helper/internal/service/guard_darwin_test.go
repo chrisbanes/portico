@@ -326,6 +326,23 @@ func TestLegacyGuardCrashBoundaries(t *testing.T) {
 		})
 	}
 
+	t.Run("a record changed after its checkpoint is never overwritten", func(t *testing.T) {
+		dir := guardTemp(t)
+		guardedSource(t, dir)
+		if _, err := Open(dir, failAtNth(PhaseGuardInstall, 1)); !errors.Is(err, errInjected) {
+			t.Fatalf("Open() error = %v", err)
+		}
+		changed := []byte(`{"version":5,"portals":[],"alerts":[]}`)
+		write(t, filepath.Join(dir, "installation-v5.json"), changed, 0o600)
+		if _, err := Open(dir, guarded); !errors.Is(err, ErrMigrationFailed) {
+			t.Fatalf("Open() error = %v, want migrationFailed", err)
+		}
+		if data, _ := os.ReadFile(filepath.Join(dir, "installation-v5.json")); string(data) != string(changed) {
+			t.Fatalf("the changed record was replaced: %q", data)
+		}
+		assertNotFlagged(t, dir)
+	})
+
 	t.Run("an unguarded commit is refused once the guard is required", func(t *testing.T) {
 		dir := guardTemp(t)
 		guardedSource(t, dir)
